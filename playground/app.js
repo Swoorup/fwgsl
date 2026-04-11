@@ -3317,6 +3317,12 @@ function updateDiagnostics(diagnostics) {
         badge.className = 'badge';
         summary.textContent = 'No issues';
         applyDiagnosticDecorations([]);
+        if (window.monaco && editor) {
+            const model = editor.getModel();
+            if (model) {
+                monaco.editor.setModelMarkers(model, 'shadml', []);
+            }
+        }
         return;
     }
 
