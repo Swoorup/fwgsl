@@ -595,6 +595,9 @@ impl<'a> IndexBuilder<'a> {
             Decl::ImplDecl { ty, methods, .. } => {
                 self.walk_type(ty, frames);
                 for m in methods {
+                    if let Some(method_ty) = &m.ty {
+                        self.walk_type(method_ty, frames);
+                    }
                     self.walk_expr(&m.body, frames);
                 }
             }

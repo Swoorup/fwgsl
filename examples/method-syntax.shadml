@@ -2,6 +2,7 @@
 --
 -- Demonstrates `x.method y` as sugar for `method x y`,
 -- and how it integrates with the pipeline operator.
+-- Dot-call syntax works for in-scope functions; matching impl methods win.
 
 -- A trait for types that support clamping.
 trait Clampable a where
@@ -11,9 +12,9 @@ trait Clampable a where
 impl Clampable F32 where
   clampVal x lo hi = clamp x lo hi
 
--- A standalone helper (not in a trait) to demonstrate method sugar.
-half : F32 -> F32
-half x = x * 0.5
+impl F32 where
+  half : F32 -> F32
+  half x = x * 0.5
 
 double : F32 -> F32
 double x = x * 2.0

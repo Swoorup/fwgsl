@@ -1,0 +1,16 @@
+-- Comprehensive vector swizzle coverage.
+-- Demonstrates scalar, vec2, vec3, and vec4 swizzles using both xyzw and rgba names.
+
+main : Vec<4, F32> -> Vec<4, F32>
+main v =
+  let xy   = v.xy
+      rg   = v.rg
+      xyz  = v.xyz
+      rgb  = v.rgb
+      xyzw = v.xyzw
+      rgba = v.rgba
+      sx   = v.x + vecX rg + vecX xy + vecX xyzw
+      sy   = v.y + vecY xy + vecY rg + vecY rgba
+      sz   = v.z + vecZ xyz + vecZ rgb + vecZ rgba
+      sw   = v.w + v.a + vecW xyzw + rgba.a
+  in vec4 sx sy sz sw

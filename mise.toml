@@ -119,6 +119,10 @@ tree-sitter generate
 tree-sitter build
 """
 
+[tasks."grammar:parse-all"]
+description = "Parse all shadml files with the tree-sitter grammar"
+run = "./scripts/validate_treesitter_parse.sh"
+
 [tasks.helix]
 description = "Launch Helix editor with shadml support"
 depends = ["release", "grammar:build"]

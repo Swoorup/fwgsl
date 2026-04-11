@@ -193,11 +193,16 @@ impl SemanticAnalyzer {
 
                     if let Some(tname) = trait_name {
                         // Trait impl: look up trait method signature and substitute
-                        if let Some(trait_info) = self.traits.get(tname) {
-                            for (tmethod_name, tmethod_ty) in &trait_info.methods {
-                                if tmethod_name == &m.name {
+                        if let Some(trait_info) = self.traits.get(tname).cloned() {
+                            for (tmethod_name, tmethod_ty) in trait_info.methods {
+                                if tmethod_name == m.name {
                                     let concrete_ty =
-                                        replace_all_vars(tmethod_ty, &impl_ty_scheme.ty);
+                                        replace_all_vars(&tmethod_ty, &impl_ty_scheme.ty);
+                                    if let Some(method_ty) = &m.ty {
+                                        let declared_scheme = self.convert_syntax_type(method_ty);
+                                        let declared_ty = self.engine.instantiate(&declared_scheme);
+                                        self.engine.unify(&declared_ty, &concrete_ty, m.span);
+                                    }
                                     self.env.insert(mangled.clone(), Scheme::mono(concrete_ty));
                                 }
                             }
@@ -212,34 +217,13 @@ impl SemanticAnalyzer {
                             );
                         }
                     } else {
-                        // Standalone impl: build a partial function type from the impl type
-                        // and the number of parameters. First param gets the impl type;
-                        // the rest and the return type are fresh vars (quantified so they
-                        // get instantiated fresh in each call site's inference engine).
-                        let mut poly_vars = Vec::new();
-                        let ret_var = self.engine.fresh_var();
-                        if let Ty::Var(id) = ret_var {
-                            poly_vars.push(id);
-                        }
-                        let mut result_ty = ret_var;
-                        for i in (0..m.params.len()).rev() {
-                            let param_ty = if i == 0 {
-                                impl_ty_scheme.ty.clone()
-                            } else {
-                                let v = self.engine.fresh_var();
-                                if let Ty::Var(id) = v {
-                                    poly_vars.push(id);
-                                }
-                                v
-                            };
-                            result_ty = Ty::arrow(param_ty, result_ty);
-                        }
-                        self.env.insert(
-                            m.name.clone(),
-                            Scheme::poly(poly_vars.clone(), result_ty.clone()),
-                        );
-                        self.env
-                            .insert(mangled.clone(), Scheme::poly(poly_vars, result_ty));
+                        let scheme = if let Some(method_ty) = &m.ty {
+                            self.convert_syntax_type(method_ty)
+                        } else {
+                            self.standalone_impl_method_scheme(&impl_ty_scheme.ty, m.params.len())
+                        };
+                        self.env.insert(m.name.clone(), scheme.clone());
+                        self.env.insert(mangled.clone(), scheme);
                     }
                 }
                 self.impls.push(ImplInfo {
@@ -416,6 +400,28 @@ impl SemanticAnalyzer {
             Type::Unit(_) => Ty::unit(),
         };
         normalize_type_aliases(&ty)
+    }
+
+    fn standalone_impl_method_scheme(&mut self, impl_ty: &Ty, arity: usize) -> Scheme {
+        let mut poly_vars = Vec::new();
+        let ret_var = self.engine.fresh_var();
+        if let Ty::Var(id) = ret_var {
+            poly_vars.push(id);
+        }
+        let mut result_ty = ret_var;
+        for i in (0..arity).rev() {
+            let param_ty = if i == 0 {
+                impl_ty.clone()
+            } else {
+                let v = self.engine.fresh_var();
+                if let Ty::Var(id) = v {
+                    poly_vars.push(id);
+                }
+                v
+            };
+            result_ty = Ty::arrow(param_ty, result_ty);
+        }
+        Scheme::poly(poly_vars, result_ty)
     }
 
     fn new_type_var_scope(&mut self, names: &[String]) -> HashMap<String, TyVarId> {
@@ -773,12 +779,14 @@ impl SemanticAnalyzer {
                 }
 
                 // Method-call syntax sugar: `x.method` → `method x`
-                if let Some(scheme) = env.lookup(field) {
-                    let func_ty = self.engine.instantiate(scheme);
-                    let ret_ty = self.engine.fresh_var();
-                    let expected = Ty::arrow(base_ty, ret_ty.clone());
-                    self.engine.unify(&func_ty, &expected, *span);
-                    return ret_ty;
+                if let Some(name) = resolve_dot_call_target(env, &self.impls, field, &base_ty) {
+                    if let Some(scheme) = env.lookup(&name) {
+                        let func_ty = self.engine.instantiate(scheme);
+                        let ret_ty = self.engine.fresh_var();
+                        let expected = Ty::arrow(base_ty.clone(), ret_ty.clone());
+                        self.engine.unify(&func_ty, &expected, *span);
+                        return ret_ty;
+                    }
                 }
 
                 // Validate field exists on known types
@@ -804,22 +812,30 @@ impl SemanticAnalyzer {
                         }
                         self.engine.diagnostics.push(
                             Diagnostic::error(format!(
-                                "no field `{}` on type `{}`",
+                                "no method or field `{}` on type `{}`",
                                 field, type_name
                             ))
-                            .with_label(Label::primary(*span, "unknown field")),
+                            .with_label(Label::primary(*span, "unknown member")),
                         );
                     } else if is_known_bitfield {
                         let bf_fields = self.bitfield_field_names.get(type_name.as_str()).unwrap();
                         if !bf_fields.iter().any(|n| n == field) {
                             self.engine.diagnostics.push(
                                 Diagnostic::error(format!(
-                                    "no field `{}` on type `{}`",
+                                    "no method or field `{}` on type `{}`",
                                     field, type_name
                                 ))
-                                .with_label(Label::primary(*span, "unknown field")),
+                                .with_label(Label::primary(*span, "unknown member")),
                             );
                         }
+                    } else {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "no method or field `{}` on type `{}`",
+                                field, type_name
+                            ))
+                            .with_label(Label::primary(*span, "unknown member")),
+                        );
                     }
                 }
 
@@ -1035,6 +1051,28 @@ pub fn sanitise_operator_name(name: &str) -> String {
 pub fn mangle_instance_method(method_name: &str, type_suffix: &str) -> String {
     let sanitised = sanitise_operator_name(method_name);
     format!("{}_{}", sanitised, type_suffix)
+}
+
+fn resolve_impl_method_name(impls: &[ImplInfo], name: &str, receiver_ty: &Ty) -> Option<String> {
+    impls
+        .iter()
+        .filter(|inst| inst.ty == *receiver_ty)
+        .find_map(|inst| inst.methods.get(name).cloned())
+}
+
+/// Resolve the callable target for dot-call syntax.
+///
+/// Matching impl methods win when the receiver type is already concrete.
+/// Otherwise, any in-scope function remains callable with dot syntax so the
+/// WGSL-oriented prelude keeps working naturally.
+pub fn resolve_dot_call_target(
+    env: &TypeEnv,
+    impls: &[ImplInfo],
+    name: &str,
+    receiver_ty: &Ty,
+) -> Option<String> {
+    resolve_impl_method_name(impls, name, receiver_ty)
+        .or_else(|| env.lookup(name).map(|_| name.to_string()))
 }
 
 /// Replace all `Ty::Var(_)` occurrences in a type with a concrete type.
@@ -1352,6 +1390,73 @@ mod tests {
             &scheme.ty,
             Ty::Arrow(from, to) if from.as_ref() == to.as_ref()
         ));
+    }
+
+    #[test]
+    fn test_standalone_impl_method_signature_is_checked() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::ImplDecl {
+                trait_name: None,
+                ty: Type::Con("F32".into(), span()),
+                methods: vec![ImplMethod {
+                    name: "half".into(),
+                    ty: Some(Type::Arrow(
+                        Box::new(Type::Con("F32".into(), span())),
+                        Box::new(Type::Con("F32".into(), span())),
+                        span(),
+                    )),
+                    params: vec![Pat::Var("x".into(), span())],
+                    body: Expr::Lit(Lit::String("nope".into()), span()),
+                    span: span(),
+                }],
+                span: span(),
+                comments: vec![],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        assert!(
+            sa.has_errors(),
+            "standalone impl method bodies should be checked against impl-local signatures"
+        );
+    }
+
+    #[test]
+    fn test_dot_syntax_accepts_prelude_functions() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![
+                Decl::TypeSig {
+                    name: "apply".into(),
+                    ty: Type::Arrow(
+                        Box::new(Type::Con("F32".into(), span())),
+                        Box::new(Type::Con("F32".into(), span())),
+                        span(),
+                    ),
+                    span: span(),
+                    comments: vec![],
+                },
+                Decl::FunDecl {
+                    name: "apply".into(),
+                    params: vec![Pat::Var("x".into(), span())],
+                    body: Expr::FieldAccess(
+                        Box::new(Expr::Var("x".into(), span())),
+                        "sin".into(),
+                        span(),
+                    ),
+                    where_binds: vec![],
+                    span: span(),
+                    comments: vec![],
+                },
+            ],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        assert!(
+            !sa.has_errors(),
+            "dot syntax should continue to accept prelude functions"
+        );
     }
 
     #[test]

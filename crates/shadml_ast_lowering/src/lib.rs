@@ -387,18 +387,32 @@ impl AstLowering {
                         }
                     } else {
                         // Standalone impl: lower each method as a regular function
-                        // with the impl type as the first parameter type.
+                        // with either an explicit method signature or the impl
+                        // type as the first parameter type.
                         for m in methods {
                             let mangled =
                                 shadml_semantic::mangle_instance_method(&m.name, &type_suffix);
-                            if let Some(f) = self.lower_standalone_impl_method(
-                                &mangled,
-                                &m.params,
-                                &m.body,
-                                &impl_ty_scheme.ty,
-                                m.span,
-                                comments.clone(),
-                            ) {
+                            let lowered = if let Some(method_ty) = &m.ty {
+                                let concrete_ty = self.convert_syntax_type_scheme(method_ty).ty;
+                                self.lower_impl_method(
+                                    &mangled,
+                                    &m.params,
+                                    &m.body,
+                                    &concrete_ty,
+                                    m.span,
+                                    comments.clone(),
+                                )
+                            } else {
+                                self.lower_standalone_impl_method(
+                                    &mangled,
+                                    &m.params,
+                                    &m.body,
+                                    &impl_ty_scheme.ty,
+                                    m.span,
+                                    comments.clone(),
+                                )
+                            };
+                            if let Some(f) = lowered {
                                 // Register the inferred function type so subsequent
                                 // call sites (method-call syntax, pipelines) resolve
                                 // the correct return type.
@@ -1114,22 +1128,27 @@ impl AstLowering {
                 }
 
                 // 2. Method-call syntax sugar: `x.method` → `method x`
-                //    If the field name is a function in the env (not a struct field),
-                //    desugar to function application.
-                if let Some(scheme) = env.lookup(field) {
-                    let func_ty = self.engine.instantiate(scheme);
-                    let ret_ty = self.engine.fresh_var();
-                    let expected = Ty::arrow(expr_ty, ret_ty.clone());
-                    self.engine.unify(&func_ty, &expected, *span);
-                    return (
-                        HirExpr::App(
-                            Box::new(HirExpr::Var(field.clone(), func_ty, *span)),
-                            Box::new(hir_expr),
-                            ret_ty.clone(),
-                            *span,
-                        ),
-                        ret_ty,
-                    );
+                if let Some(name) = shadml_semantic::resolve_dot_call_target(
+                    env,
+                    &self.impls,
+                    field,
+                    &expr_ty_final,
+                ) {
+                    if let Some(scheme) = env.lookup(&name) {
+                        let func_ty = self.engine.instantiate(scheme);
+                        let ret_ty = self.engine.fresh_var();
+                        let expected = Ty::arrow(expr_ty, ret_ty.clone());
+                        self.engine.unify(&func_ty, &expected, *span);
+                        return (
+                            HirExpr::App(
+                                Box::new(HirExpr::Var(name, func_ty, *span)),
+                                Box::new(hir_expr),
+                                ret_ty.clone(),
+                                *span,
+                            ),
+                            ret_ty,
+                        );
+                    }
                 }
 
                 // 3. Regular field access (struct fields, bitfield fields)
@@ -1156,11 +1175,11 @@ impl AstLowering {
                             if is_known_record || is_known_bitfield {
                                 self.engine.diagnostics.push(
                                     shadml_diagnostics::Diagnostic::error(format!(
-                                        "no field `{}` on type `{}`",
+                                        "no method or field `{}` on type `{}`",
                                         field, type_name
                                     ))
                                     .with_label(
-                                        shadml_diagnostics::Label::primary(*span, "unknown field"),
+                                        shadml_diagnostics::Label::primary(*span, "unknown member"),
                                     ),
                                 );
                             }

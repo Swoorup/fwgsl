@@ -1822,6 +1822,7 @@ show c = match c
 mod full_pipeline_tests {
     use super::*;
 
+    const SWIZZLES_EXAMPLE: &str = include_str!("../../../examples/swizzles.shadml");
     const VEC_LITERALS_EXAMPLE: &str = include_str!("../../../examples/vec-literals.shadml");
 
     /// Full pipeline helper: source -> WGSL
@@ -2000,6 +2001,24 @@ mod full_pipeline_tests {
     }
 
     #[test]
+    fn test_full_pipeline_swizzles_example() {
+        let wgsl = compile_to_wgsl(SWIZZLES_EXAMPLE).expect("swizzles example should compile");
+        assert!(
+            wgsl.contains("fn main("),
+            "WGSL should contain main, got: {}",
+            wgsl
+        );
+        for swizzle in [".xy", ".rg", ".xyz", ".rgb", ".xyzw", ".rgba", ".a"] {
+            assert!(
+                wgsl.contains(swizzle),
+                "WGSL should contain swizzle {}, got: {}",
+                swizzle,
+                wgsl
+            );
+        }
+    }
+
+    #[test]
     fn test_full_pipeline_loop_expression() {
         // Named tail-recursive loop: counts i up to x, returns final i
         let source = "f : I32 -> I32\nf x = loop go (i = 0) in if i < x then go (i + 1) else i";
@@ -2156,16 +2175,53 @@ applyScale value factor = scale value factor
     #[test]
     fn method_call_syntax_sugar() {
         let source = r#"
-half : F32 -> F32
-half x = x * 0.5
+impl F32 where
+  half : F32 -> F32
+  half x = x * 0.5
 
 apply : F32 -> F32
 apply x = x.half
 "#;
         let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
         assert!(
-            wgsl.contains("half(x)"),
+            wgsl.contains("half_F32(x)"),
             "method-call sugar should desugar to function call, got: {}",
+            wgsl
+        );
+    }
+
+    #[test]
+    fn method_call_syntax_sugar_with_inferred_receiver_type() {
+        let source = r#"
+impl F32 where
+  half : F32 -> F32
+  half x = x * 0.5
+
+apply x = x.half
+"#;
+        let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
+        assert!(
+            wgsl.contains("half_F32(x)"),
+            "dot-call sugar should still infer the impl receiver type, got: {}",
+            wgsl
+        );
+        assert!(
+            !wgsl.contains(".half"),
+            "dot-call sugar should lower to a function call, got: {}",
+            wgsl
+        );
+    }
+
+    #[test]
+    fn method_call_syntax_sugar_for_prelude_functions() {
+        let source = r#"
+apply : F32 -> F32
+apply x = x.sin
+"#;
+        let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
+        assert!(
+            wgsl.contains("sin(x)"),
+            "prelude functions should remain callable via dot syntax, got: {}",
             wgsl
         );
     }
@@ -2182,7 +2238,7 @@ apply x = x.half
     fn method_syntax_example_compiles() {
         let source = include_str!("../../../examples/method-syntax.shadml");
         let wgsl = compile_to_wgsl(source).expect("method-syntax example should compile");
-        assert!(wgsl.contains("fn half("));
+        assert!(wgsl.contains("fn half_F32("));
         assert!(wgsl.contains("fn double("));
         assert!(wgsl.contains("fn clampVal_F32("));
     }

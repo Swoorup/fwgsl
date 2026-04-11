@@ -710,7 +710,7 @@ info.thickness
 
 Dot syntax for record field access. Also used for:
 - **Vec swizzle**: `v.xy`, `v.xyz`, `v.rgba`, `v.x`
-- **Method-call sugar**: `v.normalize` → `normalize v`
+- **Method-call sugar** for in-scope callables: `v.normalize` → `normalize v`
 
 ### 5.16 Vec Swizzle
 
@@ -734,7 +734,9 @@ x.method y      -- desugars to: method x y
 a.collapse      -- desugars to: collapse a
 ```
 
-Priority: **swizzle** > **method call** (if name is in scope) > **struct field access**.
+Any in-scope callable may be used with dot syntax. If a matching `impl` provides the method for the resolved receiver type, that impl method takes priority over a plain function with the same name.
+
+Priority: **swizzle** > **matching impl method** > **in-scope function call** > **struct field access**.
 
 ### 5.18 Index Access
 
@@ -990,6 +992,7 @@ trait Add a where
 
 ```
 impl TraitName ConcreteType where
+  methodName : ConcreteType -> ...
   methodName args = body
   ...
 ```
@@ -1007,6 +1010,7 @@ impl Add Fp64 where
 
 ```
 impl TypeName where
+  methodName : TypeName -> ...
   methodName args = body
 ```
 
@@ -1014,9 +1018,14 @@ Standalone `impl` blocks define methods on a type without a trait:
 
 ```
 impl Fp64 where
+  collapse : Fp64 -> F32
   collapse v = v.high + v.low
+
+  neg : Fp64 -> Fp64
   neg a = Fp64 (-a.high) (-a.low)
 ```
+
+Impl-local method type signatures are optional, but when present they are checked just like top-level signatures. For standalone `impl` blocks, the receiver remains the first argument.
 
 ### 9.4 Operator Overloading
 

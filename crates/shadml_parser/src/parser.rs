@@ -2,6 +2,8 @@
 //!
 //! Produces a simple AST. Expression parsing uses Pratt (precedence climbing).
 
+use std::collections::HashMap;
+
 use shadml_diagnostics::{Diagnostic, DiagnosticSink, Label};
 use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
@@ -288,6 +290,7 @@ pub struct TraitMethod {
 #[derive(Debug, Clone)]
 pub struct ImplMethod {
     pub name: String,
+    pub ty: Option<Type>,
     pub params: Vec<Pat>,
     pub body: Expr,
     pub span: Span,
@@ -2109,19 +2112,7 @@ impl Parser {
             }
 
             let mstart = self.current_span().start;
-            // Method name: either Ident or operator in parens e.g. (+)
-            let method_name = if self.at(SyntaxKind::LParen) {
-                self.bump(); // (
-                self.skip_trivia();
-                let op_tok = self.bump();
-                let op_name = self.text_of(&op_tok).to_owned();
-                self.skip_trivia();
-                self.expect(SyntaxKind::RParen);
-                op_name
-            } else {
-                let tok = self.expect(SyntaxKind::Ident);
-                self.text_of(&tok).to_owned()
-            };
+            let method_name = self.parse_method_name();
             self.skip_trivia();
             self.expect(SyntaxKind::Colon);
             self.skip_trivia();
@@ -2184,6 +2175,7 @@ impl Parser {
 
         // Parse method implementations
         let mut methods = Vec::new();
+        let mut method_sigs = HashMap::new();
         self.eat(SyntaxKind::LayoutBraceOpen);
         self.skip_trivia();
 
@@ -2195,20 +2187,17 @@ impl Parser {
             }
 
             let mstart = self.current_span().start;
-            // Method name: either Ident or operator in parens
-            let method_name = if self.at(SyntaxKind::LParen) {
+            let method_name = self.parse_method_name();
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::Colon) {
                 self.bump();
                 self.skip_trivia();
-                let op_tok = self.bump();
-                let op_name = self.text_of(&op_tok).to_owned();
-                self.skip_trivia();
-                self.expect(SyntaxKind::RParen);
-                op_name
-            } else {
-                let tok = self.expect(SyntaxKind::Ident);
-                self.text_of(&tok).to_owned()
-            };
-            self.skip_trivia();
+                let ty = self.parse_type();
+                method_sigs.insert(method_name, ty);
+                self.eat_layout_semi();
+                continue;
+            }
 
             // Parse params before `=`
             let mut params = Vec::new();
@@ -2227,8 +2216,10 @@ impl Parser {
             self.skip_trivia();
             let body = self.parse_expr();
             let mspan = self.span_from(mstart);
+            let method_ty = method_sigs.remove(&method_name);
             methods.push(ImplMethod {
                 name: method_name,
+                ty: method_ty,
                 params,
                 body,
                 span: mspan,
@@ -2237,6 +2228,16 @@ impl Parser {
         }
         self.eat_layout_close();
 
+        for (name, _) in method_sigs {
+            self.diagnostics.push(
+                Diagnostic::error(format!(
+                    "type signature for impl method '{}' has no definition",
+                    name
+                ))
+                .with_help("add a matching method definition in the same impl block"),
+            );
+        }
+
         let span = self.span_from(start);
         Decl::ImplDecl {
             trait_name,
@@ -2244,6 +2245,21 @@ impl Parser {
             methods,
             span,
             comments: vec![],
+        }
+    }
+
+    fn parse_method_name(&mut self) -> String {
+        if self.at(SyntaxKind::LParen) {
+            self.bump();
+            self.skip_trivia();
+            let op_tok = self.bump();
+            let op_name = self.text_of(&op_tok).to_owned();
+            self.skip_trivia();
+            self.expect(SyntaxKind::RParen);
+            op_name
+        } else {
+            let tok = self.expect(SyntaxKind::Ident);
+            self.text_of(&tok).to_owned()
         }
     }
 
@@ -4003,6 +4019,23 @@ main x =
                 );
             }
             other => panic!("expected TraitDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_standalone_impl_method_signature() {
+        let source = "impl F32 where\n  half : F32 -> F32\n  half x = x";
+        let prog = parse(source);
+        match &prog.decls[0] {
+            Decl::ImplDecl { methods, .. } => {
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "half");
+                assert!(
+                    methods[0].ty.is_some(),
+                    "expected impl-local type signature"
+                );
+            }
+            other => panic!("expected ImplDecl, got {:?}", other),
         }
     }
 }

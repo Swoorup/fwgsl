@@ -31,12 +31,13 @@ cargo run -p shadml_cli -- compile examples/conditional-compilation.shadml --fea
 | `adt-match.shadml` | ADT constructors and pattern matching | `compile` |
 | `compute-basic.shadml` | Basic `@compute` entry point | `compile` |
 | `vec-literals.shadml` | Vector literals and swizzles | `compile` |
+| `swizzles.shadml` | Comprehensive xyzw/rgba swizzle coverage | `compile` |
 | `generic-data.shadml` | Generic and phantom data declarations | `check` |
 | `dependent-types.shadml` | Type-level naturals in vector/matrix signatures | `check` |
 | `tensor-aliases.shadml` | `Tensor` / `Vector` / `Matrix` / `Scalar` aliases | `check` |
 | `option-result.shadml` | Builtin `Option` / `Result` constructors and matching | `check` |
 | `traits.shadml` | Trait declarations, impl blocks, operator overloading | `compile` |
-| `method-syntax.shadml` | Method-call syntax sugar (`x.method y`) | `compile` |
+| `method-syntax.shadml` | Method-call syntax sugar for in-scope callables, preferring impl methods (`x.method y`) | `compile` |
 | `bitfield.shadml` | Bitfield construction, field access, functional update | `compile` |
 | `typed-bitfield.shadml` | Bitfields with typed enum fields | `compile` |
 | `bitwise-ops.shadml` | Bitwise AND, XOR, shift, NOT operators | `compile` |
