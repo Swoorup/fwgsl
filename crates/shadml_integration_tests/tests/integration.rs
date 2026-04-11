@@ -555,7 +555,10 @@ mod lexer_tests {
     #[test]
     fn lex_all_fixture_files_without_error_tokens() {
         let fixtures = [
-            ("hello.shadml", include_str!("../../../fixtures/hello.shadml")),
+            (
+                "hello.shadml",
+                include_str!("../../../fixtures/hello.shadml"),
+            ),
             ("adt.shadml", include_str!("../../../fixtures/adt.shadml")),
             (
                 "particle.shadml",
@@ -718,7 +721,10 @@ mod lexer_tests {
     #[test]
     fn all_fixtures_lex_preserves_source() {
         let fixtures = [
-            ("hello.shadml", include_str!("../../../fixtures/hello.shadml")),
+            (
+                "hello.shadml",
+                include_str!("../../../fixtures/hello.shadml"),
+            ),
             ("adt.shadml", include_str!("../../../fixtures/adt.shadml")),
             (
                 "particle.shadml",
@@ -2948,8 +2954,10 @@ mod naga_validation {
 
     fn validate_wgsl(wgsl: &str) -> Result<(), String> {
         let module = naga::front::wgsl::parse_str(wgsl).map_err(|e| format!("naga parse: {e}"))?;
-        let mut validator =
-            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
         validator
             .validate(&module)
             .map_err(|e| format!("naga validate: {e}"))?;

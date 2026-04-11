@@ -1269,10 +1269,16 @@ fn build_document_symbols(source: &str) -> Vec<DocumentSymbol> {
                     .map(|f| DocumentSymbol {
                         name: f.name.clone(),
                         detail: Some(match &f.kind {
-                            shadml_parser::parser::BitfieldFieldKind::Bare(w) => format!("{} bits", w),
-                            shadml_parser::parser::BitfieldFieldKind::Typed { ty, width } => format!("{} : {}", ty, width),
+                            shadml_parser::parser::BitfieldFieldKind::Bare(w) => {
+                                format!("{} bits", w)
+                            }
+                            shadml_parser::parser::BitfieldFieldKind::Typed { ty, width } => {
+                                format!("{} : {}", ty, width)
+                            }
                             shadml_parser::parser::BitfieldFieldKind::Bool => "Bool".to_owned(),
-                            shadml_parser::parser::BitfieldFieldKind::EnumInferred(ty) => ty.clone(),
+                            shadml_parser::parser::BitfieldFieldKind::EnumInferred(ty) => {
+                                ty.clone()
+                            }
                         }),
                         kind: SymbolKind::FIELD,
                         tags: None,
@@ -2423,7 +2429,10 @@ mod tests {
                 Span::new(0, 3),
                 "expected I32",
             ))
-            .with_label(shadml_diagnostics::Label::new(Span::new(4, 7), "found Bool"))
+            .with_label(shadml_diagnostics::Label::new(
+                Span::new(4, 7),
+                "found Bool",
+            ))
             .with_help("add a conversion or change the annotation");
         let source = "foo bar";
         let uri = Url::parse("file:///test.shadml").unwrap();

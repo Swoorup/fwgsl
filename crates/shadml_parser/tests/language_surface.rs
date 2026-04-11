@@ -112,17 +112,37 @@ fn parse_binding_group_block() {
 ";
     let mut p = Parser::new(src);
     let program = p.parse_program();
-    assert_eq!(program.decls.len(), 2, "group block should produce 2 bindings");
+    assert_eq!(
+        program.decls.len(),
+        2,
+        "group block should produce 2 bindings"
+    );
 
-    let Decl::BindingDecl { name, address_space, group, binding, .. } = &program.decls[0]
-    else { panic!("binding 0") };
+    let Decl::BindingDecl {
+        name,
+        address_space,
+        group,
+        binding,
+        ..
+    } = &program.decls[0]
+    else {
+        panic!("binding 0")
+    };
     assert_eq!(name, "frame");
     assert_eq!(*address_space, BindingAddressSpace::Uniform);
     assert_eq!(*group, 0);
     assert_eq!(*binding, 0);
 
-    let Decl::BindingDecl { name, address_space, group, binding, .. } = &program.decls[1]
-    else { panic!("binding 1") };
+    let Decl::BindingDecl {
+        name,
+        address_space,
+        group,
+        binding,
+        ..
+    } = &program.decls[1]
+    else {
+        panic!("binding 1")
+    };
     assert_eq!(name, "output");
     assert_eq!(*address_space, BindingAddressSpace::StorageReadWrite);
     assert_eq!(*group, 0);
@@ -144,7 +164,11 @@ f x = x
     let mut prog_on = program.clone();
     evaluate_features(&mut prog_on, &features);
     assert_eq!(
-        prog_on.decls.iter().filter(|d| matches!(d, Decl::BindingDecl { .. })).count(),
+        prog_on
+            .decls
+            .iter()
+            .filter(|d| matches!(d, Decl::BindingDecl { .. }))
+            .count(),
         1,
         "binding should be present when debug is enabled"
     );
@@ -153,7 +177,11 @@ f x = x
     let features = FeatureSet::new();
     evaluate_features(&mut program, &features);
     assert_eq!(
-        program.decls.iter().filter(|d| matches!(d, Decl::BindingDecl { .. })).count(),
+        program
+            .decls
+            .iter()
+            .filter(|d| matches!(d, Decl::BindingDecl { .. }))
+            .count(),
         0,
         "binding should be absent when debug is disabled"
     );
@@ -175,14 +203,26 @@ f x = x
     let features = FeatureSet::from_flags(&["debug".to_string()]);
     let mut prog_on = program.clone();
     evaluate_features(&mut prog_on, &features);
-    let bindings: Vec<_> = prog_on.decls.iter().filter(|d| matches!(d, Decl::BindingDecl { .. })).collect();
-    assert_eq!(bindings.len(), 2, "group block should produce 2 bindings inside when block");
+    let bindings: Vec<_> = prog_on
+        .decls
+        .iter()
+        .filter(|d| matches!(d, Decl::BindingDecl { .. }))
+        .collect();
+    assert_eq!(
+        bindings.len(),
+        2,
+        "group block should produce 2 bindings inside when block"
+    );
 
     // Without debug: no bindings
     let features = FeatureSet::new();
     evaluate_features(&mut program, &features);
     assert_eq!(
-        program.decls.iter().filter(|d| matches!(d, Decl::BindingDecl { .. })).count(),
+        program
+            .decls
+            .iter()
+            .filter(|d| matches!(d, Decl::BindingDecl { .. }))
+            .count(),
         0,
         "bindings should be absent when debug is disabled"
     );

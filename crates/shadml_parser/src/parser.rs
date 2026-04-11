@@ -7,7 +7,7 @@ use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
 
 use crate::layout::resolve_layout;
-use crate::lexer::{lex, Token};
+use crate::lexer::{is_negative_literal_start, lex, Token};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AST types
@@ -565,7 +565,9 @@ impl Parser {
             self.diagnostics.push(
                 Diagnostic::error(format!("expected {}, found {}", kind, tok.kind))
                     .with_label(Label::primary(tok.span, format!("expected {}", kind)))
-                    .with_help("check for missing tokens, unmatched parentheses, or incorrect indentation"),
+                    .with_help(
+                        "check for missing tokens, unmatched parentheses, or incorrect indentation",
+                    ),
             );
             tok
         }
@@ -635,43 +637,7 @@ impl Parser {
     /// The heuristic: `-` must be glued to the digit (`-0.35`, not `- 0.35`)
     /// AND there must be whitespace before the `-` (so `x-0.5` stays as subtraction).
     fn is_negative_literal_ahead(&self) -> bool {
-        if self.peek() != SyntaxKind::Minus {
-            return false;
-        }
-        let minus_tok = self.current_token();
-        let minus_end = minus_tok.span.end;
-        let next = self.pos + 1;
-        if next >= self.tokens.len() {
-            return false;
-        }
-        let next_tok = &self.tokens[next];
-        // The `-` must be immediately adjacent to the digit (no whitespace)
-        if next_tok.span.start != minus_end {
-            return false;
-        }
-        if !matches!(
-            next_tok.kind,
-            SyntaxKind::IntLiteral | SyntaxKind::FloatLiteral
-        ) {
-            return false;
-        }
-        // There must be whitespace before the `-` so it's not glued to the
-        // preceding expression like `x-0.5`. Check the previous non-trivia
-        // token's span end vs the minus span start.
-        if self.pos == 0 {
-            return true;
-        }
-        // Walk backwards to find the previous non-trivia token
-        let mut i = self.pos;
-        while i > 0 {
-            i -= 1;
-            if !self.tokens[i].kind.is_trivia() {
-                // Found previous non-trivia token: must NOT be adjacent to minus
-                return self.tokens[i].span.end != minus_tok.span.start;
-            }
-        }
-        // No non-trivia token before: start of file
-        true
+        is_negative_literal_start(&self.tokens, self.pos)
     }
 
     /// Compute the 0-based column for a byte offset in the source.
@@ -1970,11 +1936,9 @@ impl Parser {
         let attr = self.text_of(&attr_tok).to_owned();
         if attr != expected {
             self.diagnostics.push(
-                Diagnostic::error(format!("expected '{}', found '{}'", expected, attr))
-                    .with_label(Label::primary(
-                        attr_tok.span,
-                        format!("expected '{}'", expected),
-                    )),
+                Diagnostic::error(format!("expected '{}', found '{}'", expected, attr)).with_label(
+                    Label::primary(attr_tok.span, format!("expected '{}'", expected)),
+                ),
             );
         }
         self.skip_trivia();
@@ -2033,9 +1997,7 @@ impl Parser {
             let kind = if self.at(SyntaxKind::IntLiteral) {
                 // Bare integer width
                 let width_tok = self.bump();
-                BitfieldFieldKind::Bare(
-                    parse_int_literal(self.text_of(&width_tok)).max(0) as u32,
-                )
+                BitfieldFieldKind::Bare(parse_int_literal(self.text_of(&width_tok)).max(0) as u32)
             } else if self.at(SyntaxKind::UpperIdent) {
                 let type_tok = self.bump();
                 let type_name = self.text_of(&type_tok).to_owned();
@@ -2048,8 +2010,7 @@ impl Parser {
                     self.bump(); // consume ':'
                     self.skip_trivia();
                     let width_tok = self.expect(SyntaxKind::IntLiteral);
-                    let width =
-                        parse_int_literal(self.text_of(&width_tok)).max(0) as u32;
+                    let width = parse_int_literal(self.text_of(&width_tok)).max(0) as u32;
                     BitfieldFieldKind::Typed {
                         ty: type_name,
                         width,
@@ -2061,9 +2022,7 @@ impl Parser {
             } else {
                 // Fallback: expect an int literal (will error)
                 let width_tok = self.expect(SyntaxKind::IntLiteral);
-                BitfieldFieldKind::Bare(
-                    parse_int_literal(self.text_of(&width_tok)).max(0) as u32,
-                )
+                BitfieldFieldKind::Bare(parse_int_literal(self.text_of(&width_tok)).max(0) as u32)
             };
             let field_span = self.span_from(field_start);
             fields.push(BitfieldField {

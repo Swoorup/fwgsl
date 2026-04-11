@@ -6,6 +6,10 @@ pub use catalog::{
     all_completion_specs, completion_item_from_spec, lookup_completion_spec, spec_matches_context,
     CompletionContext, CompletionSpec,
 };
+use lsp_types::{
+    CompletionItem, CompletionItemKind, Documentation, GotoDefinitionResponse, Hover,
+    HoverContents, Location, MarkupContent, MarkupKind, Position, Range, Url,
+};
 use shadml_parser::lexer::Token;
 use shadml_parser::parser::{Attribute, ConFields, Decl, DoStmt, Expr, Pat, Program, Type};
 use shadml_parser::{lex, Parser};
@@ -13,10 +17,6 @@ use shadml_semantic::SemanticAnalyzer;
 use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
 use shadml_typechecker::{InferEngine, Scheme};
-use lsp_types::{
-    CompletionItem, CompletionItemKind, Documentation, GotoDefinitionResponse, Hover,
-    HoverContents, Location, MarkupContent, MarkupKind, Position, Range, Url,
-};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Namespace {
@@ -569,9 +569,7 @@ impl<'a> IndexBuilder<'a> {
                 self.walk_type(base_ty, frames);
                 // Register each bitfield field as a symbol for hover/goto-def
                 for f in fields {
-                    let field_span = self
-                        .first_name_span(&f.name, *span)
-                        .unwrap_or(f.span);
+                    let field_span = self.first_name_span(&f.name, *span).unwrap_or(f.span);
                     let fid = self.index.push_symbol(NewSymbol {
                         name: f.name.clone(),
                         namespace: Namespace::Value,

@@ -786,9 +786,7 @@ impl SemanticAnalyzer {
                     let is_known_record = self
                         .constructors
                         .get(type_name.as_str())
-                        .is_some_and(|c| {
-                            matches!(&c.fields, ConstructorFields::Record(_))
-                        });
+                        .is_some_and(|c| matches!(&c.fields, ConstructorFields::Record(_)));
                     let is_known_bitfield =
                         self.bitfield_field_names.contains_key(type_name.as_str());
 
@@ -812,10 +810,7 @@ impl SemanticAnalyzer {
                             .with_label(Label::primary(*span, "unknown field")),
                         );
                     } else if is_known_bitfield {
-                        let bf_fields = self
-                            .bitfield_field_names
-                            .get(type_name.as_str())
-                            .unwrap();
+                        let bf_fields = self.bitfield_field_names.get(type_name.as_str()).unwrap();
                         if !bf_fields.iter().any(|n| n == field) {
                             self.engine.diagnostics.push(
                                 Diagnostic::error(format!(
@@ -1139,7 +1134,6 @@ pub fn extract_vec_type(ty: &Ty) -> Option<(u8, Ty)> {
     }
     None
 }
-
 
 /// Flatten tuple arrows: `(A, B) -> R` becomes `A -> B -> R`.
 /// This allows tuple-parameter function signatures to be stored

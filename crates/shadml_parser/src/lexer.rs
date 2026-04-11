@@ -34,6 +34,47 @@ pub fn lex(source: &str) -> Vec<Token> {
     lexer.tokens
 }
 
+/// Return whether `tokens[minus_idx]` starts a compact negative numeric literal
+/// such as `-0.35` or `-42`.
+///
+/// This intentionally preserves the language distinction between:
+/// - `x-1`   => subtraction
+/// - `x -1`  => application to a negative literal
+///
+/// The `-` must be immediately adjacent to the numeric token on its right, and
+/// it must not be immediately adjacent to the previous non-trivia token on its
+/// left.
+pub fn is_negative_literal_start(tokens: &[Token], minus_idx: usize) -> bool {
+    let Some(minus_tok) = tokens.get(minus_idx) else {
+        return false;
+    };
+    if minus_tok.kind != SyntaxKind::Minus {
+        return false;
+    }
+
+    let Some(next_tok) = tokens.get(minus_idx + 1) else {
+        return false;
+    };
+    if minus_tok.span.end != next_tok.span.start {
+        return false;
+    }
+    if !matches!(
+        next_tok.kind,
+        SyntaxKind::IntLiteral | SyntaxKind::FloatLiteral
+    ) {
+        return false;
+    }
+
+    for prev_tok in tokens[..minus_idx].iter().rev() {
+        if prev_tok.kind.is_trivia() {
+            continue;
+        }
+        return prev_tok.span.end != minus_tok.span.start;
+    }
+
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Internal lexer state
 // ---------------------------------------------------------------------------
@@ -900,5 +941,25 @@ mod tests {
                 SyntaxKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn detects_negative_literal_start() {
+        let tokens = lex("f = vec2 -0.5");
+        let minus_idx = tokens
+            .iter()
+            .position(|tok| tok.kind == SyntaxKind::Minus)
+            .expect("minus token");
+        assert!(is_negative_literal_start(&tokens, minus_idx));
+    }
+
+    #[test]
+    fn rejects_subtraction_as_negative_literal_start() {
+        let tokens = lex("f = x-1");
+        let minus_idx = tokens
+            .iter()
+            .position(|tok| tok.kind == SyntaxKind::Minus)
+            .expect("minus token");
+        assert!(!is_negative_literal_start(&tokens, minus_idx));
     }
 }

@@ -5,7 +5,7 @@
 //! canonical whitespace and indentation.
 
 use shadml_parser::lex;
-use shadml_parser::lexer::Token;
+use shadml_parser::lexer::{is_negative_literal_start, Token};
 use shadml_syntax::SyntaxKind;
 
 /// Formatting configuration.
@@ -327,6 +327,14 @@ impl<'a> FormatEngine<'a> {
             return;
         }
 
+        // Keep negative literals as single "words" when there's a space before `-` but no space after it.
+        // e.g., `vec2 -0.5` instead of `vec2 - 0.5`.
+        if let Some(prev_idx) = self.last_non_trivia_token_index() {
+            if is_negative_literal_start(self.tokens, prev_idx) {
+                return;
+            }
+        }
+
         // No space between two adjacent `>` tokens that form `>>` (shift right).
         // The lexer emits two separate `Greater` tokens; we detect adjacency
         // via source byte offsets.
@@ -361,8 +369,7 @@ impl<'a> FormatEngine<'a> {
                     SyntaxKind::Colon | SyntaxKind::Arrow | SyntaxKind::At => true,
                     // Ident after `)` — preserve attribute-to-field-name padding in records
                     SyntaxKind::Ident | SyntaxKind::UpperIdent
-                        if prev == Some(SyntaxKind::RParen)
-                            && self.line_has_attribute() =>
+                        if prev == Some(SyntaxKind::RParen) && self.line_has_attribute() =>
                     {
                         true
                     }
@@ -445,29 +452,22 @@ impl<'a> FormatEngine<'a> {
     /// Check whether the previous non-trivia token and `next` are adjacent in source
     /// (no whitespace between them). Used to detect `>>` as two glued `>` tokens.
     fn are_prev_and_current_adjacent(&self, next: &Token) -> bool {
-        for i in (0..self.pos).rev() {
-            let k = self.tokens[i].kind;
-            if k.is_trivia() {
-                continue;
-            }
-            return self.tokens[i].span.end == next.span.start;
-        }
-        false
+        self.last_non_trivia_token_index()
+            .is_some_and(|idx| self.tokens[idx].span.end == next.span.start)
     }
 
-    /// Look back at the last non-whitespace character to determine the previous token kind.
-    fn last_emitted_kind(&self) -> Option<SyntaxKind> {
-        // Walk backwards from the current position to find the last emitted real token.
+    fn last_non_trivia_token_index(&self) -> Option<usize> {
         if self.pos == 0 {
             return None;
         }
-        for i in (0..self.pos).rev() {
-            let k = self.tokens[i].kind;
-            if !k.is_trivia() {
-                return Some(k);
-            }
-        }
-        None
+        (0..self.pos)
+            .rev()
+            .find(|&i| !self.tokens[i].kind.is_trivia())
+    }
+
+    fn last_emitted_kind(&self) -> Option<SyntaxKind> {
+        self.last_non_trivia_token_index()
+            .map(|idx| self.tokens[idx].kind)
     }
 
     /// Check if the current output line contains an `@` (attribute context).
@@ -738,8 +738,11 @@ fn collapse_binding_group_blocks(output: &mut String, config: &FormatConfig) {
             }
 
             if children.len() > 1 {
-                let child_indent_str =
-                    format!("{}{}", " ".repeat(header_indent), " ".repeat(config.indent_width));
+                let child_indent_str = format!(
+                    "{}{}",
+                    " ".repeat(header_indent),
+                    " ".repeat(config.indent_width)
+                );
 
                 let mut binding_parts: Vec<(&str, &str, &str)> = Vec::new();
                 for &(_, rest) in &children {
@@ -776,8 +779,16 @@ fn emit_aligned_bindings(
     child_indent: &str,
     result: &mut Vec<String>,
 ) {
-    let max_prefix = binding_parts.iter().map(|(b, _, _)| b.len()).max().unwrap_or(0);
-    let max_name = binding_parts.iter().map(|(_, n, _)| n.len()).max().unwrap_or(0);
+    let max_prefix = binding_parts
+        .iter()
+        .map(|(b, _, _)| b.len())
+        .max()
+        .unwrap_or(0);
+    let max_name = binding_parts
+        .iter()
+        .map(|(_, n, _)| n.len())
+        .max()
+        .unwrap_or(0);
 
     for (before, name, after) in binding_parts {
         if name.is_empty() {
@@ -804,7 +815,10 @@ fn emit_aligned_bindings(
 /// Returns `(indent_len, group_value_str)`.
 fn parse_group_header_line(line: &str) -> Option<(usize, &str)> {
     let bytes = line.as_bytes();
-    let indent = bytes.iter().take_while(|&&b| b == b' ' || b == b'\t').count();
+    let indent = bytes
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
     let trimmed = line[indent..].trim_end();
 
     if !trimmed.starts_with("@group(") {
@@ -825,7 +839,10 @@ fn parse_group_header_line(line: &str) -> Option<(usize, &str)> {
 /// Returns `(indent_len, rest_from_at_binding)`.
 fn parse_child_binding_line(line: &str) -> Option<(usize, &str)> {
     let bytes = line.as_bytes();
-    let indent = bytes.iter().take_while(|&&b| b == b' ' || b == b'\t').count();
+    let indent = bytes
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
     if indent == 0 {
         return None;
     }
@@ -849,7 +866,10 @@ fn parse_child_binding_line(line: &str) -> Option<(usize, &str)> {
 /// Matches: `<indent>@group(N) @binding(N) uniform/storage ...`
 fn parse_binding_line(line: &str) -> Option<(usize, &str, &str)> {
     let bytes = line.as_bytes();
-    let indent = bytes.iter().take_while(|&&b| b == b' ' || b == b'\t').count();
+    let indent = bytes
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
     let trimmed = &line[indent..];
 
     // Must start with @group(
@@ -1178,7 +1198,10 @@ mod tests {
     fn format_preserves_const_colon_alignment() {
         let source = "const FOO      : I32 = 1\nconst BAR_LONG : I32 = 2\n";
         let result = format_default(source);
-        assert_eq!(result, "const FOO      : I32 = 1\nconst BAR_LONG : I32 = 2\n");
+        assert_eq!(
+            result,
+            "const FOO      : I32 = 1\nconst BAR_LONG : I32 = 2\n"
+        );
     }
 
     #[test]
@@ -1289,5 +1312,19 @@ mod tests {
         let source = "f v o m = (v >> o) & m\n";
         let result = format_default(source);
         assert_eq!(result, "f v o m = (v >> o) & m\n");
+    }
+}
+
+#[cfg(test)]
+mod negative_literal_tests {
+    use super::*;
+
+    #[test]
+    fn format_subtraction_vs_application() {
+        assert_eq!(format_default("f = x-1\n"), "f = x - 1\n");
+        assert_eq!(format_default("f = x - 1\n"), "f = x - 1\n");
+        assert_eq!(format_default("f = x- 1\n"), "f = x - 1\n");
+        assert_eq!(format_default("f = x -1\n"), "f = x -1\n"); // Application
+        assert_eq!(format_default("f = vec2 -0.5\n"), "f = vec2 -0.5\n");
     }
 }
