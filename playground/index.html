@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
 </head>
 <body>
     <header class="toolbar">
@@ -34,7 +34,7 @@
                     <div class="preset-selector-label">Preset</div>
                     <div id="preset-inline" class="preset-inline"></div>
                     <button id="preset-trigger" class="preset-trigger" type="button" aria-haspopup="dialog" aria-expanded="false">
-                        <span id="preset-trigger-label" class="preset-trigger-label">All Presets</span>
+                        <span id="preset-trigger-label" class="preset-trigger-label">Showcase Library</span>
                         <span class="preset-trigger-copy">
                             <span class="preset-kicker">Preset</span>
                             <span class="preset-title" id="preset-title">Shadorial 14 · Water</span>
@@ -67,86 +67,136 @@
             <button id="btn-settings" class="btn btn-icon" title="Settings">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
             </button>
-            <a href="https://github.com/ubugeeei/shadml" class="btn btn-icon" target="_blank" title="GitHub">
+            <a href="https://github.com/Swoorup/shadml" class="btn btn-icon" target="_blank" title="GitHub">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
             </a>
         </div>
     </header>
 
-    <main class="workspace">
-        <div class="panel panel-editor" id="panel-editor">
-            <div class="panel-header">
-                <div class="panel-tab active">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-                    <span>main.shadml</span>
+    <main class="playground-stage">
+        <section class="showcase-band" aria-label="Current showcase">
+            <div class="showcase-orb showcase-orb-a" aria-hidden="true"></div>
+            <div class="showcase-orb showcase-orb-b" aria-hidden="true"></div>
+            <div class="showcase-copy">
+                <div class="showcase-kicker" id="showcase-kicker">Live Showcase</div>
+                <h2 class="showcase-title" id="showcase-title">Shadorial 14 · Water</h2>
+                <p class="showcase-description" id="showcase-description">A cinematic shader preset used to preview the language through live WebGPU output.</p>
+                <div class="showcase-actions">
+                    <button id="btn-open-library" class="btn btn-secondary" type="button">Browse Showcases</button>
+                    <div class="showcase-path" id="showcase-path">../examples/shadorial/14-fluid-water.shadml</div>
                 </div>
-                <div class="panel-status" id="editor-status">ready</div>
             </div>
-            <div id="editor-container"></div>
-        </div>
-
-        <div class="gutter gutter-h" id="gutter-h"></div>
-
-        <div class="panel-right">
-            <div class="panel panel-output" id="panel-output">
-                <div class="panel-header">
-                    <div class="output-tabs">
-                        <button class="panel-tab active" data-tab="wgsl">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-                            <span>WGSL Output</span>
-                        </button>
-                        <button class="panel-tab" data-tab="preview">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                            <span>WebGPU Preview</span>
-                        </button>
-                        <button class="panel-tab" data-tab="ast">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><line x1="12" y1="7" x2="6" y2="17"/><line x1="12" y1="7" x2="18" y2="17"/></svg>
-                            <span>AST</span>
-                        </button>
-                    </div>
-                    <div class="panel-status" id="output-status"></div>
+            <aside class="showcase-inspector">
+                <div class="showcase-panel">
+                    <div class="showcase-panel-label">Feature Inspector</div>
+                    <div class="showcase-chip-list" id="showcase-chip-list"></div>
+                    <dl class="showcase-facts">
+                        <div class="showcase-fact">
+                            <dt>Preview</dt>
+                            <dd id="showcase-preview">Render preview</dd>
+                        </div>
+                        <div class="showcase-fact">
+                            <dt>Contract</dt>
+                            <dd id="showcase-contract">`shade` function</dd>
+                        </div>
+                        <div class="showcase-fact">
+                            <dt>Focus</dt>
+                            <dd id="showcase-story">Visual shader preset</dd>
+                        </div>
+                    </dl>
                 </div>
-                <div class="output-content">
-                    <div id="tab-wgsl" class="tab-pane active">
-                        <div id="wgsl-output"></div>
+            </aside>
+        </section>
+
+        <div class="workspace">
+            <div class="panel panel-editor" id="panel-editor">
+                <div class="panel-header">
+                    <div class="panel-tab active">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                        <span>main.shadml</span>
                     </div>
-                    <div id="tab-preview" class="tab-pane">
-                        <div id="preview-stage" class="preview-stage">
-                            <canvas id="compute-canvas" class="preview-canvas"></canvas>
-                            <canvas id="render-canvas" class="preview-canvas"></canvas>
-                            <div id="preview-overlay" class="preview-overlay">
-                                <div class="preview-placeholder">
-                                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                                    <p>Compile a compute shader, `shade` function, or `graph` function to preview</p>
+                    <div class="panel-status" id="editor-status">ready</div>
+                </div>
+                <div id="editor-container"></div>
+            </div>
+
+            <div class="gutter gutter-h" id="gutter-h"></div>
+
+            <div class="panel-right">
+                <div class="panel panel-output" id="panel-output">
+                    <div class="panel-header">
+                        <div class="output-tabs">
+                            <button class="panel-tab active" data-tab="wgsl">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                                <span>WGSL Output</span>
+                            </button>
+                            <button class="panel-tab" data-tab="preview">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                                <span>WebGPU Preview</span>
+                            </button>
+                            <button class="panel-tab" data-tab="ast">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><line x1="12" y1="7" x2="6" y2="17"/><line x1="12" y1="7" x2="18" y2="17"/></svg>
+                                <span>AST</span>
+                            </button>
+                        </div>
+                        <div class="panel-status" id="output-status"></div>
+                    </div>
+                    <div class="output-content">
+                        <div id="tab-wgsl" class="tab-pane active">
+                            <div id="wgsl-output"></div>
+                        </div>
+                        <div id="tab-preview" class="tab-pane">
+                            <div id="preview-stage" class="preview-stage">
+                                <div class="preview-toolbar" id="preview-toolbar">
+                                    <div class="preview-toolbar-meta">
+                                        <span class="preview-mode-chip" id="preview-mode-chip">Render preview</span>
+                                        <span class="preview-mode-chip preview-mode-chip-secondary" id="preview-motion-chip">Animated</span>
+                                    </div>
+                                    <div class="preview-toolbar-controls">
+                                        <button id="btn-preview-play" class="preview-control-btn" type="button">Pause</button>
+                                        <button id="btn-preview-reset" class="preview-control-btn" type="button">Reset</button>
+                                        <label class="preview-time-control" for="preview-time">
+                                            <span>Time</span>
+                                            <input id="preview-time" type="range" min="0" max="20" step="0.01" value="0">
+                                        </label>
+                                    </div>
+                                </div>
+                                <canvas id="compute-canvas" class="preview-canvas"></canvas>
+                                <canvas id="render-canvas" class="preview-canvas"></canvas>
+                                <div id="preview-overlay" class="preview-overlay">
+                                    <div class="preview-placeholder">
+                                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                                        <p>Compile a compute shader, `shade` function, or `graph` function to preview</p>
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                    </div>
-                    <div id="tab-ast" class="tab-pane">
-                        <pre id="ast-output" class="ast-output"></pre>
-                    </div>
-                </div>
-            </div>
-
-            <div class="gutter gutter-v" id="gutter-v"></div>
-
-            <div class="panel panel-diagnostics" id="panel-diagnostics">
-                <div class="panel-header">
-                    <div class="panel-tab active">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                        <span>Diagnostics</span>
-                        <span class="badge" id="diag-count">0</span>
-                    </div>
-                    <div class="panel-actions">
-                        <div class="diagnostic-summary" id="diag-summary"></div>
-                        <button class="btn btn-icon btn-xs" id="btn-clear-diag" title="Clear">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                        </button>
+                        <div id="tab-ast" class="tab-pane">
+                            <pre id="ast-output" class="ast-output"></pre>
+                        </div>
                     </div>
                 </div>
-                <div id="diagnostics-list" class="diagnostics-list">
-                    <div class="diagnostics-empty">
-                        <span>No diagnostics</span>
+
+                <div class="gutter gutter-v" id="gutter-v"></div>
+
+                <div class="panel panel-diagnostics" id="panel-diagnostics">
+                    <div class="panel-header">
+                        <div class="panel-tab active">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                            <span>Diagnostics</span>
+                            <span class="badge" id="diag-count">0</span>
+                        </div>
+                        <div class="panel-actions">
+                            <div class="diagnostic-summary" id="diag-summary"></div>
+                            <button class="btn btn-icon btn-xs" id="btn-clear-diag" title="Clear">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="diagnostics-list" class="diagnostics-list">
+                        <div class="diagnostics-empty">
+                            <span>No diagnostics</span>
+                        </div>
                     </div>
                 </div>
             </div>

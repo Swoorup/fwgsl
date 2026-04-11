@@ -157,7 +157,7 @@ firstSetBit x = loop go (bits = x) (pos = 0) in
     bitfields: `-- Bitfields: Packed Flag Words
 -- Pack multiple flags into a single U32 with named access
 
-bitfield RenderFlags : U32 = {
+bitfield RenderFlags : U32 = RenderFlags {
   visible    : 1,
   castShadow : 1,
   wireframe  : 1,
@@ -209,6 +209,124 @@ phong normal lightDir viewDir = ambient + diffuse + specular
     reflDir  = reflect (negate lightDir) normal
     spec     = pow (max (dot viewDir reflDir) 0.0) 32.0
     specular = splat3 (spec * 0.5)`,
+
+    surface_upgrade: `alias Float2 = Vec<2, F32>
+data Velocity = Velocity Vec<3, F32>
+
+data ShapeParams = ShapeParams {
+  scale  : F32,
+  offset : Vec<2, F32>,
+  color  : Vec<4, F32>,
+}
+
+data Shape
+  = Circle F32
+  | Rect (Vec<2, F32>)
+
+@group(0)
+  @binding(0) storage(read_write) output : Array<F32, 1024>
+  @binding(1) uniform             params : ShapeParams
+
+scaleBy : F32 -> F32 -> F32
+scaleBy factor x = x * factor
+
+data ComputeInput = ComputeInput {
+  @builtin(global_invocation_id) gid : Vec<3, U32>
+}
+
+main : ComputeInput -> ()
+@compute @workgroup_size(64, 1, 1)
+main input =
+  let idx = toI32 input.gid.x
+      p = load params
+      v = idx |> toF32 |> scaleBy p.scale
+  in writeAt output idx v`,
+
+    enlightenment_stars: `-- Creative surface-syntax showcase:
+-- lines, stars, and a sudden "enlightenment" pulse over time.
+
+alias Float2 = Vec<2, F32>
+alias Color4 = Vec<4, F32>
+
+data Phase = Phase F32
+
+data FrameParams = FrameParams {
+  time       : F32,
+  resolution : Vec<2, F32>,
+  tint       : Vec<4, F32>,
+  basis      : Mat<3, 3, F32>,
+}
+
+data Motif
+  = Line F32
+  | Star F32
+  | Enlightenment F32
+
+@group(0)
+  @binding(0) uniform             frame  : FrameParams
+  @binding(1) storage(read_write) output : Array<Color4, 1024>
+
+-- Canonical pipeline-friendly helper
+normalizeTime : F32 -> F32
+normalizeTime t = fract (t * 0.15)
+
+lineMask : Float2 -> F32 -> F32
+lineMask uv thickness =
+  1.0 - smoothstep 0.0 thickness (abs (vecY uv))
+
+starMask : Float2 -> F32 -> F32
+starMask uv radius =
+  let a = atan2 uv.y uv.x
+      r = length uv
+      spokes = abs (sin (a * 5.0))
+  in 1.0 - smoothstep (radius * spokes) (radius * spokes + 0.01) r
+
+motifMask : Motif -> Float2 -> F32 -> F32
+motifMask motif uv t =
+  match motif
+    | Line w -> lineMask uv (w + 0.01 * sin (t * 3.0))
+    | Star r -> starMask uv (r + 0.02 * sin (t * 5.0))
+    | Enlightenment k ->
+        let glow = 0.5 + 0.5 * sin (t * 8.0)
+        in starMask uv (k * glow)
+
+palette : F32 -> Color4 -> Color4
+    palette x tint =
+  let base = vec3 (0.1 + x) (0.2 + x * 0.7) (0.5 + x * 0.4)
+  in vec4 ((vecX base) * tint.r) ((vecY base) * tint.g) ((vecZ base) * tint.b) tint.a
+
+previewUv : I32 -> Float2
+previewUv idx =
+  let grid = 32
+      row = idx / grid
+      col = idx - row * grid
+      uv01 = vec2 (toF32 col / 31.0) (toF32 row / 31.0)
+  in uv01 * splat2 2.0 - vec2 1.0 1.0
+
+data ComputeInput = ComputeInput {
+  @builtin(global_invocation_id) gid : Vec<3, U32>
+}
+
+main : ComputeInput -> ()
+@compute @workgroup_size(64, 1, 1)
+main input =
+  let idx = toI32 input.gid.x
+      p = load frame
+      t = p.time |> normalizeTime
+      scale = p.basis[0][0]
+      uv = previewUv idx
+      aspect = p.resolution.x / p.resolution.y
+      uv' = vec2 (uv.x * aspect) uv.y
+      orbitA = uv' - vec2 (0.38 * cos (t * 6.28318 + scale)) (0.24 * sin (t * 6.28318))
+      orbitB = uv' - vec2 (-0.32 * cos (t * 4.2)) (0.28 * sin (t * 5.1 + scale))
+      rays = motifMask (Line 0.025) (vec2 uv'.y uv'.x) (t + 0.4)
+      stars = motifMask (Star 0.24) orbitA t
+      stars' = motifMask (Star 0.18) orbitB (t + 0.3)
+      flash = motifMask (Enlightenment 0.52) uv' (t + scale)
+      halo = 0.08 / (length uv' + 0.18)
+      energy = rays * 0.25 + stars * 0.85 + stars' * 0.65 + flash * 1.3 + halo
+      color = palette energy p.tint
+  in writeAt output idx color`,
 };
 
 const AUTO_COMPILE_DELAY_MS = 250;
@@ -216,13 +334,191 @@ const DEFAULT_EXAMPLE_KEY = 'shadorial-14';
 const PLAYGROUND_URI = 'inmemory://shadml/playground.shadml';
 const WGSL_OUTPUT_URI = 'inmemory://shadml/output.wgsl';
 const FEATURED_PRESETS = [
+    { key: 'surface_upgrade', shortLabel: 'Surface' },
+    { key: 'enlightenment_stars', shortLabel: 'Stars' },
     { key: 'shadorial-14', shortLabel: 'Water' },
     { key: 'shadorial-15', shortLabel: 'Smoke' },
-    { key: 'shadorial-13', shortLabel: 'Particles' },
-    { key: 'graph', shortLabel: 'Graph' },
-    { key: 'compute', shortLabel: 'Compute' },
+    { key: 'shadorial-19', shortLabel: 'Surface Shader' },
 ];
 const FEATURED_PRESET_KEY_SET = new Set(FEATURED_PRESETS.map((preset) => preset.key));
+const SHOWCASE_EXAMPLES = [
+    ['surface_upgrade', 'Language Surface Upgrade', '../examples/language-surface-upgrade.shadml'],
+    ['enlightenment_stars', 'Enlightenment Stars', '../examples/enlightenment-stars.shadml'],
+].map(([key, label, path]) => ({ key, label, path }));
+const FEATURE_TAG_LABELS = {
+    pipeline: 'pipeline',
+    alias: 'alias',
+    newtype: 'newtype',
+    record_type: 'record type',
+    bindings: 'bindings',
+    indexing: 'indexing',
+    angle_types: 'angle types',
+    compute: 'compute',
+    render: 'render',
+    graph: 'graph',
+    adt: 'ADTs',
+    match: 'match',
+    where: 'where',
+    traits: 'traits',
+    fold_range: 'foldRange',
+    loops: 'loop',
+    bitfields: 'bitfields',
+    particles: 'particles',
+    fluid: 'fluid',
+    lighting: 'lighting',
+    preview: 'live preview',
+    tooling: 'tooling',
+    docs: 'docs',
+    surface: 'surface shade',
+};
+const EXAMPLE_METADATA = {
+    surface_upgrade: {
+        kicker: 'Since ku',
+        description: 'The parser and lowering showcase for pipeline syntax, angle-bracket types, resource bindings, and matrix indexing.',
+        tags: ['pipeline', 'alias', 'newtype', 'record_type', 'bindings', 'indexing', 'angle_types', 'compute'],
+        previewLabel: 'Compile story',
+        previewKind: 'compute',
+        previewMotion: 'scrub',
+        contract: 'Compute entry with bindings',
+        story: 'Surface syntax and WGSL lowering',
+        cardMeta: 'Compiler showcase',
+        hero: true,
+    },
+    enlightenment_stars: {
+        kicker: 'Since ku',
+        description: 'A creative compute sketch that proves the upgraded surface syntax can carry a stylized end-to-end program, not just syntax fixtures.',
+        tags: ['pipeline', 'alias', 'bindings', 'indexing', 'angle_types', 'compute'],
+        previewLabel: 'Compile story',
+        previewKind: 'compute',
+        previewMotion: 'scrub',
+        contract: 'Compute sketch with typed buffers',
+        story: 'Creative proof for new syntax',
+        cardMeta: 'Creative compiler showcase',
+        hero: true,
+    },
+    hello: {
+        kicker: 'Core sample',
+        description: 'Minimal arithmetic and let-binding flow for first contact with the language.',
+        tags: ['tooling'],
+        previewLabel: 'Compile only',
+        contract: 'Basic function definitions',
+        story: 'Smallest useful program',
+    },
+    adt: {
+        kicker: 'Core sample',
+        description: 'ADT constructors and pattern matching in the smallest possible form.',
+        tags: ['adt', 'match'],
+        previewLabel: 'Compile only',
+        contract: 'Data constructors + match',
+        story: 'Algebraic data types',
+    },
+    compute: {
+        kicker: 'Core sample',
+        description: 'A compact compute entry point with explicit workgroup sizing and builtin input.',
+        tags: ['compute', 'bindings'],
+        previewLabel: 'Compute preview',
+        previewKind: 'compute',
+        previewMotion: 'scrub',
+        contract: '@compute main',
+        story: 'WGSL-shaped compute entry',
+    },
+    graph: {
+        kicker: 'Core sample',
+        description: 'A simple graph contract to demonstrate preview wrapping and live animation.',
+        tags: ['graph', 'preview'],
+        previewLabel: 'Render preview',
+        previewKind: 'graph',
+        previewMotion: 'animated',
+        contract: 'graph(x[, time]) -> F32',
+        story: 'Signal sketching',
+    },
+    traits: {
+        kicker: 'Feature demo',
+        description: 'Operator overloading and trait impls driving a custom numeric type.',
+        tags: ['traits'],
+        previewLabel: 'Compile only',
+        contract: 'Trait impl with operators',
+        story: 'Type class ergonomics',
+    },
+    foldRange: {
+        kicker: 'Feature demo',
+        description: 'A functional range fold that lowers to efficient loops.',
+        tags: ['fold_range', 'compute'],
+        previewLabel: 'Compile only',
+        contract: 'foldRange combinator',
+        story: 'Loop desugaring',
+    },
+    loops: {
+        kicker: 'Feature demo',
+        description: 'Named tail-recursive loops that emit native WGSL loops.',
+        tags: ['loops', 'compute'],
+        previewLabel: 'Compile only',
+        contract: 'Named loop expression',
+        story: 'Structured recursion for GPUs',
+    },
+    bitfields: {
+        kicker: 'Feature demo',
+        description: 'Packed flags with typed access and functional updates.',
+        tags: ['bitfields'],
+        previewLabel: 'Compile only',
+        contract: 'Typed bitfield updates',
+        story: 'Packed data modeling',
+    },
+    where_bindings: {
+        kicker: 'Core sample',
+        description: 'Local definitions placed below the main expression, Haskell-style.',
+        tags: ['where'],
+        previewLabel: 'Compile only',
+        contract: 'where-bound helpers',
+        story: 'Functional readability',
+    },
+    'shadorial-13': {
+        kicker: 'Shader preset',
+        description: 'A particle system sketch with glow and tone mapping, used to show how shadml reads under visual pressure.',
+        tags: ['particles', 'preview', 'render'],
+        previewLabel: 'Render preview',
+        previewKind: 'render',
+        previewMotion: 'animated',
+        contract: 'shade(fragCoord, time, resolution)',
+        story: 'Particles and color composition',
+        cardMeta: 'Live shader preset',
+    },
+    'shadorial-14': {
+        kicker: 'Shader preset',
+        description: 'Layered waves, Fresnel reflections, and caustics. This remains the best default canvas for the language.',
+        tags: ['fluid', 'lighting', 'preview', 'render'],
+        previewLabel: 'Render preview',
+        previewKind: 'render',
+        previewMotion: 'animated',
+        contract: 'shade(fragCoord, time, resolution)',
+        story: 'Water surface studies',
+        cardMeta: 'Live shader preset',
+        hero: true,
+    },
+    'shadorial-15': {
+        kicker: 'Shader preset',
+        description: 'A buoyant smoke study with FBM turbulence and strong silhouette falloff.',
+        tags: ['fluid', 'preview', 'render'],
+        previewLabel: 'Render preview',
+        previewKind: 'render',
+        previewMotion: 'animated',
+        contract: 'shade(fragCoord, time, resolution)',
+        story: 'Atmosphere and turbulence',
+        cardMeta: 'Live shader preset',
+        hero: true,
+    },
+    'shadorial-19': {
+        kicker: 'Shader preset',
+        description: 'A surface-shader contract that showcases non-fullscreen material shading in the preview wrapper.',
+        tags: ['surface', 'preview', 'lighting'],
+        previewLabel: 'Surface preview',
+        previewKind: 'surface',
+        previewMotion: 'animated',
+        contract: 'shade(normal, uv, time, displacement)',
+        story: 'Material shading contract',
+        cardMeta: 'Live shader preset',
+    },
+};
 const SHADML_KEYWORD_SET = new Set([
     'module', 'where', 'import', 'data', 'alias', 'trait', 'impl',
     'let', 'in', 'case', 'of', 'match', 'if', 'then', 'else',
@@ -724,6 +1020,13 @@ const EXAMPLE_LIBRARY = {
     where_bindings: { label: 'Where Bindings', source: EXAMPLES.where_bindings },
 };
 
+for (const example of SHOWCASE_EXAMPLES) {
+    EXAMPLE_LIBRARY[example.key] = {
+        ...example,
+        source: EXAMPLES[example.key] || null,
+    };
+}
+
 for (const example of SHADORIAL_EXAMPLES) {
     EXAMPLE_LIBRARY[example.key] = {
         ...example,
@@ -731,20 +1034,42 @@ for (const example of SHADORIAL_EXAMPLES) {
     };
 }
 
+for (const [key, example] of Object.entries(EXAMPLE_LIBRARY)) {
+    const meta = EXAMPLE_METADATA[key] || {};
+    EXAMPLE_LIBRARY[key] = {
+        ...example,
+        ...meta,
+        description: meta.description || (example.path ? 'Shader preset ready for compilation and preview.' : 'Compiler sample for the shadml surface language.'),
+        kicker: meta.kicker || (example.path ? 'Shader preset' : 'Compiler sample'),
+        tags: meta.tags || [],
+        previewLabel: meta.previewLabel || (example.path ? 'Render preview' : 'Compile only'),
+        previewKind: meta.previewKind || (meta.previewLabel === 'Compile only' ? 'none' : example.path ? 'render' : 'none'),
+        previewMotion: meta.previewMotion || (meta.previewKind === 'compute' ? 'scrub' : meta.previewLabel === 'Compile only' ? 'none' : 'animated'),
+        contract: meta.contract || (example.path ? 'Compile and inspect WGSL output' : 'Compiler sample'),
+        story: meta.story || 'Language walkthrough',
+        cardMeta: meta.cardMeta || (example.path ? 'Live shader preset' : 'Compiler sample'),
+        hero: Boolean(meta.hero),
+    };
+}
+
 const PRESET_GROUPS = [
     {
-        id: 'core',
-        label: 'Core',
-        keys: ['hello', 'adt', 'compute', 'ifexpr', 'graph', 'where_bindings'],
+        id: 'visual',
+        label: 'Visual Showcases',
+        description: 'Authored presets with explicit preview contracts, real animation, and stronger visual payoff.',
+        layout: 'showcase',
+        keys: ['enlightenment_stars', 'shadorial-14', 'shadorial-15', 'shadorial-19', 'graph', 'shadorial-13'],
     },
     {
-        id: 'features',
-        label: 'Features',
-        keys: ['traits', 'foldRange', 'loops', 'bitfields'],
+        id: 'compiler',
+        label: 'Compiler Showcases',
+        description: 'Examples that emphasize syntax, typing, and lowering. These are meant to be read, formatted, and inspected.',
+        keys: ['surface_upgrade', 'hello', 'adt', 'traits', 'foldRange', 'loops', 'bitfields', 'where_bindings', 'compute', 'ifexpr'],
     },
     {
         id: 'shadorial',
-        label: 'Shadorial',
+        label: 'Shadorial Archive',
+        description: 'Visual presets that stress the language through real shader sketches.',
         keys: SHADORIAL_EXAMPLES.map((example) => example.key),
     },
 ];
@@ -1229,10 +1554,15 @@ let gpuCanvasFormat = null;
 let pendingCompileHandle = null;
 let diagnosticDecorationIds = [];
 let previewAnimationFrame = 0;
-let previewStartTime = 0;
 let previewFrameCount = 0;
 let previewMouse = { x: -1, y: -1 };
 let currentExampleKey = DEFAULT_EXAMPLE_KEY;
+let lastCompiledWgsl = '';
+const previewState = {
+    baseTimeSec: 0,
+    referenceNow: performance.now(),
+    paused: false,
+};
 
 // ============================================================
 // Initialize
@@ -1246,6 +1576,102 @@ async function init() {
     setupResizeHandlers();
     await selectExample(DEFAULT_EXAMPLE_KEY, { focusEditor: false, compileNow: false });
     compile({ reason: 'initial' });
+}
+
+function renderTagChips(tags) {
+    return (tags || []).map((tag) => `
+        <span class="tag-chip">${escapeHtml(FEATURE_TAG_LABELS[tag] || tag)}</span>
+    `).join('');
+}
+
+function updateShowcasePanel(example) {
+    if (!example) {
+        return;
+    }
+
+    document.getElementById('showcase-kicker').textContent = example.kicker;
+    document.getElementById('showcase-title').textContent = example.label;
+    document.getElementById('showcase-description').textContent = example.description;
+    document.getElementById('showcase-chip-list').innerHTML = renderTagChips(example.tags);
+    document.getElementById('showcase-preview').textContent = example.previewLabel;
+    document.getElementById('showcase-contract').textContent = example.contract;
+    document.getElementById('showcase-story').textContent = example.story;
+    document.getElementById('showcase-path').textContent = example.path || 'Embedded sample';
+    syncPreviewControls();
+}
+
+function getCurrentExample() {
+    return EXAMPLE_LIBRARY[currentExampleKey] || EXAMPLE_LIBRARY[DEFAULT_EXAMPLE_KEY] || null;
+}
+
+function isPreviewableExample(example) {
+    return Boolean(example) && example.previewKind !== 'none';
+}
+
+function isAnimatedPreview(example) {
+    return Boolean(example) && example.previewMotion === 'animated';
+}
+
+function currentPreviewTime(now = performance.now()) {
+    if (previewState.paused) {
+        return previewState.baseTimeSec;
+    }
+    return previewState.baseTimeSec + (now - previewState.referenceNow) / 1000;
+}
+
+function setPreviewTime(seconds, options = {}) {
+    const next = Math.max(0, Number(seconds) || 0);
+    previewState.baseTimeSec = next;
+    previewState.referenceNow = performance.now();
+    if (options.pause !== undefined) {
+        previewState.paused = options.pause;
+    }
+    syncPreviewControls();
+}
+
+function rerunCurrentPreview() {
+    const example = getCurrentExample();
+    if (!isPreviewableExample(example) || !lastCompiledWgsl || lastCompiledWgsl.startsWith('//')) {
+        return;
+    }
+    runShaderPreview(lastCompiledWgsl, example);
+}
+
+function syncPreviewControls(now = performance.now()) {
+    const example = getCurrentExample();
+    const playButton = document.getElementById('btn-preview-play');
+    const resetButton = document.getElementById('btn-preview-reset');
+    const timeInput = document.getElementById('preview-time');
+    const modeChip = document.getElementById('preview-mode-chip');
+    const motionChip = document.getElementById('preview-motion-chip');
+
+    const previewKind = example?.previewKind || 'none';
+    const previewMotion = example?.previewMotion || 'none';
+    const previewTime = currentPreviewTime(now);
+
+    modeChip.textContent = previewKind === 'none' ? 'No live preview' : `${example.previewLabel}`;
+    motionChip.textContent = previewMotion === 'animated'
+        ? (previewState.paused ? 'Paused' : 'Animated')
+        : previewMotion === 'scrub'
+            ? 'Scrubbable'
+            : 'Static';
+
+    playButton.hidden = previewMotion !== 'animated';
+    playButton.textContent = previewState.paused ? 'Play' : 'Pause';
+    playButton.disabled = !isPreviewableExample(example);
+    resetButton.disabled = !isPreviewableExample(example);
+    timeInput.disabled = !isPreviewableExample(example);
+    timeInput.value = Math.max(0, Math.min(Number(timeInput.max), previewTime)).toFixed(2);
+}
+
+function getPreviewPlaceholderMessage(example) {
+    if (!example) {
+        return 'Compile a compute shader, `shade` function, or `graph` function to preview.';
+    }
+    if (example.previewKind === 'none') {
+        return `${example.label} is a compiler showcase. Inspect the WGSL output and AST for this example.`;
+    }
+    return 'Compile a compute shader, `shade` function, or `graph` function to preview.';
 }
 
 function populatePresetPicker() {
@@ -1267,18 +1693,24 @@ function populatePresetPicker() {
     }).join('');
     groups.innerHTML = PRESET_GROUPS.map((group) => `
         <section class="preset-group">
-            <div class="preset-group-label">${group.label}</div>
-            <div class="preset-grid">
+            <div class="preset-group-copy">
+                <div class="preset-group-label">${group.label}</div>
+                <div class="preset-group-description">${group.description || ''}</div>
+            </div>
+            <div class="preset-grid ${group.layout === 'showcase' ? 'preset-grid-showcase' : ''}">
                 ${group.keys.map((key) => {
                     const example = EXAMPLE_LIBRARY[key];
                     return `
                         <button
-                            class="preset-card"
+                            class="preset-card ${example.hero ? 'preset-card-showcase' : ''}"
                             data-example-key="${key}"
                             type="button"
                         >
+                            <span class="preset-card-kicker">${escapeHtml(example.kicker)}</span>
                             <span class="preset-card-title">${escapeHtml(example.label)}</span>
-                            <span class="preset-card-meta">${escapeHtml(example.path ? 'Shader preset' : 'Core sample')}</span>
+                            <span class="preset-card-description">${escapeHtml(example.description)}</span>
+                            <span class="preset-card-tags">${renderTagChips(example.tags)}</span>
+                            <span class="preset-card-meta">${escapeHtml(example.cardMeta)}</span>
                         </button>
                     `;
                 }).join('')}
@@ -1320,6 +1752,9 @@ async function selectExample(key, options = {}) {
 
     await loadExampleSource(key);
     currentExampleKey = key;
+    previewState.baseTimeSec = 0;
+    previewState.referenceNow = performance.now();
+    previewState.paused = EXAMPLE_LIBRARY[key].previewMotion !== 'animated';
     updatePresetTrigger();
     if (options.compileNow) {
         compile({ reason: 'preset' });
@@ -1336,9 +1771,7 @@ function updatePresetTrigger() {
     const isFeatured = FEATURED_PRESET_KEY_SET.has(currentExampleKey);
 
     document.getElementById('preset-title').textContent = example.label;
-    document.getElementById('preset-meta').textContent = example.path
-        ? 'Live shader preset'
-        : 'Compiler sample';
+    document.getElementById('preset-meta').textContent = example.previewLabel;
     trigger.classList.toggle('show-current', !isFeatured);
     trigger.setAttribute(
         'aria-label',
@@ -1353,6 +1786,7 @@ function updatePresetTrigger() {
     document.querySelectorAll('.preset-card').forEach((card) => {
         card.classList.toggle('active', card.dataset.exampleKey === currentExampleKey);
     });
+    updateShowcasePanel(example);
 }
 
 function openPresetPicker() {
@@ -1997,11 +2431,11 @@ async function createCheckedShaderModule(code) {
     }
 }
 
-async function runShaderPreview(wgslCode) {
+async function runShaderPreview(wgslCode, example = getCurrentExample()) {
     stopActivePreview();
 
     if (!wgslCode || wgslCode.startsWith('//')) {
-        showPreviewMessage('Compile a compute shader, `shade` function, or `graph` function to preview.');
+        showPreviewMessage(getPreviewPlaceholderMessage(example));
         return;
     }
 
@@ -2017,6 +2451,10 @@ async function runShaderPreview(wgslCode) {
             await runRenderPreview(buildGraphPreviewShader(wgslCode, graphSignature));
             return;
         }
+        if (example?.previewLabel === 'Compile only') {
+            showPreviewMessage(getPreviewPlaceholderMessage(example));
+            return;
+        }
         showPreviewMessage('Render preview expects `fn shade(...) -> vec4<f32>` or `fn graph(x[, time]) -> f32`.');
         return;
     }
@@ -2028,6 +2466,439 @@ async function runShaderPreview(wgslCode) {
     }
 
     await runRenderPreview(wrappedShader);
+}
+
+function roundUpTo(value, alignment) {
+    return Math.ceil(value / alignment) * alignment;
+}
+
+function parseWgslStructMap(wgslCode) {
+    const structs = new Map();
+    const pattern = /struct\s+([A-Za-z_]\w*)\s*\{([\s\S]*?)\}/g;
+    for (const match of wgslCode.matchAll(pattern)) {
+        const fields = [];
+        for (const line of match[2].split('\n')) {
+            const fieldMatch = line.trim().match(/^([A-Za-z_]\w*)\s*:\s*([^,]+),?$/);
+            if (!fieldMatch) {
+                continue;
+            }
+            fields.push({
+                name: fieldMatch[1],
+                type: normalizeWgslType(fieldMatch[2]),
+            });
+        }
+        structs.set(match[1], fields);
+        structs.set(normalizeWgslType(match[1]), fields);
+    }
+    return structs;
+}
+
+function parseComputePreviewBindings(wgslCode) {
+    const bindings = [];
+    const pattern = /@group\(0\)\s*@binding\((\d+)\)\s*var<([^>]+)>\s+([A-Za-z_]\w*)\s*:\s*([^;]+);/g;
+    for (const match of wgslCode.matchAll(pattern)) {
+        const binding = Number(match[1]);
+        const addressSpace = match[2].replace(/\s+/g, '');
+        const name = match[3];
+        const type = normalizeWgslType(match[4]);
+        if (addressSpace === 'uniform') {
+            bindings.push({ binding, kind: 'uniform', name, type });
+            continue;
+        }
+        if (addressSpace === 'storage,read_write') {
+            const arrayMatch = type.match(/^array<\s*(.+?)\s*,\s*(\d+)\s*>$/);
+            if (!arrayMatch) {
+                return null;
+            }
+            bindings.push({
+                binding,
+                kind: 'storage',
+                name,
+                type,
+                elementType: normalizeWgslType(arrayMatch[1]),
+                elementCount: Number(arrayMatch[2]),
+            });
+        }
+    }
+
+    const storageBindings = bindings.filter((binding) => binding.kind === 'storage');
+    if (storageBindings.length === 0) {
+        return null;
+    }
+
+    const outputBinding = storageBindings.find((binding) => binding.name === 'output') || storageBindings[0];
+    const uniformBindings = bindings.filter((binding) => binding.kind === 'uniform');
+    const unsupported = bindings.some((binding) => binding.kind !== 'uniform' && binding.kind !== 'storage');
+    if (unsupported) {
+        return null;
+    }
+
+    const workgroupMatch = wgslCode.match(/@compute\s+@workgroup_size\((\d+)/);
+    return {
+        bindings,
+        outputBinding,
+        uniformBindings,
+        workgroupSizeX: workgroupMatch ? Number(workgroupMatch[1]) : 64,
+    };
+}
+
+function getWgslScalarKind(type) {
+    if (type === 'i32') {
+        return 'i32';
+    }
+    if (type === 'u32') {
+        return 'u32';
+    }
+    return 'f32';
+}
+
+function getWgslTypeLayout(type) {
+    const normalized = normalizeWgslType(type);
+    if (normalized === 'f32' || normalized === 'i32' || normalized === 'u32') {
+        return { align: 4, size: 4, kind: 'scalar', scalar: normalized };
+    }
+    const vecMatch = normalized.match(/^vec([234])<\s*(f32|i32|u32)\s*>$/);
+    if (vecMatch) {
+        const count = Number(vecMatch[1]);
+        return {
+            align: count === 2 ? 8 : 16,
+            size: count * 4,
+            kind: 'vector',
+            scalar: vecMatch[2],
+            count,
+        };
+    }
+    const mat3Match = normalized.match(/^mat3x3<\s*(f32)\s*>$/);
+    if (mat3Match) {
+        return { align: 16, size: 48, kind: 'matrix3x3', scalar: mat3Match[1] };
+    }
+    const mat4Match = normalized.match(/^mat4x4<\s*(f32)\s*>$/);
+    if (mat4Match) {
+        return { align: 16, size: 64, kind: 'matrix4x4', scalar: mat4Match[1] };
+    }
+    return null;
+}
+
+function writeScalar(view, offset, scalarKind, value) {
+    if (scalarKind === 'i32') {
+        view.setInt32(offset, Math.trunc(value), true);
+    } else if (scalarKind === 'u32') {
+        view.setUint32(offset, Math.max(0, Math.trunc(value)), true);
+    } else {
+        view.setFloat32(offset, Number(value), true);
+    }
+}
+
+function defaultUniformFieldValue(fieldName, type, width, height) {
+    const name = fieldName.toLowerCase();
+    if (name === 'time' && type === 'f32') {
+        return [currentPreviewTime()];
+    }
+    if (name === 'resolution' && type === 'vec2<f32>') {
+        return [width, height];
+    }
+    if (name === 'tint' && type === 'vec4<f32>') {
+        return [0.92, 0.82, 1.0, 1.0];
+    }
+    if (name === 'basis' && type === 'mat3x3<f32>') {
+        return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    }
+    if (name === 'scale' && type === 'f32') {
+        return [0.015];
+    }
+    if (name === 'offset' && type === 'vec2<f32>') {
+        return [0, 0];
+    }
+    if (name === 'color' && type === 'vec4<f32>') {
+        return [0.85, 0.62, 1.0, 1.0];
+    }
+
+    const layout = getWgslTypeLayout(type);
+    if (!layout) {
+        return null;
+    }
+    if (layout.kind === 'scalar') {
+        return [0];
+    }
+    if (layout.kind === 'vector') {
+        return new Array(layout.count).fill(0);
+    }
+    if (layout.kind === 'matrix3x3') {
+        return new Array(9).fill(0);
+    }
+    if (layout.kind === 'matrix4x4') {
+        return new Array(16).fill(0);
+    }
+    return null;
+}
+
+function buildUniformBufferBytes(structName, structMap, width, height) {
+    const fields = structMap.get(structName);
+    if (!fields || fields.length === 0) {
+        return null;
+    }
+
+    const layoutEntries = [];
+    let offset = 0;
+    let maxAlign = 1;
+
+    for (const field of fields) {
+        const layout = getWgslTypeLayout(field.type);
+        if (!layout) {
+            return null;
+        }
+        offset = roundUpTo(offset, layout.align);
+        layoutEntries.push({ ...field, layout, offset });
+        offset += layout.size;
+        maxAlign = Math.max(maxAlign, layout.align);
+    }
+
+    const byteLength = roundUpTo(offset, maxAlign);
+    const buffer = new ArrayBuffer(byteLength);
+    const view = new DataView(buffer);
+
+    for (const entry of layoutEntries) {
+        const value = defaultUniformFieldValue(entry.name, entry.type, width, height);
+        if (!value) {
+            return null;
+        }
+
+        if (entry.layout.kind === 'scalar') {
+            writeScalar(view, entry.offset, entry.layout.scalar, value[0]);
+            continue;
+        }
+
+        if (entry.layout.kind === 'vector') {
+            for (let index = 0; index < entry.layout.count; index += 1) {
+                writeScalar(view, entry.offset + index * 4, entry.layout.scalar, value[index] ?? 0);
+            }
+            continue;
+        }
+
+        if (entry.layout.kind === 'matrix3x3') {
+            for (let column = 0; column < 3; column += 1) {
+                for (let row = 0; row < 3; row += 1) {
+                    writeScalar(view, entry.offset + column * 16 + row * 4, entry.layout.scalar, value[column * 3 + row] ?? 0);
+                }
+            }
+            continue;
+        }
+
+        if (entry.layout.kind === 'matrix4x4') {
+            for (let column = 0; column < 4; column += 1) {
+                for (let row = 0; row < 4; row += 1) {
+                    writeScalar(view, entry.offset + column * 16 + row * 4, entry.layout.scalar, value[column * 4 + row] ?? 0);
+                }
+            }
+        }
+    }
+
+    return new Uint8Array(buffer);
+}
+
+function derivePreviewGrid(elementCount, width, height) {
+    if (elementCount === width * height) {
+        return { width, height };
+    }
+    const square = Math.round(Math.sqrt(elementCount));
+    if (square * square === elementCount) {
+        return { width: square, height: square };
+    }
+    const gridWidth = Math.max(1, Math.min(width, elementCount));
+    return { width: gridWidth, height: Math.ceil(elementCount / gridWidth) };
+}
+
+function drawScaledImageData(ctx, imageData, gridWidth, gridHeight, width, height) {
+    const bufferCanvas = document.createElement('canvas');
+    bufferCanvas.width = gridWidth;
+    bufferCanvas.height = gridHeight;
+    const bufferCtx = bufferCanvas.getContext('2d');
+    bufferCtx.putImageData(imageData, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(bufferCanvas, 0, 0, width, height);
+}
+
+function renderScalarComputePreview(ctx, width, height, outputBinding, mappedRange) {
+    const grid = derivePreviewGrid(outputBinding.elementCount, width, height);
+    const imageData = ctx.createImageData(grid.width, grid.height);
+    const scalarKind = getWgslScalarKind(outputBinding.elementType);
+    let values;
+    if (scalarKind === 'i32') {
+        values = new Int32Array(mappedRange);
+    } else if (scalarKind === 'u32') {
+        values = new Uint32Array(mappedRange);
+    } else {
+        values = new Float32Array(mappedRange);
+    }
+
+    let minValue = Infinity;
+    let maxValue = -Infinity;
+    for (let index = 0; index < values.length; index += 1) {
+        minValue = Math.min(minValue, values[index]);
+        maxValue = Math.max(maxValue, values[index]);
+    }
+    const range = maxValue - minValue || 1;
+
+    for (let index = 0; index < outputBinding.elementCount; index += 1) {
+        const value = values[index] ?? 0;
+        const t = Math.max(0, Math.min(1, (value - minValue) / range));
+        const px = index * 4;
+        imageData.data[px + 0] = Math.floor(lerp(68, 253, t));
+        imageData.data[px + 1] = Math.floor(lerp(1, 231, t * t));
+        imageData.data[px + 2] = Math.floor(lerp(84, 37, t));
+        imageData.data[px + 3] = 255;
+    }
+
+    drawScaledImageData(ctx, imageData, grid.width, grid.height, width, height);
+}
+
+function renderColorComputePreview(ctx, width, height, outputBinding, mappedRange) {
+    const grid = derivePreviewGrid(outputBinding.elementCount, width, height);
+    const imageData = ctx.createImageData(grid.width, grid.height);
+    const values = new Float32Array(mappedRange);
+
+    for (let index = 0; index < outputBinding.elementCount; index += 1) {
+        const px = index * 4;
+        const base = index * 4;
+        imageData.data[px + 0] = Math.round(Math.max(0, Math.min(1, values[base + 0] ?? 0)) * 255);
+        imageData.data[px + 1] = Math.round(Math.max(0, Math.min(1, values[base + 1] ?? 0)) * 255);
+        imageData.data[px + 2] = Math.round(Math.max(0, Math.min(1, values[base + 2] ?? 0)) * 255);
+        imageData.data[px + 3] = Math.round(Math.max(0, Math.min(1, values[base + 3] ?? 1)) * 255);
+    }
+
+    drawScaledImageData(ctx, imageData, grid.width, grid.height, width, height);
+}
+
+async function runBoundComputePreview(wgslCode, ctx, width, height) {
+    const previewPlan = parseComputePreviewBindings(wgslCode);
+    if (!previewPlan) {
+        return null;
+    }
+
+    const outputBinding = previewPlan.outputBinding;
+    const outputElementLayout = getWgslTypeLayout(outputBinding.elementType);
+    if (!outputElementLayout) {
+        showPreviewMessage('Compute preview does not support this output buffer shape yet.');
+        return 'failed';
+    }
+
+    const structMap = parseWgslStructMap(wgslCode);
+    const resources = [];
+    const bindGroupLayoutEntries = [];
+    const bindGroupEntries = [];
+    let outputBuffer = null;
+    let readBuffer = null;
+
+    try {
+        for (const binding of previewPlan.bindings) {
+            if (binding.kind === 'uniform') {
+                const uniformBytes = buildUniformBufferBytes(binding.type, structMap, width, height);
+                if (!uniformBytes) {
+                    showPreviewMessage(`Compute preview cannot synthesize uniform data for ${binding.name}: ${binding.type}.`);
+                    return 'failed';
+                }
+
+                const uniformBuffer = gpuDevice.createBuffer({
+                    size: roundUpTo(uniformBytes.byteLength, 16),
+                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                });
+                gpuDevice.queue.writeBuffer(uniformBuffer, 0, uniformBytes);
+                resources.push(uniformBuffer);
+                bindGroupLayoutEntries.push({
+                    binding: binding.binding,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: 'uniform' },
+                });
+                bindGroupEntries.push({
+                    binding: binding.binding,
+                    resource: { buffer: uniformBuffer },
+                });
+                continue;
+            }
+
+            if (binding.kind === 'storage') {
+                const byteSize = binding.elementCount * outputElementLayout.size;
+                const storageBuffer = gpuDevice.createBuffer({
+                    size: byteSize,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+                });
+                resources.push(storageBuffer);
+                bindGroupLayoutEntries.push({
+                    binding: binding.binding,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: 'storage' },
+                });
+                bindGroupEntries.push({
+                    binding: binding.binding,
+                    resource: { buffer: storageBuffer },
+                });
+
+                if (binding === outputBinding) {
+                    outputBuffer = storageBuffer;
+                    readBuffer = gpuDevice.createBuffer({
+                        size: byteSize,
+                        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+                    });
+                    resources.push(readBuffer);
+                }
+            }
+        }
+
+        const shaderModule = await createCheckedShaderModule(wgslCode);
+        if (!shaderModule || !outputBuffer || !readBuffer) {
+            return 'failed';
+        }
+
+        bindGroupLayoutEntries.sort((left, right) => left.binding - right.binding);
+        bindGroupEntries.sort((left, right) => left.binding - right.binding);
+
+        const bindGroupLayout = gpuDevice.createBindGroupLayout({
+            entries: bindGroupLayoutEntries,
+        });
+        const pipelineLayout = gpuDevice.createPipelineLayout({
+            bindGroupLayouts: [bindGroupLayout],
+        });
+        const pipeline = gpuDevice.createComputePipeline({
+            layout: pipelineLayout,
+            compute: { module: shaderModule, entryPoint: 'main' },
+        });
+        const bindGroup = gpuDevice.createBindGroup({
+            layout: bindGroupLayout,
+            entries: bindGroupEntries,
+        });
+
+        const encoder = gpuDevice.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(Math.ceil(outputBinding.elementCount / previewPlan.workgroupSizeX), 1, 1);
+        pass.end();
+        encoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, outputBinding.elementCount * outputElementLayout.size);
+        gpuDevice.queue.submit([encoder.finish()]);
+
+        await readBuffer.mapAsync(GPUMapMode.READ);
+        const mappedRange = readBuffer.getMappedRange();
+        if (outputBinding.elementType === 'vec4<f32>') {
+            renderColorComputePreview(ctx, width, height, outputBinding, mappedRange);
+        } else if (outputBinding.elementType === 'f32' || outputBinding.elementType === 'i32' || outputBinding.elementType === 'u32') {
+            renderScalarComputePreview(ctx, width, height, outputBinding, mappedRange);
+        } else {
+            showPreviewMessage(`Compute preview does not support ${outputBinding.elementType} outputs yet.`);
+            readBuffer.unmap();
+            return 'failed';
+        }
+        readBuffer.unmap();
+        return 'rendered';
+    } finally {
+        for (const resource of resources) {
+            try {
+                resource.destroy();
+            } catch (_error) {
+                // Ignore cleanup errors for already-destroyed resources.
+            }
+        }
+    }
 }
 
 async function runComputePreview(wgslCode) {
@@ -2042,6 +2913,18 @@ async function runComputePreview(wgslCode) {
         const ctx = canvas.getContext('2d');
         activatePreviewCanvas('compute');
         const { width: W, height: H } = resizeCanvasToDisplaySize(canvas);
+
+        if (/@group\(0\)\s*@binding\(/.test(wgslCode)) {
+            const handled = await runBoundComputePreview(wgslCode, ctx, W, H);
+            if (handled === 'rendered') {
+                overlay.style.display = 'none';
+                overlay.innerHTML = '';
+                return;
+            }
+            if (handled === 'failed') {
+                return;
+            }
+        }
 
         const elementCount = W * H;
         const bufferSize = elementCount * 4; // i32 per element
@@ -2250,10 +3133,10 @@ async function runRenderPreview(wgslCode) {
             }],
         });
 
-        previewStartTime = performance.now();
         previewFrameCount = 0;
         overlay.style.display = 'none';
         overlay.innerHTML = '';
+        syncPreviewControls();
 
         const renderFrame = (now) => {
             const { width, height } = resizeCanvasToDisplaySize(canvas);
@@ -2264,18 +3147,20 @@ async function runRenderPreview(wgslCode) {
             });
 
             const mouse = currentPreviewMouse(canvas);
+            const previewTime = currentPreviewTime(now);
             const uniforms = new Float32Array([
                 width,
                 height,
                 mouse.x,
                 mouse.y,
-                (now - previewStartTime) / 1000,
+                previewTime,
                 previewFrameCount,
                 0,
                 0,
             ]);
             previewFrameCount += 1;
             gpuDevice.queue.writeBuffer(uniformBuffer, 0, uniforms);
+            syncPreviewControls(now);
 
             const encoder = gpuDevice.createCommandEncoder();
             const pass = encoder.beginRenderPass({
@@ -2309,6 +3194,7 @@ function lerp(a, b, t) {
 function showPreviewMessage(msg) {
     stopActivePreview();
     activatePreviewCanvas(null);
+    syncPreviewControls();
     const overlay = previewOverlayElement();
     overlay.style.display = 'flex';
     overlay.innerHTML = `
@@ -2349,6 +3235,7 @@ function compile(options = {}) {
         const resultJson = wasmModule.compile(source);
         const result = JSON.parse(resultJson);
         const elapsed = (performance.now() - startTime).toFixed(1);
+        lastCompiledWgsl = result.wgsl || '';
 
         // Update WGSL output
         wgslEditor.setValue(result.wgsl || '// No output');
@@ -2379,11 +3266,14 @@ function compile(options = {}) {
             ? `${elapsed}ms · ${issueCount} issue${issueCount === 1 ? '' : 's'}`
             : `${elapsed}ms`;
 
+        const currentExample = getCurrentExample();
+        syncPreviewControls();
+
         // Run WebGPU preview for compute shaders and fullscreen render shaders
         if (result.wgsl && !result.wgsl.startsWith('//')) {
-            runShaderPreview(result.wgsl);
+            runShaderPreview(result.wgsl, currentExample);
         } else {
-            showPreviewMessage('Compile a compute shader, `shade` function, or `graph` function to preview.');
+            showPreviewMessage(getPreviewPlaceholderMessage(currentExample));
         }
 
     } catch (e) {
@@ -2612,6 +3502,47 @@ function setupEventListeners() {
 
     document.getElementById('preset-trigger').addEventListener('click', () => {
         togglePresetPicker();
+    });
+
+    document.getElementById('btn-open-library').addEventListener('click', () => {
+        openPresetPicker();
+    });
+
+    document.getElementById('btn-preview-play').addEventListener('click', () => {
+        const example = getCurrentExample();
+        if (!isAnimatedPreview(example)) {
+            return;
+        }
+        if (previewState.paused) {
+            previewState.referenceNow = performance.now();
+            previewState.paused = false;
+        } else {
+            previewState.baseTimeSec = currentPreviewTime();
+            previewState.paused = true;
+        }
+        syncPreviewControls();
+    });
+
+    document.getElementById('btn-preview-reset').addEventListener('click', () => {
+        const example = getCurrentExample();
+        if (!isPreviewableExample(example)) {
+            return;
+        }
+        setPreviewTime(0, { pause: example.previewMotion !== 'animated' });
+        if (!isAnimatedPreview(example)) {
+            rerunCurrentPreview();
+        }
+    });
+
+    document.getElementById('preview-time').addEventListener('input', (event) => {
+        const example = getCurrentExample();
+        if (!isPreviewableExample(example)) {
+            return;
+        }
+        setPreviewTime(event.target.value, { pause: true });
+        if (example.previewKind === 'compute') {
+            rerunCurrentPreview();
+        }
     });
 
     document.getElementById('preset-inline').addEventListener('click', async (event) => {

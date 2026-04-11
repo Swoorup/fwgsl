@@ -165,8 +165,15 @@ Current editor feedback includes:
 Run it locally with:
 
 ```sh
+mise run playground:examples
 mise run wasm
 mise run playground
+```
+
+Refresh the embedded Shadorial presets after editing `examples/shadorial/*.shadml` with:
+
+```sh
+mise run playground:examples
 ```
 
 ## Quick Start

@@ -39,8 +39,19 @@ cd crates/shadml_wasm
 wasm-pack build --target web --out-dir ../../playground/pkg
 """
 
+[tasks."playground:examples"]
+description = "Generate embedded Shadorial sources for the playground"
+sources = ["examples/shadorial/*.shadml", "scripts/generate_playground_examples.py"]
+outputs = ["playground/example-sources.js"]
+run = "python3 scripts/generate_playground_examples.py"
+
+[tasks."playground:examples:check"]
+description = "Check that embedded Shadorial sources are up to date"
+run = "python3 scripts/generate_playground_examples.py --check"
+
 [tasks.dev]
 description = "Start playground dev server (no WASM rebuild)"
+depends = ["playground:examples"]
 run = """
 cd playground
 echo "🚀 playground: http://localhost:3000"
@@ -49,7 +60,7 @@ python3 -m http.server 3000
 
 [tasks.playground]
 description = "Build WASM and serve playground"
-depends = ["wasm"]
+depends = ["wasm", "playground:examples"]
 run = """
 cd playground
 echo "🚀 playground: http://localhost:3000"
@@ -58,7 +69,7 @@ python3 -m http.server 3000
 
 [tasks.check]
 description = "Run all checks (fmt, lint, test)"
-depends = ["fmt:check", "lint", "test"]
+depends = ["fmt:check", "lint", "test", "playground:examples:check"]
 
 [tasks."bump:alpha"]
 description = "Bump version to next alpha"

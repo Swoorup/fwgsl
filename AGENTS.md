@@ -1,20 +1,20 @@
-Web GPU 上で動作する純粋関数型 shadml を実装してください．
-実装言語は Rust で，Oxc の設計にインスパイアされた Arena Allocation で高速なコンパイル/ツールチェインを目指します．
-コンパイルターゲットは wgsl です．
+Please implement a purely functional `shadml` that runs on WebGPU.
+The implementation language is Rust, and the goal is a fast compiler/toolchain using arena allocation inspired by Oxc's design.
+The compilation target is WGSL.
 
-言語機能としては，
+The language features should include:
 
-- ML 派生の純粋関数型言語
-- Haskell につよい影響を受ける．
-- Haskell と同等の言語機能をもち，かつ特殊な記号 (<$> など)は使わない
-- 静的型付けと HM 型推論
-- (.) による関数合成
-- 演算子なども，全ては関数．((+) など)
-- バッククオートによる中置演算
-- Fancotr, Applicative, Monad と型クラス
-- ADT とパターンマッチ
-- 依存型による多次元の静的な型表現
-- CST による失敗可能な構文木をベース
-- リンター，フォーマッタ，LSP も実装
-- モジュールシステムとバンドラ
-- Web Playground
+- An ML-derived purely functional language
+- Strongly influenced by Haskell
+- Language features equivalent to Haskell, but without using special symbols such as `<$>`
+- Static typing and HM type inference
+- Function composition via `(.)`
+- Everything, including operators, is a function, e.g. `((+))`
+- Infix notation via backticks
+- Functor, Applicative, Monad, and type classes
+- ADTs and pattern matching
+- Statically typed multidimensional representations via dependent types
+- Based on a fallible syntax tree using CST
+- Also implement a linter, formatter, and LSP
+- A module system and bundler
+- A web playground
