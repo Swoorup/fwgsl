@@ -198,7 +198,7 @@ impl WgslEmitter {
     // Constant emission
     // -----------------------------------------------------------------------
 
-    fn emit_comments(&mut self, comments: &[String]) {
+    fn emit_comments(&mut self, comments: &[&str]) {
         if !self.preserve_comments || comments.is_empty() {
             return;
         }
@@ -709,21 +709,23 @@ pub fn emit_wgsl_with_comments(program: &MirProgram) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shadml_allocator::Allocator;
 
     #[test]
     fn test_emit_simple_function() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "add".to_string(),
+                name: arena.alloc_str("add"),
                 params: vec![
                     MirParam {
-                        name: "x".to_string(),
+                        name: arena.alloc_str("x"),
                         ty: MirType::I32,
                     },
                     MirParam {
-                        name: "y".to_string(),
+                        name: arena.alloc_str("y"),
                         ty: MirType::I32,
                     },
                 ],
@@ -731,8 +733,8 @@ mod tests {
                 body: vec![],
                 return_expr: Some(MirExpr::BinOp(
                     MirBinOp::Add,
-                    Box::new(MirExpr::Var("x".to_string(), MirType::I32)),
-                    Box::new(MirExpr::Var("y".to_string(), MirType::I32)),
+                    arena.alloc(MirExpr::Var(arena.alloc_str("x"), MirType::I32)),
+                    arena.alloc(MirExpr::Var(arena.alloc_str("y"), MirType::I32)),
                     MirType::I32,
                 )),
                 comments: vec![],
@@ -748,11 +750,12 @@ mod tests {
 
     #[test]
     fn test_emit_void_function() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "do_nothing".to_string(),
+                name: arena.alloc_str("do_nothing"),
                 params: vec![],
                 return_ty: MirType::Unit,
                 body: vec![],
@@ -770,22 +773,23 @@ mod tests {
 
     #[test]
     fn test_emit_struct() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
-                name: "Particle".to_string(),
+                name: arena.alloc_str("Particle"),
                 fields: vec![
                     MirField {
-                        name: "tag".to_string(),
+                        name: arena.alloc_str("tag"),
                         ty: MirType::U32,
                         attributes: vec![],
                     },
                     MirField {
-                        name: "position".to_string(),
-                        ty: MirType::Vec(3, Box::new(MirType::F32)),
+                        name: arena.alloc_str("position"),
+                        ty: MirType::Vec(3, arena.alloc(MirType::F32)),
                         attributes: vec![],
                     },
                     MirField {
-                        name: "life".to_string(),
+                        name: arena.alloc_str("life"),
                         ty: MirType::F32,
                         attributes: vec![],
                     },
@@ -806,42 +810,43 @@ mod tests {
 
     #[test]
     fn test_emit_compute_entry_point() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
-                name: "ComputeInput".to_string(),
+                name: arena.alloc_str("ComputeInput"),
                 fields: vec![MirField {
-                    name: "gid".to_string(),
-                    ty: MirType::Vec(3, Box::new(MirType::U32)),
+                    name: arena.alloc_str("gid"),
+                    ty: MirType::Vec(3, arena.alloc(MirType::U32)),
                     attributes: vec![MirAttribute {
-                        name: "builtin".to_string(),
-                        args: vec!["global_invocation_id".to_string()],
+                        name: arena.alloc_str("builtin"),
+                        args: vec![arena.alloc_str("global_invocation_id")],
                     }],
                 }],
             }],
             globals: vec![],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "main".to_string(),
+                name: arena.alloc_str("main"),
                 stage: ShaderStage::Compute,
                 workgroup_size: Some([64, 1, 1]),
                 params: vec![MirParam {
-                    name: "input".to_string(),
-                    ty: MirType::Struct("ComputeInput".to_string()),
+                    name: arena.alloc_str("input"),
+                    ty: MirType::Struct(arena.alloc_str("ComputeInput")),
                 }],
                 return_ty: MirType::Unit,
                 body: vec![MirStmt::Let(
-                    "idx".to_string(),
+                    arena.alloc_str("idx"),
                     MirType::U32,
                     MirExpr::FieldAccess(
-                        Box::new(MirExpr::FieldAccess(
-                            Box::new(MirExpr::Var(
-                                "input".to_string(),
-                                MirType::Struct("ComputeInput".to_string()),
+                        arena.alloc(MirExpr::FieldAccess(
+                            arena.alloc(MirExpr::Var(
+                                arena.alloc_str("input"),
+                                MirType::Struct(arena.alloc_str("ComputeInput")),
                             )),
-                            "gid".to_string(),
-                            MirType::Vec(3, Box::new(MirType::U32)),
+                            arena.alloc_str("gid"),
+                            MirType::Vec(3, arena.alloc(MirType::U32)),
                         )),
-                        "x".to_string(),
+                        arena.alloc_str("x"),
                         MirType::U32,
                     ),
                 )],
@@ -859,26 +864,27 @@ mod tests {
 
     #[test]
     fn test_emit_vertex_entry_point() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "vs_main".to_string(),
+                name: arena.alloc_str("vs_main"),
                 stage: ShaderStage::Vertex,
                 workgroup_size: None,
                 params: vec![],
-                return_ty: MirType::Vec(4, Box::new(MirType::F32)),
+                return_ty: MirType::Vec(4, arena.alloc(MirType::F32)),
                 body: vec![],
                 return_expr: Some(MirExpr::Call(
-                    "vec4".to_string(),
+                    arena.alloc_str("vec4"),
                     vec![
                         MirExpr::Lit(MirLit::F32(0.0)),
                         MirExpr::Lit(MirLit::F32(0.0)),
                         MirExpr::Lit(MirLit::F32(0.0)),
                         MirExpr::Lit(MirLit::F32(1.0)),
                     ],
-                    MirType::Vec(4, Box::new(MirType::F32)),
+                    MirType::Vec(4, arena.alloc(MirType::F32)),
                 )),
                 comments: vec![],
             }],
@@ -894,26 +900,27 @@ mod tests {
 
     #[test]
     fn test_emit_fragment_entry_point() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "fs_main".to_string(),
+                name: arena.alloc_str("fs_main"),
                 stage: ShaderStage::Fragment,
                 workgroup_size: None,
                 params: vec![],
-                return_ty: MirType::Vec(4, Box::new(MirType::F32)),
+                return_ty: MirType::Vec(4, arena.alloc(MirType::F32)),
                 body: vec![],
                 return_expr: Some(MirExpr::Call(
-                    "vec4".to_string(),
+                    arena.alloc_str("vec4"),
                     vec![
                         MirExpr::Lit(MirLit::F32(1.0)),
                         MirExpr::Lit(MirLit::F32(0.0)),
                         MirExpr::Lit(MirLit::F32(0.0)),
                         MirExpr::Lit(MirLit::F32(1.0)),
                     ],
-                    MirType::Vec(4, Box::new(MirType::F32)),
+                    MirType::Vec(4, arena.alloc(MirType::F32)),
                 )),
                 comments: vec![],
             }],
@@ -928,29 +935,33 @@ mod tests {
 
     #[test]
     fn test_emit_if_statement() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "abs_val".to_string(),
+                name: arena.alloc_str("abs_val"),
                 params: vec![MirParam {
-                    name: "x".to_string(),
+                    name: arena.alloc_str("x"),
                     ty: MirType::I32,
                 }],
                 return_ty: MirType::I32,
                 body: vec![MirStmt::If(
                     MirExpr::BinOp(
                         MirBinOp::Lt,
-                        Box::new(MirExpr::Var("x".to_string(), MirType::I32)),
-                        Box::new(MirExpr::Lit(MirLit::I32(0))),
+                        arena.alloc(MirExpr::Var(arena.alloc_str("x"), MirType::I32)),
+                        arena.alloc(MirExpr::Lit(MirLit::I32(0))),
                         MirType::Bool,
                     ),
                     vec![MirStmt::Return(MirExpr::UnaryOp(
                         MirUnaryOp::Neg,
-                        Box::new(MirExpr::Var("x".to_string(), MirType::I32)),
+                        arena.alloc(MirExpr::Var(arena.alloc_str("x"), MirType::I32)),
                         MirType::I32,
                     ))],
-                    vec![MirStmt::Return(MirExpr::Var("x".to_string(), MirType::I32))],
+                    vec![MirStmt::Return(MirExpr::Var(
+                        arena.alloc_str("x"),
+                        MirType::I32,
+                    ))],
                 )],
                 return_expr: None,
                 comments: vec![],
@@ -968,35 +979,36 @@ mod tests {
 
     #[test]
     fn test_emit_if_without_else() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "maybe_inc".to_string(),
+                name: arena.alloc_str("maybe_inc"),
                 params: vec![MirParam {
-                    name: "x".to_string(),
+                    name: arena.alloc_str("x"),
                     ty: MirType::I32,
                 }],
                 return_ty: MirType::Unit,
                 body: vec![
                     MirStmt::Var(
-                        "r".to_string(),
+                        arena.alloc_str("r"),
                         MirType::I32,
-                        MirExpr::Var("x".to_string(), MirType::I32),
+                        MirExpr::Var(arena.alloc_str("x"), MirType::I32),
                     ),
                     MirStmt::If(
                         MirExpr::BinOp(
                             MirBinOp::Gt,
-                            Box::new(MirExpr::Var("x".to_string(), MirType::I32)),
-                            Box::new(MirExpr::Lit(MirLit::I32(0))),
+                            arena.alloc(MirExpr::Var(arena.alloc_str("x"), MirType::I32)),
+                            arena.alloc(MirExpr::Lit(MirLit::I32(0))),
                             MirType::Bool,
                         ),
                         vec![MirStmt::Assign(
-                            "r".to_string(),
+                            arena.alloc_str("r"),
                             MirExpr::BinOp(
                                 MirBinOp::Add,
-                                Box::new(MirExpr::Var("r".to_string(), MirType::I32)),
-                                Box::new(MirExpr::Lit(MirLit::I32(1))),
+                                arena.alloc(MirExpr::Var(arena.alloc_str("r"), MirType::I32)),
+                                arena.alloc(MirExpr::Lit(MirLit::I32(1))),
                                 MirType::I32,
                             ),
                         )],
@@ -1018,17 +1030,22 @@ mod tests {
 
     #[test]
     fn test_emit_let_and_var() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "f".to_string(),
+                name: arena.alloc_str("f"),
                 params: vec![],
                 return_ty: MirType::Unit,
                 body: vec![
-                    MirStmt::Let("a".to_string(), MirType::I32, MirExpr::Lit(MirLit::I32(42))),
+                    MirStmt::Let(
+                        arena.alloc_str("a"),
+                        MirType::I32,
+                        MirExpr::Lit(MirLit::I32(42)),
+                    ),
                     MirStmt::Var(
-                        "b".to_string(),
+                        arena.alloc_str("b"),
                         MirType::F32,
                         MirExpr::Lit(MirLit::F32(3.14)),
                     ),
@@ -1047,23 +1064,32 @@ mod tests {
 
     #[test]
     fn test_emit_literals() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "lits".to_string(),
+                name: arena.alloc_str("lits"),
                 params: vec![],
                 return_ty: MirType::Unit,
                 body: vec![
-                    MirStmt::Let("a".to_string(), MirType::I32, MirExpr::Lit(MirLit::I32(-5))),
-                    MirStmt::Let("b".to_string(), MirType::U32, MirExpr::Lit(MirLit::U32(10))),
                     MirStmt::Let(
-                        "c".to_string(),
+                        arena.alloc_str("a"),
+                        MirType::I32,
+                        MirExpr::Lit(MirLit::I32(-5)),
+                    ),
+                    MirStmt::Let(
+                        arena.alloc_str("b"),
+                        MirType::U32,
+                        MirExpr::Lit(MirLit::U32(10)),
+                    ),
+                    MirStmt::Let(
+                        arena.alloc_str("c"),
                         MirType::F32,
                         MirExpr::Lit(MirLit::F32(2.0)),
                     ),
                     MirStmt::Let(
-                        "d".to_string(),
+                        arena.alloc_str("d"),
                         MirType::Bool,
                         MirExpr::Lit(MirLit::Bool(true)),
                     ),
@@ -1084,16 +1110,17 @@ mod tests {
 
     #[test]
     fn test_emit_call_expression() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "f".to_string(),
+                name: arena.alloc_str("f"),
                 params: vec![],
                 return_ty: MirType::F32,
                 body: vec![],
                 return_expr: Some(MirExpr::Call(
-                    "max".to_string(),
+                    arena.alloc_str("max"),
                     vec![
                         MirExpr::Lit(MirLit::F32(1.0)),
                         MirExpr::Lit(MirLit::F32(2.0)),
@@ -1112,17 +1139,18 @@ mod tests {
 
     #[test]
     fn test_emit_struct_construction() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
-                name: "Vec2".to_string(),
+                name: arena.alloc_str("Vec2"),
                 fields: vec![
                     MirField {
-                        name: "x".to_string(),
+                        name: arena.alloc_str("x"),
                         ty: MirType::F32,
                         attributes: vec![],
                     },
                     MirField {
-                        name: "y".to_string(),
+                        name: arena.alloc_str("y"),
                         ty: MirType::F32,
                         attributes: vec![],
                     },
@@ -1130,12 +1158,12 @@ mod tests {
             }],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "make_vec".to_string(),
+                name: arena.alloc_str("make_vec"),
                 params: vec![],
-                return_ty: MirType::Struct("Vec2".to_string()),
+                return_ty: MirType::Struct(arena.alloc_str("Vec2")),
                 body: vec![],
                 return_expr: Some(MirExpr::ConstructStruct(
-                    "Vec2".to_string(),
+                    arena.alloc_str("Vec2"),
                     vec![
                         MirExpr::Lit(MirLit::F32(1.0)),
                         MirExpr::Lit(MirLit::F32(2.0)),
@@ -1153,23 +1181,24 @@ mod tests {
 
     #[test]
     fn test_emit_field_access() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "get_x".to_string(),
+                name: arena.alloc_str("get_x"),
                 params: vec![MirParam {
-                    name: "v".to_string(),
-                    ty: MirType::Vec(3, Box::new(MirType::F32)),
+                    name: arena.alloc_str("v"),
+                    ty: MirType::Vec(3, arena.alloc(MirType::F32)),
                 }],
                 return_ty: MirType::F32,
                 body: vec![],
                 return_expr: Some(MirExpr::FieldAccess(
-                    Box::new(MirExpr::Var(
-                        "v".to_string(),
-                        MirType::Vec(3, Box::new(MirType::F32)),
+                    arena.alloc(MirExpr::Var(
+                        arena.alloc_str("v"),
+                        MirType::Vec(3, arena.alloc(MirType::F32)),
                     )),
-                    "x".to_string(),
+                    arena.alloc_str("x"),
                     MirType::F32,
                 )),
                 comments: vec![],
@@ -1184,23 +1213,24 @@ mod tests {
 
     #[test]
     fn test_emit_index_access() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "get_elem".to_string(),
+                name: arena.alloc_str("get_elem"),
                 params: vec![MirParam {
-                    name: "arr".to_string(),
-                    ty: MirType::Array(Box::new(MirType::F32), 4),
+                    name: arena.alloc_str("arr"),
+                    ty: MirType::Array(arena.alloc(MirType::F32), 4),
                 }],
                 return_ty: MirType::F32,
                 body: vec![],
                 return_expr: Some(MirExpr::Index(
-                    Box::new(MirExpr::Var(
-                        "arr".to_string(),
-                        MirType::Array(Box::new(MirType::F32), 4),
+                    arena.alloc(MirExpr::Var(
+                        arena.alloc_str("arr"),
+                        MirType::Array(arena.alloc(MirType::F32), 4),
                     )),
-                    Box::new(MirExpr::Lit(MirLit::U32(0))),
+                    arena.alloc(MirExpr::Lit(MirLit::U32(0))),
                     MirType::F32,
                 )),
                 comments: vec![],
@@ -1215,19 +1245,20 @@ mod tests {
 
     #[test]
     fn test_emit_cast() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "to_float".to_string(),
+                name: arena.alloc_str("to_float"),
                 params: vec![MirParam {
-                    name: "x".to_string(),
+                    name: arena.alloc_str("x"),
                     ty: MirType::I32,
                 }],
                 return_ty: MirType::F32,
                 body: vec![],
                 return_expr: Some(MirExpr::Cast(
-                    Box::new(MirExpr::Var("x".to_string(), MirType::I32)),
+                    arena.alloc(MirExpr::Var(arena.alloc_str("x"), MirType::I32)),
                     MirType::F32,
                 )),
                 comments: vec![],
@@ -1242,15 +1273,16 @@ mod tests {
 
     #[test]
     fn test_emit_block_statement() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "f".to_string(),
+                name: arena.alloc_str("f"),
                 params: vec![],
                 return_ty: MirType::Unit,
                 body: vec![MirStmt::Block(vec![MirStmt::Let(
-                    "x".to_string(),
+                    arena.alloc_str("x"),
                     MirType::I32,
                     MirExpr::Lit(MirLit::I32(1)),
                 )])],
@@ -1267,18 +1299,19 @@ mod tests {
 
     #[test]
     fn test_emit_mat_type() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "identity".to_string(),
+                name: arena.alloc_str("identity"),
                 params: vec![],
-                return_ty: MirType::Mat(4, 4, Box::new(MirType::F32)),
+                return_ty: MirType::Mat(4, 4, arena.alloc(MirType::F32)),
                 body: vec![],
                 return_expr: Some(MirExpr::Call(
-                    "mat4x4".to_string(),
+                    arena.alloc_str("mat4x4"),
                     vec![],
-                    MirType::Mat(4, 4, Box::new(MirType::F32)),
+                    MirType::Mat(4, 4, arena.alloc(MirType::F32)),
                 )),
                 comments: vec![],
             }],
@@ -1292,12 +1325,13 @@ mod tests {
 
     #[test]
     fn test_emit_array_type() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
-                name: "Data".to_string(),
+                name: arena.alloc_str("Data"),
                 fields: vec![MirField {
-                    name: "values".to_string(),
-                    ty: MirType::Array(Box::new(MirType::F32), 16),
+                    name: arena.alloc_str("values"),
+                    ty: MirType::Array(arena.alloc(MirType::F32), 16),
                     attributes: vec![],
                 }],
             }],
@@ -1313,12 +1347,13 @@ mod tests {
 
     #[test]
     fn test_emit_compute_default_workgroup() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "main".to_string(),
+                name: arena.alloc_str("main"),
                 stage: ShaderStage::Compute,
                 workgroup_size: None,
                 params: vec![],
@@ -1336,100 +1371,101 @@ mod tests {
 
     #[test]
     fn test_emit_full_program() {
+        let arena = Allocator::new();
         // A complete small program: struct + helper function + compute entry point
         let program = MirProgram {
             structs: vec![MirStruct {
-                name: "Particle".to_string(),
+                name: arena.alloc_str("Particle"),
                 fields: vec![
                     MirField {
-                        name: "pos".to_string(),
-                        ty: MirType::Vec(3, Box::new(MirType::F32)),
+                        name: arena.alloc_str("pos"),
+                        ty: MirType::Vec(3, arena.alloc(MirType::F32)),
                         attributes: vec![],
                     },
                     MirField {
-                        name: "vel".to_string(),
-                        ty: MirType::Vec(3, Box::new(MirType::F32)),
+                        name: arena.alloc_str("vel"),
+                        ty: MirType::Vec(3, arena.alloc(MirType::F32)),
                         attributes: vec![],
                     },
                 ],
             }],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "step_particle".to_string(),
+                name: arena.alloc_str("step_particle"),
                 params: vec![
                     MirParam {
-                        name: "p".to_string(),
-                        ty: MirType::Struct("Particle".to_string()),
+                        name: arena.alloc_str("p"),
+                        ty: MirType::Struct(arena.alloc_str("Particle")),
                     },
                     MirParam {
-                        name: "dt".to_string(),
+                        name: arena.alloc_str("dt"),
                         ty: MirType::F32,
                     },
                 ],
-                return_ty: MirType::Struct("Particle".to_string()),
+                return_ty: MirType::Struct(arena.alloc_str("Particle")),
                 body: vec![MirStmt::Let(
-                    "new_pos".to_string(),
-                    MirType::Vec(3, Box::new(MirType::F32)),
+                    arena.alloc_str("new_pos"),
+                    MirType::Vec(3, arena.alloc(MirType::F32)),
                     MirExpr::BinOp(
                         MirBinOp::Add,
-                        Box::new(MirExpr::FieldAccess(
-                            Box::new(MirExpr::Var(
-                                "p".to_string(),
-                                MirType::Struct("Particle".to_string()),
+                        arena.alloc(MirExpr::FieldAccess(
+                            arena.alloc(MirExpr::Var(
+                                arena.alloc_str("p"),
+                                MirType::Struct(arena.alloc_str("Particle")),
                             )),
-                            "pos".to_string(),
-                            MirType::Vec(3, Box::new(MirType::F32)),
+                            arena.alloc_str("pos"),
+                            MirType::Vec(3, arena.alloc(MirType::F32)),
                         )),
-                        Box::new(MirExpr::BinOp(
+                        arena.alloc(MirExpr::BinOp(
                             MirBinOp::Mul,
-                            Box::new(MirExpr::FieldAccess(
-                                Box::new(MirExpr::Var(
-                                    "p".to_string(),
-                                    MirType::Struct("Particle".to_string()),
+                            arena.alloc(MirExpr::FieldAccess(
+                                arena.alloc(MirExpr::Var(
+                                    arena.alloc_str("p"),
+                                    MirType::Struct(arena.alloc_str("Particle")),
                                 )),
-                                "vel".to_string(),
-                                MirType::Vec(3, Box::new(MirType::F32)),
+                                arena.alloc_str("vel"),
+                                MirType::Vec(3, arena.alloc(MirType::F32)),
                             )),
-                            Box::new(MirExpr::Var("dt".to_string(), MirType::F32)),
-                            MirType::Vec(3, Box::new(MirType::F32)),
+                            arena.alloc(MirExpr::Var(arena.alloc_str("dt"), MirType::F32)),
+                            MirType::Vec(3, arena.alloc(MirType::F32)),
                         )),
-                        MirType::Vec(3, Box::new(MirType::F32)),
+                        MirType::Vec(3, arena.alloc(MirType::F32)),
                     ),
                 )],
                 return_expr: Some(MirExpr::ConstructStruct(
-                    "Particle".to_string(),
+                    arena.alloc_str("Particle"),
                     vec![
                         MirExpr::Var(
-                            "new_pos".to_string(),
-                            MirType::Vec(3, Box::new(MirType::F32)),
+                            arena.alloc_str("new_pos"),
+                            MirType::Vec(3, arena.alloc(MirType::F32)),
                         ),
                         MirExpr::FieldAccess(
-                            Box::new(MirExpr::Var(
-                                "p".to_string(),
-                                MirType::Struct("Particle".to_string()),
+                            arena.alloc(MirExpr::Var(
+                                arena.alloc_str("p"),
+                                MirType::Struct(arena.alloc_str("Particle")),
                             )),
-                            "vel".to_string(),
-                            MirType::Vec(3, Box::new(MirType::F32)),
+                            arena.alloc_str("vel"),
+                            MirType::Vec(3, arena.alloc(MirType::F32)),
                         ),
                     ],
                 )),
                 comments: vec![],
             }],
             entry_points: vec![MirEntryPoint {
-                name: "main".to_string(),
+                name: arena.alloc_str("main"),
                 stage: ShaderStage::Compute,
                 workgroup_size: Some([256, 1, 1]),
                 params: vec![],
                 return_ty: MirType::Unit,
                 body: vec![MirStmt::Let(
-                    "idx".to_string(),
+                    arena.alloc_str("idx"),
                     MirType::U32,
                     MirExpr::FieldAccess(
-                        Box::new(MirExpr::Var(
-                            "gid".to_string(),
-                            MirType::Vec(3, Box::new(MirType::U32)),
+                        arena.alloc(MirExpr::Var(
+                            arena.alloc_str("gid"),
+                            MirType::Vec(3, arena.alloc(MirType::U32)),
                         )),
-                        "x".to_string(),
+                        arena.alloc_str("x"),
                         MirType::U32,
                     ),
                 )],
@@ -1458,37 +1494,38 @@ mod tests {
 
     #[test]
     fn test_emit_struct_field_attributes() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
-                name: "VertexOutput".to_string(),
+                name: arena.alloc_str("VertexOutput"),
                 fields: vec![
                     MirField {
-                        name: "clip_position".to_string(),
-                        ty: MirType::Vec(4, Box::new(MirType::F32)),
+                        name: arena.alloc_str("clip_position"),
+                        ty: MirType::Vec(4, arena.alloc(MirType::F32)),
                         attributes: vec![MirAttribute {
-                            name: "builtin".to_string(),
-                            args: vec!["position".to_string()],
+                            name: arena.alloc_str("builtin"),
+                            args: vec![arena.alloc_str("position")],
                         }],
                     },
                     MirField {
-                        name: "color".to_string(),
-                        ty: MirType::Vec(4, Box::new(MirType::F32)),
+                        name: arena.alloc_str("color"),
+                        ty: MirType::Vec(4, arena.alloc(MirType::F32)),
                         attributes: vec![MirAttribute {
-                            name: "location".to_string(),
-                            args: vec!["0".to_string()],
+                            name: arena.alloc_str("location"),
+                            args: vec![arena.alloc_str("0")],
                         }],
                     },
                     MirField {
-                        name: "uv".to_string(),
-                        ty: MirType::Vec(2, Box::new(MirType::F32)),
+                        name: arena.alloc_str("uv"),
+                        ty: MirType::Vec(2, arena.alloc(MirType::F32)),
                         attributes: vec![
                             MirAttribute {
-                                name: "location".to_string(),
-                                args: vec!["1".to_string()],
+                                name: arena.alloc_str("location"),
+                                args: vec![arena.alloc_str("1")],
                             },
                             MirAttribute {
-                                name: "interpolate".to_string(),
-                                args: vec!["linear".to_string(), "center".to_string()],
+                                name: arena.alloc_str("interpolate"),
+                                args: vec![arena.alloc_str("linear"), arena.alloc_str("center")],
                             },
                         ],
                     },
@@ -1520,56 +1557,57 @@ mod tests {
 
     #[test]
     fn test_emit_switch_statement() {
+        let arena = Allocator::new();
         // Build a function that contains a switch on a u32 variable
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "classify".to_string(),
+                name: arena.alloc_str("classify"),
                 params: vec![MirParam {
-                    name: "x".to_string(),
+                    name: arena.alloc_str("x"),
                     ty: MirType::U32,
                 }],
                 return_ty: MirType::I32,
                 body: vec![
                     MirStmt::Var(
-                        "result".to_string(),
+                        arena.alloc_str("result"),
                         MirType::I32,
                         MirExpr::Lit(MirLit::I32(0)),
                     ),
                     MirStmt::Switch(
-                        MirExpr::Var("x".to_string(), MirType::U32),
+                        MirExpr::Var(arena.alloc_str("x"), MirType::U32),
                         vec![
                             MirSwitchCase {
                                 values: vec![MirLit::U32(0)],
                                 body: vec![MirStmt::Assign(
-                                    "result".to_string(),
+                                    arena.alloc_str("result"),
                                     MirExpr::Lit(MirLit::I32(10)),
                                 )],
                             },
                             MirSwitchCase {
                                 values: vec![MirLit::U32(1)],
                                 body: vec![MirStmt::Assign(
-                                    "result".to_string(),
+                                    arena.alloc_str("result"),
                                     MirExpr::Lit(MirLit::I32(20)),
                                 )],
                             },
                             MirSwitchCase {
                                 values: vec![MirLit::U32(2)],
                                 body: vec![MirStmt::Assign(
-                                    "result".to_string(),
+                                    arena.alloc_str("result"),
                                     MirExpr::Lit(MirLit::I32(30)),
                                 )],
                             },
                         ],
                         // default body
                         vec![MirStmt::Assign(
-                            "result".to_string(),
+                            arena.alloc_str("result"),
                             MirExpr::Lit(MirLit::I32(-1)),
                         )],
                     ),
                 ],
-                return_expr: Some(MirExpr::Var("result".to_string(), MirType::I32)),
+                return_expr: Some(MirExpr::Var(arena.alloc_str("result"), MirType::I32)),
                 comments: vec![],
             }],
             entry_points: vec![],

@@ -4,7 +4,7 @@
 //! functions, structs, globals, and constants. Then filter the MIR program
 //! to only include reachable declarations.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::*;
 
@@ -21,6 +21,16 @@ pub struct ReachableSet {
 pub fn compute_reachable(program: &MirProgram) -> ReachableSet {
     let mut reachable = ReachableSet::default();
 
+    // Build O(1) lookup indices
+    let functions_by_name: HashMap<&str, &MirFunction> =
+        program.functions.iter().map(|f| (f.name, f)).collect();
+    let constants_by_name: HashMap<&str, &MirConst> =
+        program.constants.iter().map(|c| (c.name, c)).collect();
+    let globals_by_name: HashMap<&str, &MirGlobal> =
+        program.globals.iter().map(|g| (g.name, g)).collect();
+    let structs_by_name: HashMap<&str, &MirStruct> =
+        program.structs.iter().map(|s| (s.name, s)).collect();
+
     // Seed: walk all entry points
     for ep in &program.entry_points {
         walk_params(&ep.params, &mut reachable);
@@ -36,7 +46,7 @@ pub fn compute_reachable(program: &MirProgram) -> ReachableSet {
     let mut visited: HashSet<String> = reachable.functions.clone();
 
     while let Some(name) = worklist.pop() {
-        if let Some(func) = program.functions.iter().find(|f| f.name == name) {
+        if let Some(func) = functions_by_name.get(name.as_str()) {
             walk_params(&func.params, &mut reachable);
             walk_type(&func.return_ty, &mut reachable);
             walk_stmts(&func.body, &mut reachable);
@@ -59,7 +69,7 @@ pub fn compute_reachable(program: &MirProgram) -> ReachableSet {
     // Constants can reference other things too
     let reachable_consts: Vec<String> = reachable.constants.iter().cloned().collect();
     for name in reachable_consts {
-        if let Some(c) = program.constants.iter().find(|c| c.name == name) {
+        if let Some(c) = constants_by_name.get(name.as_str()) {
             walk_type(&c.ty, &mut reachable);
             walk_expr(&c.value, &mut reachable);
         }
@@ -68,13 +78,13 @@ pub fn compute_reachable(program: &MirProgram) -> ReachableSet {
     // Transitively resolve struct dependencies
     let struct_names: Vec<String> = reachable.structs.iter().cloned().collect();
     for name in struct_names {
-        mark_struct_deps(&name, &program.structs, &mut reachable);
+        mark_struct_deps(&name, &structs_by_name, &mut reachable);
     }
 
     // Also mark structs from globals
     let global_names: Vec<String> = reachable.globals.iter().cloned().collect();
     for name in global_names {
-        if let Some(g) = program.globals.iter().find(|g| g.name == name) {
+        if let Some(g) = globals_by_name.get(name.as_str()) {
             walk_type(&g.ty, &mut reachable);
         }
     }
@@ -82,38 +92,38 @@ pub fn compute_reachable(program: &MirProgram) -> ReachableSet {
     // One more pass on struct deps after globals may have added new structs
     let struct_names: Vec<String> = reachable.structs.iter().cloned().collect();
     for name in struct_names {
-        mark_struct_deps(&name, &program.structs, &mut reachable);
+        mark_struct_deps(&name, &structs_by_name, &mut reachable);
     }
 
     reachable
 }
 
 /// Filter a MIR program to only include reachable declarations.
-pub fn filter_reachable(program: &MirProgram, reachable: &ReachableSet) -> MirProgram {
+pub fn filter_reachable<'a>(program: &MirProgram<'a>, reachable: &ReachableSet) -> MirProgram<'a> {
     MirProgram {
         structs: program
             .structs
             .iter()
-            .filter(|s| reachable.structs.contains(&s.name))
+            .filter(|s| reachable.structs.contains(s.name))
             .cloned()
             .collect(),
         globals: program
             .globals
             .iter()
-            .filter(|g| reachable.globals.contains(&g.name))
+            .filter(|g| reachable.globals.contains(g.name))
             .cloned()
             .collect(),
         functions: program
             .functions
             .iter()
-            .filter(|f| reachable.functions.contains(&f.name))
+            .filter(|f| reachable.functions.contains(f.name))
             .cloned()
             .collect(),
         entry_points: program.entry_points.clone(),
         constants: program
             .constants
             .iter()
-            .filter(|c| reachable.constants.contains(&c.name))
+            .filter(|c| reachable.constants.contains(c.name))
             .cloned()
             .collect(),
     }
@@ -126,9 +136,15 @@ pub fn filter_reachable(program: &MirProgram, reachable: &ReachableSet) -> MirPr
 pub fn compute_reachable_library(program: &MirProgram) -> ReachableSet {
     let mut reachable = ReachableSet::default();
 
+    // Build O(1) lookup indices
+    let globals_by_name: HashMap<&str, &MirGlobal> =
+        program.globals.iter().map(|g| (g.name, g)).collect();
+    let structs_by_name: HashMap<&str, &MirStruct> =
+        program.structs.iter().map(|s| (s.name, s)).collect();
+
     // Seed: walk all functions
     for func in &program.functions {
-        reachable.functions.insert(func.name.clone());
+        reachable.functions.insert(func.name.to_string());
         walk_params(&func.params, &mut reachable);
         walk_type(&func.return_ty, &mut reachable);
         walk_stmts(&func.body, &mut reachable);
@@ -140,7 +156,7 @@ pub fn compute_reachable_library(program: &MirProgram) -> ReachableSet {
     // Seed: keep all constants in library mode (they may have been promoted
     // from zero-param functions and are part of the module's public API).
     for c in &program.constants {
-        reachable.constants.insert(c.name.clone());
+        reachable.constants.insert(c.name.to_string());
         walk_type(&c.ty, &mut reachable);
         walk_expr(&c.value, &mut reachable);
     }
@@ -148,13 +164,13 @@ pub fn compute_reachable_library(program: &MirProgram) -> ReachableSet {
     // Transitively resolve struct dependencies
     let struct_names: Vec<String> = reachable.structs.iter().cloned().collect();
     for name in struct_names {
-        mark_struct_deps(&name, &program.structs, &mut reachable);
+        mark_struct_deps(&name, &structs_by_name, &mut reachable);
     }
 
     // Also mark structs from globals
     let global_names: Vec<String> = reachable.globals.iter().cloned().collect();
     for name in global_names {
-        if let Some(g) = program.globals.iter().find(|g| g.name == name) {
+        if let Some(g) = globals_by_name.get(name.as_str()) {
             walk_type(&g.ty, &mut reachable);
         }
     }
@@ -162,7 +178,7 @@ pub fn compute_reachable_library(program: &MirProgram) -> ReachableSet {
     // One more pass on struct deps after globals may have added new structs
     let struct_names: Vec<String> = reachable.structs.iter().cloned().collect();
     for name in struct_names {
-        mark_struct_deps(&name, &program.structs, &mut reachable);
+        mark_struct_deps(&name, &structs_by_name, &mut reachable);
     }
 
     reachable
@@ -170,18 +186,21 @@ pub fn compute_reachable_library(program: &MirProgram) -> ReachableSet {
 
 /// Filter a MIR program in library mode: keep all functions and constants,
 /// but only reachable structs/globals.
-pub fn filter_reachable_library(program: &MirProgram, reachable: &ReachableSet) -> MirProgram {
+pub fn filter_reachable_library<'a>(
+    program: &MirProgram<'a>,
+    reachable: &ReachableSet,
+) -> MirProgram<'a> {
     MirProgram {
         structs: program
             .structs
             .iter()
-            .filter(|s| reachable.structs.contains(&s.name))
+            .filter(|s| reachable.structs.contains(s.name))
             .cloned()
             .collect(),
         globals: program
             .globals
             .iter()
-            .filter(|g| reachable.globals.contains(&g.name))
+            .filter(|g| reachable.globals.contains(g.name))
             .cloned()
             .collect(),
         functions: program.functions.clone(), // keep all functions in library mode
@@ -196,7 +215,7 @@ pub fn filter_reachable_library(program: &MirProgram, reachable: &ReachableSet) 
 /// kept but only structs/globals/constants reachable from those functions
 /// survive.  This prevents unused prelude ADTs with unresolved type variables
 /// from leaking into the output.
-pub fn eliminate_dead_code(program: &MirProgram) -> MirProgram {
+pub fn eliminate_dead_code<'a>(program: &MirProgram<'a>) -> MirProgram<'a> {
     if program.entry_points.is_empty() {
         let reachable = compute_reachable_library(program);
         return filter_reachable_library(program, &reachable);
@@ -216,7 +235,7 @@ fn walk_params(params: &[MirParam], reachable: &mut ReachableSet) {
 fn walk_type(ty: &MirType, reachable: &mut ReachableSet) {
     match ty {
         MirType::Struct(name) => {
-            reachable.structs.insert(name.clone());
+            reachable.structs.insert(name.to_string());
         }
         MirType::Vec(_, inner) | MirType::Array(inner, _) | MirType::RuntimeArray(inner) => {
             walk_type(inner, reachable)
@@ -268,9 +287,9 @@ fn walk_expr(expr: &MirExpr, reachable: &mut ReachableSet) {
         MirExpr::Lit(_) => {}
         MirExpr::Var(name, ty) => {
             // Globals are referenced by name via Var
-            reachable.globals.insert(name.clone());
+            reachable.globals.insert(name.to_string());
             // Also could be a constant
-            reachable.constants.insert(name.clone());
+            reachable.constants.insert(name.to_string());
             walk_type(ty, reachable);
         }
         MirExpr::BinOp(_, lhs, rhs, ty) => {
@@ -283,14 +302,14 @@ fn walk_expr(expr: &MirExpr, reachable: &mut ReachableSet) {
             walk_type(ty, reachable);
         }
         MirExpr::Call(name, args, ty) => {
-            reachable.functions.insert(name.clone());
+            reachable.functions.insert(name.to_string());
             for arg in args {
                 walk_expr(arg, reachable);
             }
             walk_type(ty, reachable);
         }
         MirExpr::ConstructStruct(name, fields) => {
-            reachable.structs.insert(name.clone());
+            reachable.structs.insert(name.to_string());
             for field in fields {
                 walk_expr(field, reachable);
             }
@@ -312,26 +331,34 @@ fn walk_expr(expr: &MirExpr, reachable: &mut ReachableSet) {
 }
 
 /// Transitively mark struct dependencies (structs containing other structs).
-fn mark_struct_deps(name: &str, structs: &[MirStruct], reachable: &mut ReachableSet) {
-    if let Some(s) = structs.iter().find(|s| s.name == name) {
+fn mark_struct_deps(
+    name: &str,
+    structs_by_name: &HashMap<&str, &MirStruct>,
+    reachable: &mut ReachableSet,
+) {
+    if let Some(s) = structs_by_name.get(name) {
         for field in &s.fields {
-            walk_type_for_struct_deps(&field.ty, structs, reachable);
+            walk_type_for_struct_deps(&field.ty, structs_by_name, reachable);
         }
     }
 }
 
-fn walk_type_for_struct_deps(ty: &MirType, structs: &[MirStruct], reachable: &mut ReachableSet) {
+fn walk_type_for_struct_deps(
+    ty: &MirType,
+    structs_by_name: &HashMap<&str, &MirStruct>,
+    reachable: &mut ReachableSet,
+) {
     match ty {
         MirType::Struct(dep) => {
-            if reachable.structs.insert(dep.clone()) {
-                mark_struct_deps(dep, structs, reachable);
+            if reachable.structs.insert(dep.to_string()) {
+                mark_struct_deps(dep, structs_by_name, reachable);
             }
         }
         MirType::Vec(_, inner) | MirType::Array(inner, _) | MirType::RuntimeArray(inner) => {
-            walk_type_for_struct_deps(inner, structs, reachable);
+            walk_type_for_struct_deps(inner, structs_by_name, reachable);
         }
         MirType::Mat(_, _, inner) => {
-            walk_type_for_struct_deps(inner, structs, reachable);
+            walk_type_for_struct_deps(inner, structs_by_name, reachable);
         }
         _ => {}
     }
@@ -340,20 +367,21 @@ fn walk_type_for_struct_deps(ty: &MirType, structs: &[MirStruct], reachable: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shadml_allocator::Allocator;
 
-    fn make_simple_fn(name: &str, calls: &[&str]) -> MirFunction {
-        let body: Vec<MirStmt> = calls
+    fn make_simple_fn<'a>(arena: &'a Allocator, name: &str, calls: &[&str]) -> MirFunction<'a> {
+        let body: Vec<MirStmt<'a>> = calls
             .iter()
             .map(|c| {
                 MirStmt::Let(
-                    format!("_tmp_{}", c),
+                    arena.alloc_str(&format!("_tmp_{}", c)),
                     MirType::I32,
-                    MirExpr::Call(c.to_string(), vec![], MirType::I32),
+                    MirExpr::Call(arena.alloc_str(c), vec![], MirType::I32),
                 )
             })
             .collect();
         MirFunction {
-            name: name.to_string(),
+            name: arena.alloc_str(name),
             params: vec![],
             return_ty: MirType::I32,
             body,
@@ -362,19 +390,19 @@ mod tests {
         }
     }
 
-    fn make_entry_point(name: &str, calls: &[&str]) -> MirEntryPoint {
-        let body: Vec<MirStmt> = calls
+    fn make_entry_point<'a>(arena: &'a Allocator, name: &str, calls: &[&str]) -> MirEntryPoint<'a> {
+        let body: Vec<MirStmt<'a>> = calls
             .iter()
             .map(|c| {
                 MirStmt::Let(
-                    format!("_tmp_{}", c),
+                    arena.alloc_str(&format!("_tmp_{}", c)),
                     MirType::I32,
-                    MirExpr::Call(c.to_string(), vec![], MirType::I32),
+                    MirExpr::Call(arena.alloc_str(c), vec![], MirType::I32),
                 )
             })
             .collect();
         MirEntryPoint {
-            name: name.to_string(),
+            name: arena.alloc_str(name),
             stage: ShaderStage::Compute,
             workgroup_size: Some([64, 1, 1]),
             params: vec![],
@@ -387,11 +415,15 @@ mod tests {
 
     #[test]
     fn unused_function_is_eliminated() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
-            functions: vec![make_simple_fn("used", &[]), make_simple_fn("unused", &[])],
-            entry_points: vec![make_entry_point("main", &["used"])],
+            functions: vec![
+                make_simple_fn(&arena, "used", &[]),
+                make_simple_fn(&arena, "unused", &[]),
+            ],
+            entry_points: vec![make_entry_point(&arena, "main", &["used"])],
             constants: vec![],
         };
 
@@ -402,20 +434,21 @@ mod tests {
 
     #[test]
     fn transitive_call_keeps_both() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![
-                make_simple_fn("a", &["b"]),
-                make_simple_fn("b", &[]),
-                make_simple_fn("c", &[]),
+                make_simple_fn(&arena, "a", &["b"]),
+                make_simple_fn(&arena, "b", &[]),
+                make_simple_fn(&arena, "c", &[]),
             ],
-            entry_points: vec![make_entry_point("main", &["a"])],
+            entry_points: vec![make_entry_point(&arena, "main", &["a"])],
             constants: vec![],
         };
 
         let result = eliminate_dead_code(&program);
-        let names: HashSet<&str> = result.functions.iter().map(|f| f.name.as_str()).collect();
+        let names: HashSet<&str> = result.functions.iter().map(|f| f.name).collect();
         assert!(names.contains("a"));
         assert!(names.contains("b"));
         assert!(!names.contains("c"));
@@ -423,20 +456,21 @@ mod tests {
 
     #[test]
     fn unused_struct_is_eliminated() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![
                 MirStruct {
-                    name: "Used".to_string(),
+                    name: arena.alloc_str("Used"),
                     fields: vec![MirField {
-                        name: "x".to_string(),
+                        name: arena.alloc_str("x"),
                         ty: MirType::F32,
                         attributes: vec![],
                     }],
                 },
                 MirStruct {
-                    name: "Unused".to_string(),
+                    name: arena.alloc_str("Unused"),
                     fields: vec![MirField {
-                        name: "y".to_string(),
+                        name: arena.alloc_str("y"),
                         ty: MirType::I32,
                         attributes: vec![],
                     }],
@@ -445,16 +479,16 @@ mod tests {
             globals: vec![],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "main".to_string(),
+                name: arena.alloc_str("main"),
                 stage: ShaderStage::Compute,
                 workgroup_size: Some([1, 1, 1]),
                 params: vec![],
                 return_ty: MirType::Unit,
                 body: vec![MirStmt::Let(
-                    "s".to_string(),
-                    MirType::Struct("Used".to_string()),
+                    arena.alloc_str("s"),
+                    MirType::Struct(arena.alloc_str("Used")),
                     MirExpr::ConstructStruct(
-                        "Used".to_string(),
+                        arena.alloc_str("Used"),
                         vec![MirExpr::Lit(MirLit::F32(1.0))],
                     ),
                 )],
@@ -471,18 +505,19 @@ mod tests {
 
     #[test]
     fn unused_global_is_eliminated() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![
                 MirGlobal {
-                    name: "used_buf".to_string(),
+                    name: arena.alloc_str("used_buf"),
                     address_space: AddressSpace::StorageReadWrite,
-                    ty: MirType::Array(Box::new(MirType::F32), 64),
+                    ty: MirType::Array(arena.alloc(MirType::F32), 64),
                     group: 0,
                     binding: 0,
                 },
                 MirGlobal {
-                    name: "unused_buf".to_string(),
+                    name: arena.alloc_str("unused_buf"),
                     address_space: AddressSpace::Uniform,
                     ty: MirType::F32,
                     group: 0,
@@ -491,15 +526,15 @@ mod tests {
             ],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "main".to_string(),
+                name: arena.alloc_str("main"),
                 stage: ShaderStage::Compute,
                 workgroup_size: Some([64, 1, 1]),
                 params: vec![],
                 return_ty: MirType::Unit,
                 body: vec![MirStmt::IndexAssign(
                     MirExpr::Var(
-                        "used_buf".to_string(),
-                        MirType::Array(Box::new(MirType::F32), 64),
+                        arena.alloc_str("used_buf"),
+                        MirType::Array(arena.alloc(MirType::F32), 64),
                     ),
                     MirExpr::Lit(MirLit::I32(0)),
                     MirExpr::Lit(MirLit::F32(1.0)),
@@ -517,39 +552,46 @@ mod tests {
 
     #[test]
     fn struct_used_via_global_binding_is_kept() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
-                name: "Particle".to_string(),
+                name: arena.alloc_str("Particle"),
                 fields: vec![MirField {
-                    name: "pos".to_string(),
-                    ty: MirType::Vec(3, Box::new(MirType::F32)),
+                    name: arena.alloc_str("pos"),
+                    ty: MirType::Vec(3, arena.alloc(MirType::F32)),
                     attributes: vec![],
                 }],
             }],
             globals: vec![MirGlobal {
-                name: "particles".to_string(),
+                name: arena.alloc_str("particles"),
                 address_space: AddressSpace::StorageReadWrite,
-                ty: MirType::Array(Box::new(MirType::Struct("Particle".to_string())), 256),
+                ty: MirType::Array(
+                    arena.alloc(MirType::Struct(arena.alloc_str("Particle"))),
+                    256,
+                ),
                 group: 0,
                 binding: 0,
             }],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "main".to_string(),
+                name: arena.alloc_str("main"),
                 stage: ShaderStage::Compute,
                 workgroup_size: Some([64, 1, 1]),
                 params: vec![],
                 return_ty: MirType::Unit,
                 body: vec![MirStmt::Let(
-                    "p".to_string(),
-                    MirType::Struct("Particle".to_string()),
+                    arena.alloc_str("p"),
+                    MirType::Struct(arena.alloc_str("Particle")),
                     MirExpr::Index(
-                        Box::new(MirExpr::Var(
-                            "particles".to_string(),
-                            MirType::Array(Box::new(MirType::Struct("Particle".to_string())), 256),
+                        arena.alloc(MirExpr::Var(
+                            arena.alloc_str("particles"),
+                            MirType::Array(
+                                arena.alloc(MirType::Struct(arena.alloc_str("Particle"))),
+                                256,
+                            ),
                         )),
-                        Box::new(MirExpr::Lit(MirLit::I32(0))),
-                        MirType::Struct("Particle".to_string()),
+                        arena.alloc(MirExpr::Lit(MirLit::I32(0))),
+                        MirType::Struct(arena.alloc_str("Particle")),
                     ),
                 )],
                 return_expr: None,
@@ -566,13 +608,14 @@ mod tests {
 
     #[test]
     fn no_entry_points_keeps_functions_eliminates_unused_structs() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
-                name: "Foo".to_string(),
+                name: arena.alloc_str("Foo"),
                 fields: vec![],
             }],
             globals: vec![],
-            functions: vec![make_simple_fn("helper", &[])],
+            functions: vec![make_simple_fn(&arena, "helper", &[])],
             entry_points: vec![],
             constants: vec![],
         };
@@ -585,33 +628,34 @@ mod tests {
 
     #[test]
     fn no_entry_points_keeps_used_structs() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![
                 MirStruct {
-                    name: "Used".to_string(),
+                    name: arena.alloc_str("Used"),
                     fields: vec![MirField {
-                        name: "x".to_string(),
+                        name: arena.alloc_str("x"),
                         ty: MirType::F32,
                         attributes: vec![],
                     }],
                 },
                 MirStruct {
-                    name: "Unused".to_string(),
+                    name: arena.alloc_str("Unused"),
                     fields: vec![],
                 },
             ],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "helper".to_string(),
+                name: arena.alloc_str("helper"),
                 params: vec![MirParam {
-                    name: "s".to_string(),
-                    ty: MirType::Struct("Used".to_string()),
+                    name: arena.alloc_str("s"),
+                    ty: MirType::Struct(arena.alloc_str("Used")),
                 }],
-                return_ty: MirType::Struct("Used".to_string()),
+                return_ty: MirType::Struct(arena.alloc_str("Used")),
                 body: vec![],
                 return_expr: Some(MirExpr::Var(
-                    "s".to_string(),
-                    MirType::Struct("Used".to_string()),
+                    arena.alloc_str("s"),
+                    MirType::Struct(arena.alloc_str("Used")),
                 )),
                 comments: vec![],
             }],
@@ -627,38 +671,39 @@ mod tests {
 
     #[test]
     fn nested_struct_deps_are_kept() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![
                 MirStruct {
-                    name: "Inner".to_string(),
+                    name: arena.alloc_str("Inner"),
                     fields: vec![MirField {
-                        name: "v".to_string(),
+                        name: arena.alloc_str("v"),
                         ty: MirType::F32,
                         attributes: vec![],
                     }],
                 },
                 MirStruct {
-                    name: "Outer".to_string(),
+                    name: arena.alloc_str("Outer"),
                     fields: vec![MirField {
-                        name: "inner".to_string(),
-                        ty: MirType::Struct("Inner".to_string()),
+                        name: arena.alloc_str("inner"),
+                        ty: MirType::Struct(arena.alloc_str("Inner")),
                         attributes: vec![],
                     }],
                 },
                 MirStruct {
-                    name: "Unrelated".to_string(),
+                    name: arena.alloc_str("Unrelated"),
                     fields: vec![],
                 },
             ],
             globals: vec![],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "main".to_string(),
+                name: arena.alloc_str("main"),
                 stage: ShaderStage::Compute,
                 workgroup_size: Some([1, 1, 1]),
                 params: vec![MirParam {
-                    name: "o".to_string(),
-                    ty: MirType::Struct("Outer".to_string()),
+                    name: arena.alloc_str("o"),
+                    ty: MirType::Struct(arena.alloc_str("Outer")),
                 }],
                 return_ty: MirType::Unit,
                 body: vec![],
@@ -669,7 +714,7 @@ mod tests {
         };
 
         let result = eliminate_dead_code(&program);
-        let names: HashSet<&str> = result.structs.iter().map(|s| s.name.as_str()).collect();
+        let names: HashSet<&str> = result.structs.iter().map(|s| s.name).collect();
         assert!(names.contains("Inner"));
         assert!(names.contains("Outer"));
         assert!(!names.contains("Unrelated"));

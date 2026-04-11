@@ -72,6 +72,124 @@ fn with_prelude(program: &mut shadml_parser::parser::Program) {
     program.decls = combined;
 }
 
+/// Bundle result for multi-file compilation via WASM.
+#[derive(Serialize)]
+struct BundleResultOutput {
+    entries: Vec<BundleEntryOutput>,
+    diagnostics: Vec<DiagnosticOutput>,
+}
+
+#[derive(Serialize)]
+struct BundleEntryOutput {
+    name: String,
+    wgsl: String,
+    stages: Vec<BundleStageOutput>,
+}
+
+#[derive(Serialize)]
+struct BundleStageOutput {
+    name: String,
+    stage: String,
+}
+
+/// Bundle multiple source files into WGSL outputs.
+///
+/// Input: JSON array of objects `[{"path": "Main.shadml", "source": "..."},
+/// ...]`. The first file is the entry point.
+///
+/// Optional `features_json`: JSON array of feature flag strings.
+///
+/// Returns: JSON `BundleResultOutput` with entries and diagnostics.
+#[wasm_bindgen]
+pub fn bundle(files_json: &str, features_json: &str) -> String {
+    let files: Vec<shadml_bundler::VirtualFile> = match serde_json::from_str(files_json) {
+        Ok(f) => f,
+        Err(e) => {
+            let result = BundleResultOutput {
+                entries: vec![],
+                diagnostics: vec![DiagnosticOutput {
+                    severity: "error".into(),
+                    message: format!("invalid files JSON: {}", e),
+                    code: None,
+                    help: None,
+                    note: None,
+                    line: 0,
+                    col: 0,
+                    end_line: 0,
+                    end_col: 0,
+                }],
+            };
+            return serde_json::to_string(&result).unwrap_or_default();
+        }
+    };
+
+    let features: Vec<String> = serde_json::from_str(features_json).unwrap_or_default();
+
+    match shadml_bundler::bundle_virtual(&files, &features, false) {
+        Ok(output) => {
+            let entries: Vec<BundleEntryOutput> = output
+                .entries
+                .iter()
+                .map(|e| BundleEntryOutput {
+                    name: e.name.clone(),
+                    wgsl: e.wgsl.clone(),
+                    stages: e
+                        .stages
+                        .iter()
+                        .map(|s| BundleStageOutput {
+                            name: s.name.clone(),
+                            stage: s.stage.to_string(),
+                        })
+                        .collect(),
+                })
+                .collect();
+
+            let diagnostics: Vec<DiagnosticOutput> = output
+                .diagnostics
+                .iter()
+                .map(|d| DiagnosticOutput {
+                    severity: match d.severity {
+                        shadml_bundler::BundleSeverity::Error => "error".into(),
+                        shadml_bundler::BundleSeverity::Warning => "warning".into(),
+                        shadml_bundler::BundleSeverity::Info => "info".into(),
+                    },
+                    message: d.message.clone(),
+                    code: None,
+                    help: d.help.clone(),
+                    note: None,
+                    line: 0,
+                    col: 0,
+                    end_line: 0,
+                    end_col: 0,
+                })
+                .collect();
+
+            let result = BundleResultOutput {
+                entries,
+                diagnostics,
+            };
+            serde_json::to_string(&result).unwrap_or_default()
+        }
+        Err(e) => {
+            let result = BundleResultOutput {
+                entries: vec![],
+                diagnostics: vec![DiagnosticOutput {
+                    severity: "error".into(),
+                    message: e.to_string(),
+                    code: None,
+                    help: None,
+                    note: None,
+                    line: 0,
+                    col: 0,
+                    end_line: 0,
+                    end_col: 0,
+                }],
+            };
+            serde_json::to_string(&result).unwrap_or_default()
+        }
+    }
+}
+
 #[wasm_bindgen]
 pub fn compile(source: &str) -> String {
     let mut parser = shadml_parser::parser::Parser::new(source);
@@ -106,7 +224,8 @@ pub fn compile(source: &str) -> String {
             }
             "// HIR lowering failed.".to_string()
         } else {
-            match shadml_mir::lower::lower_hir_to_mir(&hir) {
+            let arena = shadml_allocator::Allocator::new();
+            match shadml_mir::lower::lower_hir_to_mir(&arena, &hir) {
                 Ok(mir) => {
                     let mir = shadml_mir::reachability::eliminate_dead_code(&mir);
                     shadml_wgsl_codegen::emit_wgsl(&mir)

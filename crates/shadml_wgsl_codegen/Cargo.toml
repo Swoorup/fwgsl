@@ -8,3 +8,4 @@ shadml_mir = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
+shadml_allocator = { workspace = true }

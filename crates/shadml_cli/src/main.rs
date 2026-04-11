@@ -21,6 +21,9 @@ fn main() {
                 &features,
             );
         }
+        Some("bundle") | Some("b") => {
+            cmd_bundle(&args, &features);
+        }
         Some("check") => {
             let file = args.get(2).unwrap_or_else(|| {
                 eprintln!("Usage: shadml check <file.shadml>");
@@ -59,15 +62,24 @@ USAGE:
 
 COMMANDS:
     compile, c  <file>    Compile .shadml to .wgsl
+    bundle,  b  [opts]    Bundle a project (multi-file) to .wgsl
     check       <file>    Type-check without emitting
     fmt         <file>    Format source code
     version               Print version
     help                  Print this help
 
-OPTIONS:
+COMPILE OPTIONS:
     --emit-ast            Print AST debug output
     --preserve-comments   Preserve source comments in WGSL output
-    --output, -o <file>   Output file (default: stdout)
+    --feature <name>      Enable a compile-time feature flag (can be repeated)
+
+BUNDLE OPTIONS:
+    --config <file>       Use a shadml.toml project config file
+    --entry <file>        Entry point .shadml file (can be repeated)
+    --source-root <dir>   Module search directory (can be repeated)
+    --output-dir <dir>    Output directory (default: dist)
+    --split               Split each entry point into a separate .wgsl file
+    --preserve-comments   Preserve source comments in WGSL output
     --feature <name>      Enable a compile-time feature flag (can be repeated)
 "#
     );
@@ -184,7 +196,8 @@ fn cmd_compile(file: &str, emit_ast: bool, preserve_comments: bool, feature_flag
     }
 
     // HIR -> MIR lowering
-    let mir = match shadml_mir::lower::lower_hir_to_mir(&hir) {
+    let arena = shadml_allocator::Allocator::new();
+    let mir = match shadml_mir::lower::lower_hir_to_mir(&arena, &hir) {
         Ok(mir) => mir,
         Err(errors) => {
             for e in &errors {
@@ -278,6 +291,167 @@ fn cmd_fmt(file: &str) {
     let source = read_file(file);
     let formatted = shadml_formatter::format_default(&source);
     print!("{}", formatted);
+}
+
+fn cmd_bundle(args: &[String], feature_flags: &[String]) {
+    // Check for --config flag first
+    if let Some(config_path) = collect_flag_value(args, "--config") {
+        let path = std::path::Path::new(&config_path);
+        let mut config = match shadml_bundler::config::load_config(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        };
+        // CLI feature flags override config
+        if !feature_flags.is_empty() {
+            config.features = feature_flags.to_vec();
+        }
+        // CLI flags can override config settings
+        if args.contains(&"--split".to_string()) {
+            config.split_entry_points = true;
+        }
+        if args.contains(&"--preserve-comments".to_string()) {
+            config.preserve_comments = true;
+        }
+        if let Some(dir) = collect_flag_value(args, "--output-dir") {
+            config.output_dir = std::path::PathBuf::from(dir);
+        }
+        run_bundle(config);
+        return;
+    }
+
+    // Build config from CLI args
+    let entries: Vec<std::path::PathBuf> = collect_flag_values(args, "--entry")
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+
+    // If no --entry flags, try the positional argument
+    let entries = if entries.is_empty() {
+        match args.get(2) {
+            Some(file) if !file.starts_with('-') => vec![std::path::PathBuf::from(file)],
+            _ => {
+                eprintln!("Usage: shadml bundle --entry <file.shadml> [--entry <file2.shadml>]");
+                eprintln!("       shadml bundle --config <shadml.toml>");
+                eprintln!("       shadml bundle <file.shadml>");
+                process::exit(1);
+            }
+        }
+    } else {
+        entries
+    };
+
+    let source_roots: Vec<std::path::PathBuf> = collect_flag_values(args, "--source-root")
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+
+    // Default source root: directory of the first entry file
+    let source_roots = if source_roots.is_empty() {
+        entries
+            .first()
+            .and_then(|e| e.parent())
+            .map(|p| vec![p.to_path_buf()])
+            .unwrap_or_else(|| vec![std::path::PathBuf::from(".")])
+    } else {
+        source_roots
+    };
+
+    let output_dir = collect_flag_value(args, "--output-dir")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("dist"));
+
+    let config = shadml_bundler::BundleConfig {
+        entries,
+        source_roots,
+        output_dir,
+        features: feature_flags.to_vec(),
+        preserve_comments: args.contains(&"--preserve-comments".to_string()),
+        split_entry_points: args.contains(&"--split".to_string()),
+    };
+
+    run_bundle(config);
+}
+
+fn run_bundle(config: shadml_bundler::BundleConfig) {
+    let output_dir = config.output_dir.clone();
+
+    let output = match shadml_bundler::bundle(&config) {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            process::exit(1);
+        }
+    };
+
+    // Print warnings
+    for diag in &output.diagnostics {
+        let severity = match diag.severity {
+            shadml_bundler::BundleSeverity::Error => "error",
+            shadml_bundler::BundleSeverity::Warning => "warning",
+            shadml_bundler::BundleSeverity::Info => "info",
+        };
+        if let Some(ref file) = diag.file {
+            eprintln!("{}: {}: {}", file.display(), severity, diag.message);
+        } else {
+            eprintln!("{}: {}", severity, diag.message);
+        }
+    }
+
+    // Write outputs
+    if let Err(e) = shadml_bundler::write_bundle(&output, &output_dir) {
+        eprintln!("error: {}", e);
+        process::exit(1);
+    }
+
+    // Report results
+    for entry in &output.entries {
+        let filename = format!("{}.wgsl", entry.name);
+        let path = output_dir.join(&filename);
+        let stages: Vec<String> = entry
+            .stages
+            .iter()
+            .map(|s| format!("@{} {}", s.stage, s.name))
+            .collect();
+        if stages.is_empty() {
+            println!("  {} (library)", path.display());
+        } else {
+            println!("  {} [{}]", path.display(), stages.join(", "));
+        }
+    }
+
+    println!(
+        "Bundled {} output(s) to {}",
+        output.entries.len(),
+        output_dir.display()
+    );
+}
+
+/// Collect a single value for a named flag (e.g. `--config <value>`).
+fn collect_flag_value(args: &[String], flag: &str) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            return iter.next().cloned();
+        }
+    }
+    None
+}
+
+/// Collect all values for a repeated flag (e.g. `--entry a --entry b`).
+fn collect_flag_values(args: &[String], flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            if let Some(val) = iter.next() {
+                values.push(val.clone());
+            }
+        }
+    }
+    values
 }
 
 fn read_file(path: &str) -> String {

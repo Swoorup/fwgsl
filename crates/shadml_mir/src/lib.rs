@@ -3,6 +3,11 @@
 //! MIR is a lowered representation suitable for code generation.
 //! It has been type-checked, monomorphised, and desugared from HIR
 //! into a form that maps closely to WGSL constructs.
+//!
+//! All MIR types are parameterised by a lifetime `'a` that ties them
+//! to an arena allocator.  Strings are stored as `&'a str` and
+//! recursive nodes as `&'a T` instead of `Box<T>`, enabling
+//! bump-allocated, cache-friendly compilation.
 
 pub mod lower;
 pub mod reachability;
@@ -15,28 +20,28 @@ use std::fmt;
 
 /// A complete MIR program ready for code generation.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirProgram {
-    pub structs: Vec<MirStruct>,
-    pub globals: Vec<MirGlobal>,
-    pub functions: Vec<MirFunction>,
-    pub entry_points: Vec<MirEntryPoint>,
-    pub constants: Vec<MirConst>,
+pub struct MirProgram<'a> {
+    pub structs: Vec<MirStruct<'a>>,
+    pub globals: Vec<MirGlobal<'a>>,
+    pub functions: Vec<MirFunction<'a>>,
+    pub entry_points: Vec<MirEntryPoint<'a>>,
+    pub constants: Vec<MirConst<'a>>,
 }
 
 /// A module-level constant declaration.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirConst {
-    pub name: String,
-    pub ty: MirType,
-    pub value: MirExpr,
+pub struct MirConst<'a> {
+    pub name: &'a str,
+    pub ty: MirType<'a>,
+    pub value: MirExpr<'a>,
 }
 
 /// A module-scope variable declaration (GPU binding).
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirGlobal {
-    pub name: String,
+pub struct MirGlobal<'a> {
+    pub name: &'a str,
     pub address_space: AddressSpace,
-    pub ty: MirType,
+    pub ty: MirType<'a>,
     pub group: u32,
     pub binding: u32,
 }
@@ -55,24 +60,24 @@ pub enum AddressSpace {
 
 /// A struct type definition.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirStruct {
-    pub name: String,
-    pub fields: Vec<MirField>,
+pub struct MirStruct<'a> {
+    pub name: &'a str,
+    pub fields: Vec<MirField<'a>>,
 }
 
 /// A single field in a struct.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirField {
-    pub name: String,
-    pub ty: MirType,
-    pub attributes: Vec<MirAttribute>,
+pub struct MirField<'a> {
+    pub name: &'a str,
+    pub ty: MirType<'a>,
+    pub attributes: Vec<MirAttribute<'a>>,
 }
 
 /// An attribute annotation (e.g. `@location(0)`, `@builtin(position)`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirAttribute {
-    pub name: String,
-    pub args: Vec<String>,
+pub struct MirAttribute<'a> {
+    pub name: &'a str,
+    pub args: Vec<&'a str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -81,26 +86,26 @@ pub struct MirAttribute {
 
 /// Concrete types that map to WGSL types.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum MirType {
+pub enum MirType<'a> {
     I32,
     U32,
     F32,
     Bool,
     /// `vec{n}<T>` — e.g. `Vec(3, F32)` → `vec3<f32>`
-    Vec(u8, Box<MirType>),
+    Vec(u8, &'a MirType<'a>),
     /// `mat{cols}x{rows}<T>` — e.g. `Mat(4, 4, F32)` → `mat4x4<f32>`
-    Mat(u8, u8, Box<MirType>),
+    Mat(u8, u8, &'a MirType<'a>),
     /// A user-defined struct type.
-    Struct(String),
+    Struct(&'a str),
     /// `array<T, N>`
-    Array(Box<MirType>, u32),
+    Array(&'a MirType<'a>, u32),
     /// `array<T>` (unsized / runtime-sized storage array)
-    RuntimeArray(Box<MirType>),
+    RuntimeArray(&'a MirType<'a>),
     /// The unit type — no WGSL representation (used for void returns).
     Unit,
 }
 
-impl fmt::Display for MirType {
+impl fmt::Display for MirType<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MirType::I32 => write!(f, "i32"),
@@ -123,20 +128,20 @@ impl fmt::Display for MirType {
 
 /// A regular (non-entry-point) function.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirFunction {
-    pub name: String,
-    pub params: Vec<MirParam>,
-    pub return_ty: MirType,
-    pub body: Vec<MirStmt>,
-    pub return_expr: Option<MirExpr>,
-    pub comments: Vec<String>,
+pub struct MirFunction<'a> {
+    pub name: &'a str,
+    pub params: Vec<MirParam<'a>>,
+    pub return_ty: MirType<'a>,
+    pub body: Vec<MirStmt<'a>>,
+    pub return_expr: Option<MirExpr<'a>>,
+    pub comments: Vec<&'a str>,
 }
 
 /// A function parameter.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirParam {
-    pub name: String,
-    pub ty: MirType,
+pub struct MirParam<'a> {
+    pub name: &'a str,
+    pub ty: MirType<'a>,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,16 +150,16 @@ pub struct MirParam {
 
 /// An entry-point function annotated with a shader stage.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirEntryPoint {
-    pub name: String,
+pub struct MirEntryPoint<'a> {
+    pub name: &'a str,
     pub stage: ShaderStage,
     /// Workgroup size for compute shaders — `[x, y, z]`.
     pub workgroup_size: Option<[u32; 3]>,
-    pub params: Vec<MirParam>,
-    pub return_ty: MirType,
-    pub body: Vec<MirStmt>,
-    pub return_expr: Option<MirExpr>,
-    pub comments: Vec<String>,
+    pub params: Vec<MirParam<'a>>,
+    pub return_ty: MirType<'a>,
+    pub body: Vec<MirStmt<'a>>,
+    pub return_expr: Option<MirExpr<'a>>,
+    pub comments: Vec<&'a str>,
 }
 
 /// Shader stage.
@@ -181,25 +186,25 @@ impl fmt::Display for ShaderStage {
 
 /// A MIR statement.
 #[derive(Debug, Clone, PartialEq)]
-pub enum MirStmt {
+pub enum MirStmt<'a> {
     /// `let name: ty = expr;`
-    Let(String, MirType, MirExpr),
+    Let(&'a str, MirType<'a>, MirExpr<'a>),
     /// `var name: ty = expr;`
-    Var(String, MirType, MirExpr),
+    Var(&'a str, MirType<'a>, MirExpr<'a>),
     /// `name = expr;`
-    Assign(String, MirExpr),
+    Assign(&'a str, MirExpr<'a>),
     /// `base[index] = expr;`
-    IndexAssign(MirExpr, MirExpr, MirExpr),
+    IndexAssign(MirExpr<'a>, MirExpr<'a>, MirExpr<'a>),
     /// `if (cond) { then } else { else }`
-    If(MirExpr, Vec<MirStmt>, Vec<MirStmt>),
+    If(MirExpr<'a>, Vec<MirStmt<'a>>, Vec<MirStmt<'a>>),
     /// `return expr;`
-    Return(MirExpr),
+    Return(MirExpr<'a>),
     /// A nested block `{ ... }`
-    Block(Vec<MirStmt>),
+    Block(Vec<MirStmt<'a>>),
     /// `switch (expr) { case Xu: { ... } ... default: { ... } }`
-    Switch(MirExpr, Vec<MirSwitchCase>, Vec<MirStmt>),
+    Switch(MirExpr<'a>, Vec<MirSwitchCase<'a>>, Vec<MirStmt<'a>>),
     /// `loop { body }`
-    Loop(Vec<MirStmt>),
+    Loop(Vec<MirStmt<'a>>),
     /// `break;`
     Break,
     /// `continue;`
@@ -208,9 +213,9 @@ pub enum MirStmt {
 
 /// A single `case` arm in a switch statement (supports multi-value: `case 0u, 1u:`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirSwitchCase {
+pub struct MirSwitchCase<'a> {
     pub values: Vec<MirLit>,
-    pub body: Vec<MirStmt>,
+    pub body: Vec<MirStmt<'a>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -219,30 +224,30 @@ pub struct MirSwitchCase {
 
 /// A MIR expression.
 #[derive(Debug, Clone, PartialEq)]
-pub enum MirExpr {
+pub enum MirExpr<'a> {
     /// A literal value.
     Lit(MirLit),
     /// A variable reference. The second element is the type.
-    Var(String, MirType),
+    Var(&'a str, MirType<'a>),
     /// A binary operation: `op(lhs, rhs) -> ty`.
-    BinOp(MirBinOp, Box<MirExpr>, Box<MirExpr>, MirType),
+    BinOp(MirBinOp, &'a MirExpr<'a>, &'a MirExpr<'a>, MirType<'a>),
     /// A unary operation: `op(operand) -> ty`.
-    UnaryOp(MirUnaryOp, Box<MirExpr>, MirType),
+    UnaryOp(MirUnaryOp, &'a MirExpr<'a>, MirType<'a>),
     /// A function call: `name(args) -> ty`.
-    Call(String, Vec<MirExpr>, MirType),
+    Call(&'a str, Vec<MirExpr<'a>>, MirType<'a>),
     /// Struct construction: `Name(field_exprs...)`.
-    ConstructStruct(String, Vec<MirExpr>),
+    ConstructStruct(&'a str, Vec<MirExpr<'a>>),
     /// Field access: `expr.field -> ty`.
-    FieldAccess(Box<MirExpr>, String, MirType),
+    FieldAccess(&'a MirExpr<'a>, &'a str, MirType<'a>),
     /// Index access: `expr[index] -> ty`.
-    Index(Box<MirExpr>, Box<MirExpr>, MirType),
+    Index(&'a MirExpr<'a>, &'a MirExpr<'a>, MirType<'a>),
     /// Type cast: `ty(expr)`.
-    Cast(Box<MirExpr>, MirType),
+    Cast(&'a MirExpr<'a>, MirType<'a>),
 }
 
-impl MirExpr {
+impl<'a> MirExpr<'a> {
     /// Return the result type of this expression, if it carries one.
-    pub fn result_type(&self) -> Option<MirType> {
+    pub fn result_type(&self) -> Option<MirType<'a>> {
         match self {
             MirExpr::Lit(lit) => Some(match lit {
                 MirLit::I32(_) => MirType::I32,
@@ -254,7 +259,7 @@ impl MirExpr {
             MirExpr::BinOp(_, _, _, ty) => Some(ty.clone()),
             MirExpr::UnaryOp(_, _, ty) => Some(ty.clone()),
             MirExpr::Call(_, _, ty) => Some(ty.clone()),
-            MirExpr::ConstructStruct(name, _) => Some(MirType::Struct(name.clone())),
+            MirExpr::ConstructStruct(name, _) => Some(MirType::Struct(name)),
             MirExpr::FieldAccess(_, _, ty) => Some(ty.clone()),
             MirExpr::Index(_, _, ty) => Some(ty.clone()),
             MirExpr::Cast(_, ty) => Some(ty.clone()),
@@ -266,22 +271,30 @@ impl MirExpr {
     /// For composite types (vec, mat, struct, array) we emit a
     /// zero-value constructor — e.g. `vec3<f32>()` or `MyStruct()` —
     /// which WGSL defines as all-zeros / false / 0.0.
-    pub fn default_value(ty: &MirType) -> MirExpr {
+    ///
+    /// The arena is needed to allocate the type-name string for
+    /// `Call` nodes that reference computed names like `"vec3"`.
+    pub fn default_value(arena: &'a shadml_allocator::Allocator, ty: &MirType<'a>) -> MirExpr<'a> {
         match ty {
             MirType::I32 => MirExpr::Lit(MirLit::I32(0)),
             MirType::U32 => MirExpr::Lit(MirLit::U32(0)),
             MirType::F32 => MirExpr::Lit(MirLit::F32(0.0)),
             MirType::Bool => MirExpr::Lit(MirLit::Bool(false)),
             // vec / mat: use short names so is_type_constructor_call matches
-            MirType::Vec(n, _) => MirExpr::Call(format!("vec{}", n), vec![], ty.clone()),
+            MirType::Vec(n, _) => {
+                let name = arena.alloc_str(&format!("vec{}", n));
+                MirExpr::Call(name, vec![], ty.clone())
+            }
             MirType::Mat(cols, rows, _) => {
-                MirExpr::Call(format!("mat{}x{}", cols, rows), vec![], ty.clone())
+                let name = arena.alloc_str(&format!("mat{}x{}", cols, rows));
+                MirExpr::Call(name, vec![], ty.clone())
             }
             // Struct: zero-value constructor is just TypeName()
-            MirType::Struct(name) => MirExpr::Call(name.clone(), vec![], ty.clone()),
+            MirType::Struct(name) => MirExpr::Call(name, vec![], ty.clone()),
             // Array: zero-value constructor is array<T, N>()
             MirType::Array(..) | MirType::RuntimeArray(_) => {
-                MirExpr::Call(ty.to_string(), vec![], ty.clone())
+                let name = arena.alloc_str(&ty.to_string());
+                MirExpr::Call(name, vec![], ty.clone())
             }
             MirType::Unit => MirExpr::Lit(MirLit::I32(0)),
         }

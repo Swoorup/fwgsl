@@ -18,4 +18,10 @@ shadml_wgsl_codegen = { workspace = true }
 shadml_formatter = { workspace = true }
 shadml_diagnostics = { workspace = true }
 shadml_span = { workspace = true }
+shadml_allocator = { workspace = true }
+shadml_bundler = { workspace = true }
 miette = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"

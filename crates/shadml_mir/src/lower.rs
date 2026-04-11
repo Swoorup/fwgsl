@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use shadml_allocator::Allocator;
 use shadml_hir::*;
 use shadml_typechecker::{ty_name, Ty};
 
@@ -24,7 +25,9 @@ struct BitfieldFieldInfo {
 }
 
 /// Context for HIR → MIR lowering, carrying data type information.
-struct LowerCtx {
+struct LowerCtx<'a> {
+    /// Arena allocator for MIR nodes
+    arena: &'a Allocator,
     /// Map from data type name to its constructors
     data_types: HashMap<String, Vec<HirConstructor>>,
     /// Map from constructor name to (data_type_name, tag, fields)
@@ -38,8 +41,8 @@ struct LowerCtx {
     mono_instances: Vec<(String, Vec<Ty>)>,
 }
 
-impl LowerCtx {
-    fn new(hir: &HirProgram) -> Self {
+impl<'a> LowerCtx<'a> {
+    fn new(arena: &'a Allocator, hir: &HirProgram) -> Self {
         let mut data_types = HashMap::new();
         let mut constructors = HashMap::new();
         let mut generic_types = HashMap::new();
@@ -113,6 +116,7 @@ impl LowerCtx {
         }
 
         LowerCtx {
+            arena,
             data_types,
             constructors,
             bitfields,
@@ -165,7 +169,7 @@ impl LowerCtx {
     }
 
     /// Resolve a type constructor name to MirType, taking ADTs and bitfields into account.
-    fn resolve_type_con(&self, name: &str) -> Option<MirType> {
+    fn resolve_type_con(&self, name: &str) -> Option<MirType<'a>> {
         // Check if this is a bitfield type — resolve to its base MIR type
         if self.bitfields.contains_key(name) {
             // Bitfields are backed by u32 (could be extended to support u16/u8)
@@ -174,11 +178,11 @@ impl LowerCtx {
         if self.is_pure_enum(name) {
             Some(MirType::U32)
         } else if self.is_sum_type(name) && self.has_fields(name) {
-            Some(MirType::Struct(name.to_string()))
+            Some(MirType::Struct(self.arena.alloc_str(name)))
         } else if self.data_types.contains_key(name) {
             // Single-constructor type — use struct if it has fields, otherwise u32
             if self.has_fields(name) {
-                Some(MirType::Struct(name.to_string()))
+                Some(MirType::Struct(self.arena.alloc_str(name)))
             } else {
                 Some(MirType::U32)
             }
@@ -433,15 +437,15 @@ fn substitute_type_params(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
 }
 
 /// Convert a data type's constructors into a MirStruct, if it needs one.
-fn lower_data_type_to_struct(
+fn lower_data_type_to_struct<'a>(
     name: &str,
     constructors: &[HirConstructor],
-    ctx: &LowerCtx,
-) -> Result<Option<MirStruct>, String> {
+    ctx: &LowerCtx<'a>,
+) -> Result<Option<MirStruct<'a>>, String> {
     if constructors.len() > 1 && constructors.iter().any(|c| !c.fields.is_empty()) {
         // Sum type with fields: emit one struct with tag + union of fields
         let mut fields = vec![MirField {
-            name: "tag".to_string(),
+            name: ctx.arena.alloc_str("tag"),
             ty: MirType::U32,
             attributes: vec![],
         }];
@@ -449,20 +453,24 @@ fn lower_data_type_to_struct(
         for f in &max_con.fields {
             let mir_ty = ty_to_mir_type_with_ctx(&f.ty, Some(ctx))?;
             fields.push(MirField {
-                name: f.name.clone(),
+                name: ctx.arena.alloc_str(&f.name),
                 ty: mir_ty,
                 attributes: f
                     .attributes
                     .iter()
                     .map(|a| MirAttribute {
-                        name: a.name.clone(),
-                        args: a.args.clone(),
+                        name: ctx.arena.alloc_str(&a.name),
+                        args: a
+                            .args
+                            .iter()
+                            .map(|s| ctx.arena.alloc_str(s) as &str)
+                            .collect(),
                     })
                     .collect(),
             });
         }
         Ok(Some(MirStruct {
-            name: name.to_string(),
+            name: ctx.arena.alloc_str(name),
             fields,
         }))
     } else if constructors.len() == 1 {
@@ -474,21 +482,25 @@ fn lower_data_type_to_struct(
                 .map(|f| {
                     let mir_ty = ty_to_mir_type_with_ctx(&f.ty, Some(ctx))?;
                     Ok(MirField {
-                        name: f.name.clone(),
+                        name: ctx.arena.alloc_str(&f.name),
                         ty: mir_ty,
                         attributes: f
                             .attributes
                             .iter()
                             .map(|a| MirAttribute {
-                                name: a.name.clone(),
-                                args: a.args.clone(),
+                                name: ctx.arena.alloc_str(&a.name),
+                                args: a
+                                    .args
+                                    .iter()
+                                    .map(|s| ctx.arena.alloc_str(s) as &str)
+                                    .collect(),
                             })
                             .collect(),
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(Some(MirStruct {
-                name: name.to_string(),
+                name: ctx.arena.alloc_str(name),
                 fields,
             }))
         } else {
@@ -501,8 +513,11 @@ fn lower_data_type_to_struct(
 }
 
 /// Lower a complete HIR program to MIR.
-pub fn lower_hir_to_mir(hir: &HirProgram) -> Result<MirProgram, Vec<String>> {
-    let ctx = LowerCtx::new(hir);
+pub fn lower_hir_to_mir<'a>(
+    arena: &'a Allocator,
+    hir: &HirProgram,
+) -> Result<MirProgram<'a>, Vec<String>> {
+    let ctx = LowerCtx::new(arena, hir);
     let mut errors = Vec::new();
     let mut structs = Vec::new();
     let mut globals = Vec::new();
@@ -602,7 +617,7 @@ pub fn lower_hir_to_mir(hir: &HirProgram) -> Result<MirProgram, Vec<String>> {
             Ok(mir_expr) => {
                 known_consts.insert(c.name.clone());
                 constants.push(MirConst {
-                    name: c.name.clone(),
+                    name: ctx.arena.alloc_str(&c.name),
                     ty: mir_ty,
                     value: mir_expr,
                 });
@@ -623,7 +638,7 @@ pub fn lower_hir_to_mir(hir: &HirProgram) -> Result<MirProgram, Vec<String>> {
                 .as_ref()
                 .is_some_and(|e| is_const_expr(e, &known_consts))
         {
-            known_consts.insert(f.name.clone());
+            known_consts.insert(f.name.to_string());
             constants.push(MirConst {
                 name: f.name,
                 ty: f.return_ty,
@@ -649,12 +664,26 @@ pub fn lower_hir_to_mir(hir: &HirProgram) -> Result<MirProgram, Vec<String>> {
 }
 
 /// Convert a Ty to MirType (without ADT context).
-pub fn ty_to_mir_type(ty: &Ty) -> Result<MirType, String> {
-    ty_to_mir_type_with_ctx(ty, None)
+pub fn ty_to_mir_type<'a>(arena: &'a Allocator, ty: &Ty) -> Result<MirType<'a>, String> {
+    ty_to_mir_type_inner(arena, ty, None)
 }
 
 /// Convert a Ty to MirType, optionally using ADT context.
-fn ty_to_mir_type_with_ctx(ty: &Ty, ctx: Option<&LowerCtx>) -> Result<MirType, String> {
+fn ty_to_mir_type_with_ctx<'a>(ty: &Ty, ctx: Option<&LowerCtx<'a>>) -> Result<MirType<'a>, String> {
+    match ctx {
+        Some(c) => ty_to_mir_type_inner(c.arena, ty, Some(c)),
+        None => {
+            panic!("ty_to_mir_type_with_ctx called without context; use ty_to_mir_type instead")
+        }
+    }
+}
+
+/// Inner implementation for Ty → MirType conversion.
+fn ty_to_mir_type_inner<'a>(
+    arena: &'a Allocator,
+    ty: &Ty,
+    ctx: Option<&LowerCtx<'a>>,
+) -> Result<MirType<'a>, String> {
     let ty = shadml_typechecker::normalize_type_aliases(ty);
 
     match &ty {
@@ -670,7 +699,7 @@ fn ty_to_mir_type_with_ctx(ty: &Ty, ctx: Option<&LowerCtx>) -> Result<MirType, S
                         return Ok(mir_ty);
                     }
                 }
-                Ok(MirType::Struct(other.to_string()))
+                Ok(MirType::Struct(arena.alloc_str(other)))
             }
         },
         Ty::App(ref f, ref arg) => {
@@ -678,43 +707,43 @@ fn ty_to_mir_type_with_ctx(ty: &Ty, ctx: Option<&LowerCtx>) -> Result<MirType, S
             if let Some(ctx) = ctx {
                 if let Some((name, args)) = extract_generic_instantiation(&ty, &ctx.generic_types) {
                     let mangled = mono_mangled_name(&name, &args);
-                    return Ok(MirType::Struct(mangled));
+                    return Ok(MirType::Struct(arena.alloc_str(&mangled)));
                 }
             }
             match f.as_ref() {
                 // Unsized array: Tensor<T> (single application, no Nat dimension)
                 Ty::Con(name) if name == ty_name::TENSOR => {
-                    let elem = ty_to_mir_type_with_ctx(arg, ctx)?;
-                    Ok(MirType::RuntimeArray(Box::new(elem)))
+                    let elem = ty_to_mir_type_inner(arena, arg, ctx)?;
+                    Ok(MirType::RuntimeArray(arena.alloc(elem)))
                 }
                 Ty::App(ff, n) => match (ff.as_ref(), n.as_ref()) {
                     (Ty::App(fff, nn), Ty::Nat(m)) => {
                         if let (Ty::Con(name), Ty::Nat(n)) = (fff.as_ref(), nn.as_ref()) {
                             if name == ty_name::MAT {
-                                let scalar = ty_to_mir_type_with_ctx(arg, ctx)?;
-                                return Ok(MirType::Mat(*n as u8, *m as u8, Box::new(scalar)));
+                                let scalar = ty_to_mir_type_inner(arena, arg, ctx)?;
+                                return Ok(MirType::Mat(*n as u8, *m as u8, arena.alloc(scalar)));
                             }
                         }
                         Err(format!("Cannot convert to MIR type: {}", ty))
                     }
                     (Ty::Con(name), Ty::Nat(n)) if name == ty_name::VEC => {
-                        let scalar = ty_to_mir_type_with_ctx(arg, ctx)?;
-                        Ok(MirType::Vec(*n as u8, Box::new(scalar)))
+                        let scalar = ty_to_mir_type_inner(arena, arg, ctx)?;
+                        Ok(MirType::Vec(*n as u8, arena.alloc(scalar)))
                     }
                     (Ty::Con(name), Ty::Nat(n)) if name == ty_name::TENSOR => {
-                        let elem = ty_to_mir_type_with_ctx(arg, ctx)?;
+                        let elem = ty_to_mir_type_inner(arena, arg, ctx)?;
                         let len = u32::try_from(*n)
                             .map_err(|_| format!("Tensor length out of range for MIR: {}", n))?;
-                        Ok(MirType::Array(Box::new(elem), len))
+                        Ok(MirType::Array(arena.alloc(elem), len))
                     }
                     // Handle surface syntax order: Tensor<T, N> (Array<T, N>)
                     (Ty::Con(name), _elem_ty) if name == ty_name::TENSOR => {
                         if let Ty::Nat(len) = arg.as_ref() {
-                            let elem = ty_to_mir_type_with_ctx(n, ctx)?;
+                            let elem = ty_to_mir_type_inner(arena, n, ctx)?;
                             let len = u32::try_from(*len).map_err(|_| {
                                 format!("Tensor length out of range for MIR: {}", len)
                             })?;
-                            Ok(MirType::Array(Box::new(elem), len))
+                            Ok(MirType::Array(arena.alloc(elem), len))
                         } else {
                             Err(format!("Cannot convert to MIR type: {}", ty))
                         }
@@ -740,14 +769,14 @@ fn ty_to_mir_type_with_ctx(ty: &Ty, ctx: Option<&LowerCtx>) -> Result<MirType, S
     }
 }
 
-fn lower_hir_function(f: &HirFunction, ctx: &LowerCtx) -> Result<MirFunction, String> {
+fn lower_hir_function<'a>(f: &HirFunction, ctx: &LowerCtx<'a>) -> Result<MirFunction<'a>, String> {
     let resolve = |ty: &Ty| ty_to_mir_type_with_ctx(ty, Some(ctx));
-    let params: Vec<MirParam> = f
+    let params: Vec<MirParam<'a>> = f
         .params
         .iter()
         .map(|(name, ty)| {
             Ok(MirParam {
-                name: name.clone(),
+                name: ctx.arena.alloc_str(name),
                 ty: resolve(ty)?,
             })
         })
@@ -758,16 +787,23 @@ fn lower_hir_function(f: &HirFunction, ctx: &LowerCtx) -> Result<MirFunction, St
     let (stmts, return_expr) = lower_hir_expr_to_stmts(&f.body, ctx)?;
 
     Ok(MirFunction {
-        name: f.name.clone(),
+        name: ctx.arena.alloc_str(&f.name),
         params,
         return_ty,
         body: stmts,
         return_expr: Some(return_expr),
-        comments: f.comments.clone(),
+        comments: f
+            .comments
+            .iter()
+            .map(|s| ctx.arena.alloc_str(s) as &str)
+            .collect(),
     })
 }
 
-fn lower_hir_entry_point(ep: &HirEntryPoint, ctx: &LowerCtx) -> Result<MirEntryPoint, String> {
+fn lower_hir_entry_point<'a>(
+    ep: &HirEntryPoint,
+    ctx: &LowerCtx<'a>,
+) -> Result<MirEntryPoint<'a>, String> {
     // Parse stage and workgroup_size from attributes
     let mut stage = ShaderStage::Compute;
     let mut workgroup_size = None;
@@ -793,12 +829,12 @@ fn lower_hir_entry_point(ep: &HirEntryPoint, ctx: &LowerCtx) -> Result<MirEntryP
     // Entry point params pass through directly. Bindings like @builtin and
     // @location are carried by the struct-typed parameter's field attributes
     // (declared via `data` with attributed fields), not injected here.
-    let params: Vec<MirParam> = ep
+    let params: Vec<MirParam<'a>> = ep
         .params
         .iter()
         .map(|(name, ty)| {
             Ok(MirParam {
-                name: name.clone(),
+                name: ctx.arena.alloc_str(name),
                 ty: ty_to_mir_type_with_ctx(ty, Some(ctx))?,
             })
         })
@@ -825,23 +861,27 @@ fn lower_hir_entry_point(ep: &HirEntryPoint, ctx: &LowerCtx) -> Result<MirEntryP
     };
 
     Ok(MirEntryPoint {
-        name: ep.name.clone(),
+        name: ctx.arena.alloc_str(&ep.name),
         stage,
         workgroup_size,
         params,
         return_ty,
         body: stmts,
         return_expr,
-        comments: ep.comments.clone(),
+        comments: ep
+            .comments
+            .iter()
+            .map(|s| ctx.arena.alloc_str(s) as &str)
+            .collect(),
     })
 }
 
 /// Lower a HIR expression, potentially producing statements (for Let, If, Case).
 /// Returns (prefix_statements, result_expression).
-fn lower_hir_expr_to_stmts(
+fn lower_hir_expr_to_stmts<'a>(
     expr: &HirExpr,
-    ctx: &LowerCtx,
-) -> Result<(Vec<MirStmt>, MirExpr), String> {
+    ctx: &LowerCtx<'a>,
+) -> Result<(Vec<MirStmt<'a>>, MirExpr<'a>), String> {
     match expr {
         HirExpr::Let(binds, body, _ty, _span) => {
             let mut stmts = Vec::new();
@@ -854,7 +894,7 @@ fn lower_hir_expr_to_stmts(
                     .result_type()
                     .or_else(|| ty_to_mir_type_with_ctx(bind_expr.ty(), Some(ctx)).ok())
                     .ok_or_else(|| format!("cannot resolve type for let-binding '{}'", name))?;
-                stmts.push(MirStmt::Let(name.clone(), bind_ty, bind_val));
+                stmts.push(MirStmt::Let(ctx.arena.alloc_str(name), bind_ty, bind_val));
             }
             let (mut body_stmts, body_expr) = lower_hir_expr_to_stmts(body, ctx)?;
             stmts.append(&mut body_stmts);
@@ -872,7 +912,7 @@ fn lower_hir_expr_to_stmts(
             // Emit select(false_val, true_val, condition) instead of var/if/assign.
             if then_stmts.is_empty() && else_stmts.is_empty() {
                 let select_expr = MirExpr::Call(
-                    "select".to_string(),
+                    ctx.arena.alloc_str("select"),
                     vec![else_val, then_val, cond_mir],
                     result_ty,
                 );
@@ -880,19 +920,19 @@ fn lower_hir_expr_to_stmts(
             }
 
             // Complex branches: fall back to var tmp; if (cond) { ... } else { ... }
-            let tmp_name = format!("_if_tmp_{}", _span.start);
+            let tmp_name = ctx.arena.alloc_str(&format!("_if_tmp_{}", _span.start));
 
             let mut then_body = then_stmts;
-            then_body.push(MirStmt::Assign(tmp_name.clone(), then_val));
+            then_body.push(MirStmt::Assign(tmp_name, then_val));
 
             let mut else_body = else_stmts;
-            else_body.push(MirStmt::Assign(tmp_name.clone(), else_val));
+            else_body.push(MirStmt::Assign(tmp_name, else_val));
 
             let stmts = vec![
                 MirStmt::Var(
-                    tmp_name.clone(),
+                    tmp_name,
                     result_ty.clone(),
-                    default_expr_for_type(&result_ty),
+                    default_expr_for_type(ctx.arena, &result_ty),
                 ),
                 MirStmt::If(cond_mir, then_body, else_body),
             ];
@@ -902,22 +942,22 @@ fn lower_hir_expr_to_stmts(
 
         HirExpr::Case(scrutinee, arms, ty, _span) => {
             let result_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
-            let tmp_name = format!("_case_tmp_{}", _span.start);
+            let tmp_name = ctx.arena.alloc_str(&format!("_case_tmp_{}", _span.start));
             let scrut_mir = lower_hir_expr(scrutinee, ctx)?;
             let scrut_ty = ty_to_mir_type_with_ctx(scrutinee.ty(), Some(ctx))?;
-            let scrut_name = format!("_scrut_{}", _span.start);
+            let scrut_name = ctx.arena.alloc_str(&format!("_scrut_{}", _span.start));
 
             let mut stmts = vec![
-                MirStmt::Let(scrut_name.clone(), scrut_ty.clone(), scrut_mir),
+                MirStmt::Let(scrut_name, scrut_ty.clone(), scrut_mir),
                 MirStmt::Var(
-                    tmp_name.clone(),
+                    tmp_name,
                     result_ty.clone(),
-                    default_expr_for_type(&result_ty),
+                    default_expr_for_type(ctx.arena, &result_ty),
                 ),
             ];
 
             // Build if-else chain from arms
-            let if_chain = lower_case_arms(&scrut_name, &scrut_ty, arms, &tmp_name, ctx)?;
+            let if_chain = lower_case_arms(scrut_name, &scrut_ty, arms, tmp_name, ctx)?;
 
             if let Some(stmt) = if_chain {
                 stmts.push(stmt);
@@ -956,7 +996,7 @@ fn lower_hir_expr_to_stmts(
 
         HirExpr::Loop(loop_name, bindings, body, ty, _span) => {
             let mir_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
-            let result_var = format!("{}_result", loop_name);
+            let result_var = ctx.arena.alloc_str(&format!("{}_result", loop_name));
 
             let mut pre_stmts = Vec::new();
 
@@ -972,16 +1012,17 @@ fn lower_hir_expr_to_stmts(
                         format!("cannot resolve type for loop binding '{}'", bind_name)
                     })?;
                 pre_stmts.append(&mut init_stmts);
-                pre_stmts.push(MirStmt::Var(bind_name.clone(), bind_ty.clone(), init_mir));
-                binding_names.push(bind_name.clone());
+                let alloc_bind_name = ctx.arena.alloc_str(bind_name);
+                pre_stmts.push(MirStmt::Var(alloc_bind_name, bind_ty.clone(), init_mir));
+                binding_names.push(alloc_bind_name);
                 binding_types.push(bind_ty);
             }
 
             // Emit result var
             pre_stmts.push(MirStmt::Var(
-                result_var.clone(),
+                result_var,
                 mir_ty.clone(),
-                MirExpr::default_value(&mir_ty),
+                MirExpr::default_value(ctx.arena, &mir_ty),
             ));
 
             // Lower the body, converting calls to loop_name into assignments + continue
@@ -990,7 +1031,7 @@ fn lower_hir_expr_to_stmts(
                 loop_name,
                 &binding_names,
                 &binding_types,
-                &result_var,
+                result_var,
                 &mir_ty,
                 ctx,
             )?;
@@ -1009,7 +1050,7 @@ fn lower_hir_expr_to_stmts(
 }
 
 /// Lower a pure HIR expression to a MIR expression (no statements needed).
-fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
+fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>, String> {
     match expr {
         HirExpr::Lit(lit, ty, _span) => {
             let mir_lit = lower_hir_lit(lit, ty);
@@ -1018,7 +1059,7 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
 
         HirExpr::Var(name, ty, _span) => {
             let mir_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
-            Ok(MirExpr::Var(name.clone(), mir_ty))
+            Ok(MirExpr::Var(ctx.arena.alloc_str(name), mir_ty))
         }
 
         HirExpr::BinOp(op, lhs, rhs, ty, _span) => {
@@ -1028,8 +1069,8 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
             let mir_op = lower_binop(op);
             Ok(MirExpr::BinOp(
                 mir_op,
-                Box::new(mir_lhs),
-                Box::new(mir_rhs),
+                ctx.arena.alloc(mir_lhs),
+                ctx.arena.alloc(mir_rhs),
                 mir_ty,
             ))
         }
@@ -1037,7 +1078,7 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
         HirExpr::App(_, _, ty, _span) => {
             // Flatten curried applications: App(App(f, a), b) -> Call(f, [a, b])
             let (func_name, args) = flatten_app(expr);
-            let mir_args: Result<Vec<MirExpr>, String> =
+            let mir_args: Result<Vec<MirExpr<'a>>, String> =
                 args.iter().map(|a| lower_hir_expr(a, ctx)).collect();
             let mir_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
             let mir_args = mir_args?;
@@ -1054,7 +1095,10 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
                     for arg in args {
                         all_args.push(lower_hir_expr(arg, ctx)?);
                     }
-                    return Ok(MirExpr::ConstructStruct(struct_name, all_args));
+                    return Ok(MirExpr::ConstructStruct(
+                        ctx.arena.alloc_str(&struct_name),
+                        all_args,
+                    ));
                 }
             }
             if args.is_empty() {
@@ -1068,9 +1112,12 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
                 } else {
                     name.clone()
                 };
-                let mir_args: Result<Vec<MirExpr>, String> =
+                let mir_args: Result<Vec<MirExpr<'a>>, String> =
                     args.iter().map(|a| lower_hir_expr(a, ctx)).collect();
-                Ok(MirExpr::ConstructStruct(struct_name, mir_args?))
+                Ok(MirExpr::ConstructStruct(
+                    ctx.arena.alloc_str(&struct_name),
+                    mir_args?,
+                ))
             }
         }
 
@@ -1085,8 +1132,8 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
                     let shifted = if bf_info.offset > 0 {
                         MirExpr::BinOp(
                             MirBinOp::Shr,
-                            Box::new(mir_expr),
-                            Box::new(MirExpr::Lit(MirLit::U32(bf_info.offset))),
+                            ctx.arena.alloc(mir_expr),
+                            ctx.arena.alloc(MirExpr::Lit(MirLit::U32(bf_info.offset))),
                             MirType::U32,
                         )
                     } else {
@@ -1094,16 +1141,16 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
                     };
                     let masked = MirExpr::BinOp(
                         MirBinOp::BitAnd,
-                        Box::new(shifted),
-                        Box::new(MirExpr::Lit(MirLit::U32(mask))),
+                        ctx.arena.alloc(shifted),
+                        ctx.arena.alloc(MirExpr::Lit(MirLit::U32(mask))),
                         MirType::U32,
                     );
                     // For 1-bit fields, compare != 0 to produce bool
                     if bf_info.width == 1 {
                         return Ok(MirExpr::BinOp(
                             MirBinOp::Neq,
-                            Box::new(masked),
-                            Box::new(MirExpr::Lit(MirLit::U32(0))),
+                            ctx.arena.alloc(masked),
+                            ctx.arena.alloc(MirExpr::Lit(MirLit::U32(0))),
                             MirType::Bool,
                         ));
                     }
@@ -1113,8 +1160,8 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
             let mir_expr = lower_hir_expr(inner_expr, ctx)?;
             let mir_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
             Ok(MirExpr::FieldAccess(
-                Box::new(mir_expr),
-                field.clone(),
+                ctx.arena.alloc(mir_expr),
+                ctx.arena.alloc_str(field),
                 mir_ty,
             ))
         }
@@ -1123,8 +1170,8 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
             let mir_index = lower_hir_expr(index, ctx)?;
             let mir_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
             Ok(MirExpr::Index(
-                Box::new(mir_base),
-                Box::new(mir_index),
+                ctx.arena.alloc(mir_base),
+                ctx.arena.alloc(mir_index),
                 mir_ty,
             ))
         }
@@ -1134,7 +1181,7 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
             let mir_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
             Ok(MirExpr::UnaryOp(
                 MirUnaryOp::Neg,
-                Box::new(mir_inner),
+                ctx.arena.alloc(mir_inner),
                 mir_ty,
             ))
         }
@@ -1143,7 +1190,7 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
             let mir_inner = lower_hir_expr(inner, ctx)?;
             Ok(MirExpr::UnaryOp(
                 MirUnaryOp::Not,
-                Box::new(mir_inner),
+                ctx.arena.alloc(mir_inner),
                 MirType::Bool,
             ))
         }
@@ -1153,7 +1200,7 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
             let mir_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
             Ok(MirExpr::UnaryOp(
                 MirUnaryOp::BitNot,
-                Box::new(mir_inner),
+                ctx.arena.alloc(mir_inner),
                 mir_ty,
             ))
         }
@@ -1187,11 +1234,11 @@ fn lower_hir_expr(expr: &HirExpr, ctx: &LowerCtx) -> Result<MirExpr, String> {
 }
 
 /// Lower a bitfield construction to `((v1 & mask1) << off1) | ((v2 & mask2) << off2) | ...`
-fn lower_bitfield_construct(
+fn lower_bitfield_construct<'a>(
     type_name: &str,
     fields: &[(String, HirExpr)],
-    ctx: &LowerCtx,
-) -> Result<MirExpr, String> {
+    ctx: &LowerCtx<'a>,
+) -> Result<MirExpr<'a>, String> {
     let mut result = MirExpr::Lit(MirLit::U32(0));
 
     for (field_name, field_expr) in fields {
@@ -1211,7 +1258,7 @@ fn lower_bitfield_construct(
             if val_ty.as_ref() == Some(&MirType::Bool) {
                 // Bool → u32: select(0u, 1u, val)
                 MirExpr::Call(
-                    "select".to_string(),
+                    ctx.arena.alloc_str("select"),
                     vec![
                         MirExpr::Lit(MirLit::U32(0)),
                         MirExpr::Lit(MirLit::U32(1)),
@@ -1224,7 +1271,7 @@ fn lower_bitfield_construct(
                 if val_ty.as_ref() == Some(&MirType::U32) {
                     mir_val
                 } else {
-                    MirExpr::Cast(Box::new(mir_val), MirType::U32)
+                    MirExpr::Cast(ctx.arena.alloc(mir_val), MirType::U32)
                 }
             }
         } else {
@@ -1233,15 +1280,15 @@ fn lower_bitfield_construct(
             if val_ty.as_ref() == Some(&MirType::U32) {
                 mir_val
             } else {
-                MirExpr::Cast(Box::new(mir_val), MirType::U32)
+                MirExpr::Cast(ctx.arena.alloc(mir_val), MirType::U32)
             }
         };
 
         // (val & mask)
         let masked = MirExpr::BinOp(
             MirBinOp::BitAnd,
-            Box::new(coerced),
-            Box::new(MirExpr::Lit(MirLit::U32(mask))),
+            ctx.arena.alloc(coerced),
+            ctx.arena.alloc(MirExpr::Lit(MirLit::U32(mask))),
             MirType::U32,
         );
 
@@ -1249,8 +1296,8 @@ fn lower_bitfield_construct(
         let shifted = if bf_info.offset > 0 {
             MirExpr::BinOp(
                 MirBinOp::Shl,
-                Box::new(masked),
-                Box::new(MirExpr::Lit(MirLit::U32(bf_info.offset))),
+                ctx.arena.alloc(masked),
+                ctx.arena.alloc(MirExpr::Lit(MirLit::U32(bf_info.offset))),
                 MirType::U32,
             )
         } else {
@@ -1260,8 +1307,8 @@ fn lower_bitfield_construct(
         // result = result | shifted
         result = MirExpr::BinOp(
             MirBinOp::BitOr,
-            Box::new(result),
-            Box::new(shifted),
+            ctx.arena.alloc(result),
+            ctx.arena.alloc(shifted),
             MirType::U32,
         );
     }
@@ -1272,12 +1319,12 @@ fn lower_bitfield_construct(
 /// Lower a bitfield functional update to:
 /// `(base & ~mask_combined) | ((val1 & mask1) << off1) | ((val2 & mask2) << off2) | ...`
 /// where `mask_combined` is the OR of all field masks shifted to their positions.
-fn lower_bitfield_update(
+fn lower_bitfield_update<'a>(
     type_name: &str,
     base: &HirExpr,
     fields: &[(String, HirExpr)],
-    ctx: &LowerCtx,
-) -> Result<MirExpr, String> {
+    ctx: &LowerCtx<'a>,
+) -> Result<MirExpr<'a>, String> {
     let mir_base = lower_hir_expr(base, ctx)?;
 
     // Build the clear-mask: AND-out all fields being updated
@@ -1293,8 +1340,8 @@ fn lower_bitfield_update(
     // base & clear_mask
     let mut result = MirExpr::BinOp(
         MirBinOp::BitAnd,
-        Box::new(mir_base),
-        Box::new(MirExpr::Lit(MirLit::U32(clear_mask))),
+        ctx.arena.alloc(mir_base),
+        ctx.arena.alloc(MirExpr::Lit(MirLit::U32(clear_mask))),
         MirType::U32,
     );
 
@@ -1312,7 +1359,7 @@ fn lower_bitfield_update(
             if val_ty.as_ref() == Some(&MirType::Bool) {
                 // Bool → u32: select(0u, 1u, val)
                 MirExpr::Call(
-                    "select".to_string(),
+                    ctx.arena.alloc_str("select"),
                     vec![
                         MirExpr::Lit(MirLit::U32(0)),
                         MirExpr::Lit(MirLit::U32(1)),
@@ -1325,7 +1372,7 @@ fn lower_bitfield_update(
                 if val_ty.as_ref() == Some(&MirType::U32) {
                     mir_val
                 } else {
-                    MirExpr::Cast(Box::new(mir_val), MirType::U32)
+                    MirExpr::Cast(ctx.arena.alloc(mir_val), MirType::U32)
                 }
             }
         } else {
@@ -1333,22 +1380,22 @@ fn lower_bitfield_update(
             if val_ty.as_ref() == Some(&MirType::U32) {
                 mir_val
             } else {
-                MirExpr::Cast(Box::new(mir_val), MirType::U32)
+                MirExpr::Cast(ctx.arena.alloc(mir_val), MirType::U32)
             }
         };
 
         let masked = MirExpr::BinOp(
             MirBinOp::BitAnd,
-            Box::new(coerced),
-            Box::new(MirExpr::Lit(MirLit::U32(mask))),
+            ctx.arena.alloc(coerced),
+            ctx.arena.alloc(MirExpr::Lit(MirLit::U32(mask))),
             MirType::U32,
         );
 
         let shifted = if bf_info.offset > 0 {
             MirExpr::BinOp(
                 MirBinOp::Shl,
-                Box::new(masked),
-                Box::new(MirExpr::Lit(MirLit::U32(bf_info.offset))),
+                ctx.arena.alloc(masked),
+                ctx.arena.alloc(MirExpr::Lit(MirLit::U32(bf_info.offset))),
                 MirType::U32,
             )
         } else {
@@ -1357,8 +1404,8 @@ fn lower_bitfield_update(
 
         result = MirExpr::BinOp(
             MirBinOp::BitOr,
-            Box::new(result),
-            Box::new(shifted),
+            ctx.arena.alloc(result),
+            ctx.arena.alloc(shifted),
             MirType::U32,
         );
     }
@@ -1383,15 +1430,15 @@ fn collect_app_args(expr: &HirExpr) -> (&HirExpr, Vec<&HirExpr>) {
 ///
 /// Calls to the loop name become assignments to the loop vars + `continue`.
 /// Non-recursive branches become `result_var = expr; break;`.
-fn lower_loop_body(
+fn lower_loop_body<'a>(
     body: &HirExpr,
     loop_name: &str,
-    binding_names: &[String],
-    binding_types: &[MirType],
-    result_var: &str,
-    result_ty: &MirType,
-    ctx: &LowerCtx,
-) -> Result<Vec<MirStmt>, String> {
+    binding_names: &[&'a str],
+    binding_types: &[MirType<'a>],
+    result_var: &'a str,
+    result_ty: &MirType<'a>,
+    ctx: &LowerCtx<'a>,
+) -> Result<Vec<MirStmt<'a>>, String> {
     match body {
         // If-expression: recursively handle both branches
         HirExpr::If(cond, then_branch, else_branch, _ty, _span) => {
@@ -1431,7 +1478,7 @@ fn lower_loop_body(
                         format!("cannot resolve type for loop let-binding '{}'", name)
                     })?;
                 stmts.append(&mut init_stmts);
-                stmts.push(MirStmt::Let(name.clone(), bind_ty, init_mir));
+                stmts.push(MirStmt::Let(ctx.arena.alloc_str(name), bind_ty, init_mir));
             }
             let mut body_stmts = lower_loop_body(
                 inner_body,
@@ -1459,16 +1506,13 @@ fn lower_loop_body(
                     for (i, arg) in args.iter().enumerate() {
                         let (mut arg_stmts, arg_mir) = lower_hir_expr_to_stmts(arg, ctx)?;
                         stmts.append(&mut arg_stmts);
-                        let tmp = format!("_loop_tmp_{}", i);
+                        let tmp = ctx.arena.alloc_str(&format!("_loop_tmp_{}", i));
                         let tmp_ty = binding_types[i].clone();
-                        stmts.push(MirStmt::Let(tmp.clone(), tmp_ty.clone(), arg_mir));
+                        stmts.push(MirStmt::Let(tmp, tmp_ty.clone(), arg_mir));
                         arg_temps.push((tmp, tmp_ty));
                     }
                     for (i, (tmp, tmp_ty)) in arg_temps.into_iter().enumerate() {
-                        stmts.push(MirStmt::Assign(
-                            binding_names[i].clone(),
-                            MirExpr::Var(tmp, tmp_ty),
-                        ));
+                        stmts.push(MirStmt::Assign(binding_names[i], MirExpr::Var(tmp, tmp_ty)));
                     }
                     stmts.push(MirStmt::Continue);
                     return Ok(stmts);
@@ -1477,7 +1521,7 @@ fn lower_loop_body(
 
             // Non-recursive: this is a result expression
             let (mut stmts, expr) = lower_hir_expr_to_stmts(other, ctx)?;
-            stmts.push(MirStmt::Assign(result_var.to_string(), expr));
+            stmts.push(MirStmt::Assign(result_var, expr));
             stmts.push(MirStmt::Break);
             Ok(stmts)
         }
@@ -1485,26 +1529,26 @@ fn lower_loop_body(
 }
 
 /// Lower an application with already-lowered arguments into a MIR expression.
-fn lower_app_with_args(
+fn lower_app_with_args<'a>(
     func_name: &str,
-    mir_args: Vec<MirExpr>,
-    mir_ty: MirType,
-    ctx: &LowerCtx,
-) -> Result<MirExpr, String> {
+    mir_args: Vec<MirExpr<'a>>,
+    mir_ty: MirType<'a>,
+    ctx: &LowerCtx<'a>,
+) -> Result<MirExpr<'a>, String> {
     match (func_name, mir_args.as_slice()) {
         ("negate", [arg]) => Ok(MirExpr::UnaryOp(
             MirUnaryOp::Neg,
-            Box::new(arg.clone()),
+            ctx.arena.alloc(arg.clone()),
             mir_ty,
         )),
         ("mod", [lhs, rhs]) => Ok(MirExpr::BinOp(
             MirBinOp::Mod,
-            Box::new(lhs.clone()),
-            Box::new(rhs.clone()),
+            ctx.arena.alloc(lhs.clone()),
+            ctx.arena.alloc(rhs.clone()),
             mir_ty,
         )),
         ("atan", [y, x]) | ("atan2", [y, x]) => Ok(MirExpr::Call(
-            "atan2".to_string(),
+            ctx.arena.alloc_str("atan2"),
             vec![y.clone(), x.clone()],
             mir_ty,
         )),
@@ -1512,53 +1556,65 @@ fn lower_app_with_args(
             // load is identity — just pass through the argument
             Ok(arg.clone())
         }
-        ("toF32", [arg]) => Ok(MirExpr::Cast(Box::new(arg.clone()), MirType::F32)),
-        ("toI32", [arg]) => Ok(MirExpr::Cast(Box::new(arg.clone()), MirType::I32)),
-        ("toU32", [arg]) => Ok(MirExpr::Cast(Box::new(arg.clone()), MirType::U32)),
-        ("toBool", [arg]) => Ok(MirExpr::Cast(Box::new(arg.clone()), MirType::Bool)),
+        ("toF32", [arg]) => Ok(MirExpr::Cast(ctx.arena.alloc(arg.clone()), MirType::F32)),
+        ("toI32", [arg]) => Ok(MirExpr::Cast(ctx.arena.alloc(arg.clone()), MirType::I32)),
+        ("toU32", [arg]) => Ok(MirExpr::Cast(ctx.arena.alloc(arg.clone()), MirType::U32)),
+        ("toBool", [arg]) => Ok(MirExpr::Cast(ctx.arena.alloc(arg.clone()), MirType::Bool)),
         ("bor", [lhs, rhs]) => Ok(MirExpr::BinOp(
             MirBinOp::BitOr,
-            Box::new(lhs.clone()),
-            Box::new(rhs.clone()),
+            ctx.arena.alloc(lhs.clone()),
+            ctx.arena.alloc(rhs.clone()),
             mir_ty,
         )),
         ("shr", [lhs, rhs]) => Ok(MirExpr::BinOp(
             MirBinOp::Shr,
-            Box::new(lhs.clone()),
-            Box::new(rhs.clone()),
+            ctx.arena.alloc(lhs.clone()),
+            ctx.arena.alloc(rhs.clone()),
             mir_ty,
         )),
-        ("splat2", [arg]) => Ok(MirExpr::Call("vec2".to_string(), vec![arg.clone()], mir_ty)),
-        ("splat3", [arg]) => Ok(MirExpr::Call("vec3".to_string(), vec![arg.clone()], mir_ty)),
-        ("splat4", [arg]) => Ok(MirExpr::Call("vec4".to_string(), vec![arg.clone()], mir_ty)),
+        ("splat2", [arg]) => Ok(MirExpr::Call(
+            ctx.arena.alloc_str("vec2"),
+            vec![arg.clone()],
+            mir_ty,
+        )),
+        ("splat3", [arg]) => Ok(MirExpr::Call(
+            ctx.arena.alloc_str("vec3"),
+            vec![arg.clone()],
+            mir_ty,
+        )),
+        ("splat4", [arg]) => Ok(MirExpr::Call(
+            ctx.arena.alloc_str("vec4"),
+            vec![arg.clone()],
+            mir_ty,
+        )),
         ("vecX", [arg]) => Ok(MirExpr::FieldAccess(
-            Box::new(arg.clone()),
-            "x".to_string(),
+            ctx.arena.alloc(arg.clone()),
+            ctx.arena.alloc_str("x"),
             mir_ty,
         )),
         ("vecY", [arg]) => Ok(MirExpr::FieldAccess(
-            Box::new(arg.clone()),
-            "y".to_string(),
+            ctx.arena.alloc(arg.clone()),
+            ctx.arena.alloc_str("y"),
             mir_ty,
         )),
         ("vecZ", [arg]) => Ok(MirExpr::FieldAccess(
-            Box::new(arg.clone()),
-            "z".to_string(),
+            ctx.arena.alloc(arg.clone()),
+            ctx.arena.alloc_str("z"),
             mir_ty,
         )),
         ("vecW", [arg]) => Ok(MirExpr::FieldAccess(
-            Box::new(arg.clone()),
-            "w".to_string(),
+            ctx.arena.alloc(arg.clone()),
+            ctx.arena.alloc_str("w"),
             mir_ty,
         )),
         _ => {
             // Check if this is a constructor call for a data type with fields
             if let Some((dt_name, tag, _fields)) = ctx.constructors.get(func_name) {
                 // Use the monomorphized struct name from the result type if available
-                let struct_name = if let MirType::Struct(name) = &mir_ty {
-                    name.clone()
+                let struct_name: &'a str = if let MirType::Struct(name) = &mir_ty {
+                    name
                 } else {
-                    dt_name.clone()
+                    ctx.arena.alloc_str(dt_name)
                 };
                 if ctx.is_sum_type(dt_name) && ctx.has_fields(dt_name) {
                     let mut all_args = vec![MirExpr::Lit(MirLit::U32(*tag))];
@@ -1569,7 +1625,11 @@ fn lower_app_with_args(
                     return Ok(MirExpr::ConstructStruct(struct_name, mir_args));
                 }
             }
-            Ok(MirExpr::Call(func_name.to_string(), mir_args, mir_ty))
+            Ok(MirExpr::Call(
+                ctx.arena.alloc_str(func_name),
+                mir_args,
+                mir_ty,
+            ))
         }
     }
 }
@@ -1613,13 +1673,13 @@ fn is_switch_compatible_pattern(pat: &HirPattern) -> bool {
 
 /// Lower case arms into a chain of if-else statements (or a switch statement
 /// when all arms are integer literal patterns on an I32/U32 scrutinee).
-fn lower_case_arms(
-    scrut_name: &str,
-    scrut_ty: &MirType,
+fn lower_case_arms<'a>(
+    scrut_name: &'a str,
+    scrut_ty: &MirType<'a>,
     arms: &[HirCaseArm],
-    result_name: &str,
-    ctx: &LowerCtx,
-) -> Result<Option<MirStmt>, String> {
+    result_name: &'a str,
+    ctx: &LowerCtx<'a>,
+) -> Result<Option<MirStmt<'a>>, String> {
     if arms.is_empty() {
         return Ok(None);
     }
@@ -1633,12 +1693,12 @@ fn lower_case_arms(
             .all(|arm| is_switch_compatible_pattern(&arm.pattern));
 
         if all_int_or_wild {
-            let mut cases: Vec<MirSwitchCase> = Vec::new();
-            let mut default_body: Vec<MirStmt> = Vec::new();
+            let mut cases: Vec<MirSwitchCase<'a>> = Vec::new();
+            let mut default_body: Vec<MirStmt<'a>> = Vec::new();
 
             for arm in arms {
                 let (mut body_stmts, body_expr) = lower_hir_expr_to_stmts(&arm.body, ctx)?;
-                body_stmts.push(MirStmt::Assign(result_name.to_string(), body_expr));
+                body_stmts.push(MirStmt::Assign(result_name, body_expr));
 
                 match &arm.pattern {
                     HirPattern::Lit(HirLit::Int(v)) => {
@@ -1685,9 +1745,9 @@ fn lower_case_arms(
                         let mir_ty =
                             ty_to_mir_type_with_ctx(var_ty, Some(ctx)).unwrap_or(scrut_ty.clone());
                         let mut stmts = vec![MirStmt::Let(
-                            name.clone(),
+                            ctx.arena.alloc_str(name),
                             mir_ty,
-                            MirExpr::Var(scrut_name.to_string(), scrut_ty.clone()),
+                            MirExpr::Var(scrut_name, scrut_ty.clone()),
                         )];
                         stmts.extend(body_stmts);
                         default_body = stmts;
@@ -1696,17 +1756,17 @@ fn lower_case_arms(
                 }
             }
 
-            let scrut_expr = MirExpr::Var(scrut_name.to_string(), scrut_ty.clone());
+            let scrut_expr = MirExpr::Var(scrut_name, scrut_ty.clone());
             return Ok(Some(MirStmt::Switch(scrut_expr, cases, default_body)));
         }
     }
 
     // --- Fallback: build from last to first (fold right) as if-else chain ---
-    let mut result: Option<MirStmt> = None;
+    let mut result: Option<MirStmt<'a>> = None;
 
     for arm in arms.iter().rev() {
         let (mut body_stmts, body_expr) = lower_hir_expr_to_stmts(&arm.body, ctx)?;
-        body_stmts.push(MirStmt::Assign(result_name.to_string(), body_expr));
+        body_stmts.push(MirStmt::Assign(result_name, body_expr));
 
         // Lower the optional guard expression.
         // Guard may reference pattern-bound variables, so it must be evaluated
@@ -1720,11 +1780,11 @@ fn lower_case_arms(
         /// Wrap body_stmts with a guard check if present.
         /// Returns: `guard_setup; if (guard) { body } else { fallthrough }` when guarded,
         /// or just `body` when unguarded.
-        fn apply_guard(
-            guard_mir: Option<(Vec<MirStmt>, MirExpr)>,
-            body_stmts: Vec<MirStmt>,
-            fallthrough: &mut Option<MirStmt>,
-        ) -> Vec<MirStmt> {
+        fn apply_guard<'b>(
+            guard_mir: Option<(Vec<MirStmt<'b>>, MirExpr<'b>)>,
+            body_stmts: Vec<MirStmt<'b>>,
+            fallthrough: &mut Option<MirStmt<'b>>,
+        ) -> Vec<MirStmt<'b>> {
             if let Some((guard_setup_stmts, guard_val)) = guard_mir {
                 let else_stmts = take_else_stmts(fallthrough);
                 let mut guarded = guard_setup_stmts;
@@ -1735,7 +1795,7 @@ fn lower_case_arms(
             }
         }
 
-        fn take_else_stmts(result: &mut Option<MirStmt>) -> Vec<MirStmt> {
+        fn take_else_stmts<'b>(result: &mut Option<MirStmt<'b>>) -> Vec<MirStmt<'b>> {
             match result.take() {
                 Some(MirStmt::If(c, t, e)) => vec![MirStmt::If(c, t, e)],
                 Some(MirStmt::Block(stmts)) => stmts,
@@ -1752,9 +1812,9 @@ fn lower_case_arms(
                     let mir_ty =
                         ty_to_mir_type_with_ctx(var_ty, Some(ctx)).unwrap_or(scrut_ty.clone());
                     binding.push(MirStmt::Let(
-                        name.clone(),
+                        ctx.arena.alloc_str(name),
                         mir_ty,
-                        MirExpr::Var(scrut_name.to_string(), scrut_ty.clone()),
+                        MirExpr::Var(scrut_name, scrut_ty.clone()),
                     ));
                 }
                 let guarded_body = apply_guard(guard_mir, body_stmts, &mut result);
@@ -1779,19 +1839,16 @@ fn lower_case_arms(
                         for (i, pat) in sub_pats.iter().enumerate() {
                             if let HirPattern::Var(var_name, var_ty) = pat {
                                 let field_name = if i < con_fields.len() {
-                                    con_fields[i].name.clone()
+                                    ctx.arena.alloc_str(&con_fields[i].name)
                                 } else {
-                                    format!("field{}", i)
+                                    ctx.arena.alloc_str(&format!("field{}", i))
                                 };
                                 let mir_ty = ty_to_mir_type_with_ctx(var_ty, Some(ctx))?;
                                 bindings.push(MirStmt::Let(
-                                    var_name.clone(),
+                                    ctx.arena.alloc_str(var_name),
                                     mir_ty.clone(),
                                     MirExpr::FieldAccess(
-                                        Box::new(MirExpr::Var(
-                                            scrut_name.to_string(),
-                                            scrut_ty.clone(),
-                                        )),
+                                        ctx.arena.alloc(MirExpr::Var(scrut_name, scrut_ty.clone())),
                                         field_name,
                                         mir_ty,
                                     ),
@@ -1810,18 +1867,18 @@ fn lower_case_arms(
                 } else {
                     // Sum type: match on tag
                     let scrut_tag = if scrut_ty == &MirType::U32 {
-                        MirExpr::Var(scrut_name.to_string(), scrut_ty.clone())
+                        MirExpr::Var(scrut_name, scrut_ty.clone())
                     } else {
                         MirExpr::FieldAccess(
-                            Box::new(MirExpr::Var(scrut_name.to_string(), scrut_ty.clone())),
-                            "tag".to_string(),
+                            ctx.arena.alloc(MirExpr::Var(scrut_name, scrut_ty.clone())),
+                            ctx.arena.alloc_str("tag"),
                             MirType::U32,
                         )
                     };
                     let cond = MirExpr::BinOp(
                         MirBinOp::Eq,
-                        Box::new(scrut_tag),
-                        Box::new(MirExpr::Lit(MirLit::U32(*tag))),
+                        ctx.arena.alloc(scrut_tag),
+                        ctx.arena.alloc(MirExpr::Lit(MirLit::U32(*tag))),
                         MirType::Bool,
                     );
 
@@ -1853,8 +1910,8 @@ fn lower_case_arms(
                 };
                 let cond = MirExpr::BinOp(
                     MirBinOp::Eq,
-                    Box::new(MirExpr::Var(scrut_name.to_string(), scrut_ty.clone())),
-                    Box::new(MirExpr::Lit(mir_lit)),
+                    ctx.arena.alloc(MirExpr::Var(scrut_name, scrut_ty.clone())),
+                    ctx.arena.alloc(MirExpr::Lit(mir_lit)),
                     MirType::Bool,
                 );
 
@@ -1872,7 +1929,7 @@ fn lower_case_arms(
 
             HirPattern::Or(alts) => {
                 // Build OR chain: scrut == alt1 || scrut == alt2 || ...
-                let mut cond: Option<MirExpr> = None;
+                let mut cond: Option<MirExpr<'a>> = None;
                 for alt in alts {
                     if let HirPattern::Lit(hir_lit) = alt {
                         let mir_lit = match hir_lit {
@@ -1887,15 +1944,15 @@ fn lower_case_arms(
                         };
                         let eq = MirExpr::BinOp(
                             MirBinOp::Eq,
-                            Box::new(MirExpr::Var(scrut_name.to_string(), scrut_ty.clone())),
-                            Box::new(MirExpr::Lit(mir_lit)),
+                            ctx.arena.alloc(MirExpr::Var(scrut_name, scrut_ty.clone())),
+                            ctx.arena.alloc(MirExpr::Lit(mir_lit)),
                             MirType::Bool,
                         );
                         cond = Some(match cond {
                             Some(prev) => MirExpr::BinOp(
                                 MirBinOp::Or,
-                                Box::new(prev),
-                                Box::new(eq),
+                                ctx.arena.alloc(prev),
+                                ctx.arena.alloc(eq),
                                 MirType::Bool,
                             ),
                             None => eq,
@@ -1963,7 +2020,7 @@ fn lower_hir_lit(lit: &HirLit, ty: &Ty) -> MirLit {
 /// Lower a HIR binding declaration to a MIR global binding.
 /// The HIR type is already the inner type (no Uniform/Storage wrappers).
 /// The address space is determined from the `address_space` hint string.
-fn lower_hir_binding(res: &HirBinding, ctx: &LowerCtx) -> Option<MirGlobal> {
+fn lower_hir_binding<'a>(res: &HirBinding, ctx: &LowerCtx<'a>) -> Option<MirGlobal<'a>> {
     let mir_ty = ty_to_mir_type_with_ctx(&res.ty, Some(ctx)).ok()?;
     let address_space = match res.address_space.as_str() {
         "Uniform" => AddressSpace::Uniform,
@@ -1973,7 +2030,7 @@ fn lower_hir_binding(res: &HirBinding, ctx: &LowerCtx) -> Option<MirGlobal> {
         _ => AddressSpace::Uniform,
     };
     Some(MirGlobal {
-        name: res.name.clone(),
+        name: ctx.arena.alloc_str(&res.name),
         address_space,
         ty: mir_ty,
         group: res.group,
@@ -1991,20 +2048,22 @@ fn default_lit_for_type(ty: &MirType) -> MirLit {
     }
 }
 
-fn default_expr_for_type(ty: &MirType) -> MirExpr {
+fn default_expr_for_type<'a>(arena: &'a Allocator, ty: &MirType<'a>) -> MirExpr<'a> {
     match ty {
         MirType::I32 | MirType::U32 | MirType::F32 | MirType::Bool => {
             MirExpr::Lit(default_lit_for_type(ty))
         }
         MirType::Vec(n, inner) => MirExpr::Call(
-            format!("vec{}", n),
-            (0..*n).map(|_| default_expr_for_type(inner)).collect(),
+            arena.alloc_str(&format!("vec{}", n)),
+            (0..*n)
+                .map(|_| default_expr_for_type(arena, inner))
+                .collect(),
             ty.clone(),
         ),
         MirType::Mat(cols, rows, inner) => MirExpr::Call(
-            format!("mat{}x{}", cols, rows),
+            arena.alloc_str(&format!("mat{}x{}", cols, rows)),
             (0..(u32::from(*cols) * u32::from(*rows)))
-                .map(|_| default_expr_for_type(inner))
+                .map(|_| default_expr_for_type(arena, inner))
                 .collect(),
             ty.clone(),
         ),
@@ -2044,7 +2103,7 @@ fn is_wgsl_const_builtin(name: &str) -> bool {
 fn is_const_expr(expr: &MirExpr, known_consts: &HashSet<String>) -> bool {
     match expr {
         MirExpr::Lit(_) => true,
-        MirExpr::Var(name, _) => known_consts.contains(name.as_str()),
+        MirExpr::Var(name, _) => known_consts.contains(*name),
         MirExpr::BinOp(_, lhs, rhs, _) => {
             is_const_expr(lhs, known_consts) && is_const_expr(rhs, known_consts)
         }
@@ -2071,6 +2130,7 @@ mod tests {
 
     #[test]
     fn test_lower_simple_function() {
+        let arena = Allocator::new();
         let hir = HirProgram {
             functions: vec![HirFunction {
                 name: "add".into(),
@@ -2093,7 +2153,7 @@ mod tests {
             constants: vec![],
         };
 
-        let mir = lower_hir_to_mir(&hir).expect("lowering should succeed");
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
         assert_eq!(mir.functions.len(), 1);
         let f = &mir.functions[0];
         assert_eq!(f.name, "add");
@@ -2104,6 +2164,7 @@ mod tests {
 
     #[test]
     fn test_lower_if_expression() {
+        let arena = Allocator::new();
         let hir = HirProgram {
             functions: vec![HirFunction {
                 name: "f".into(),
@@ -2132,7 +2193,7 @@ mod tests {
             constants: vec![],
         };
 
-        let mir = lower_hir_to_mir(&hir).expect("lowering should succeed");
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
         assert_eq!(mir.functions.len(), 1);
         let f = &mir.functions[0];
         // Simple if-then-else with no side effects should lower to a select() call
@@ -2145,32 +2206,35 @@ mod tests {
 
     #[test]
     fn test_ty_to_mir_type_scalars() {
-        assert_eq!(ty_to_mir_type(&Ty::i32()), Ok(MirType::I32));
-        assert_eq!(ty_to_mir_type(&Ty::f32()), Ok(MirType::F32));
-        assert_eq!(ty_to_mir_type(&Ty::u32()), Ok(MirType::U32));
-        assert_eq!(ty_to_mir_type(&Ty::bool()), Ok(MirType::Bool));
-        assert_eq!(ty_to_mir_type(&Ty::unit()), Ok(MirType::Unit));
+        let arena = Allocator::new();
+        assert_eq!(ty_to_mir_type(&arena, &Ty::i32()), Ok(MirType::I32));
+        assert_eq!(ty_to_mir_type(&arena, &Ty::f32()), Ok(MirType::F32));
+        assert_eq!(ty_to_mir_type(&arena, &Ty::u32()), Ok(MirType::U32));
+        assert_eq!(ty_to_mir_type(&arena, &Ty::bool()), Ok(MirType::Bool));
+        assert_eq!(ty_to_mir_type(&arena, &Ty::unit()), Ok(MirType::Unit));
     }
 
     #[test]
     fn test_ty_to_mir_type_tensor() {
+        let arena = Allocator::new();
         let ty = shadml_typechecker::tensor_ty(Ty::Nat(4), Ty::f32());
         assert_eq!(
-            ty_to_mir_type(&ty),
-            Ok(MirType::Array(Box::new(MirType::F32), 4))
+            ty_to_mir_type(&arena, &ty),
+            Ok(MirType::Array(arena.alloc(MirType::F32), 4))
         );
     }
 
     #[test]
     fn test_ty_to_mir_type_nested_tensor() {
+        let arena = Allocator::new();
         let ty = shadml_typechecker::tensor_ty(
             Ty::Nat(2),
             shadml_typechecker::tensor_ty(Ty::Nat(4), Ty::f32()),
         );
         assert_eq!(
-            ty_to_mir_type(&ty),
+            ty_to_mir_type(&arena, &ty),
             Ok(MirType::Array(
-                Box::new(MirType::Array(Box::new(MirType::F32), 4)),
+                arena.alloc(MirType::Array(arena.alloc(MirType::F32), 4)),
                 2,
             ))
         );
@@ -2178,15 +2242,17 @@ mod tests {
 
     #[test]
     fn test_ty_aliases_normalize_before_mir_lowering() {
+        let arena = Allocator::new();
         let ty = Ty::app(Ty::app(Ty::Con("Array".into()), Ty::Nat(8)), Ty::f32());
         assert_eq!(
-            ty_to_mir_type(&ty),
-            Ok(MirType::Array(Box::new(MirType::F32), 8))
+            ty_to_mir_type(&arena, &ty),
+            Ok(MirType::Array(arena.alloc(MirType::F32), 8))
         );
     }
 
     #[test]
     fn test_lower_let_expression() {
+        let arena = Allocator::new();
         let hir = HirProgram {
             functions: vec![HirFunction {
                 name: "f".into(),
@@ -2214,7 +2280,7 @@ mod tests {
             constants: vec![],
         };
 
-        let mir = lower_hir_to_mir(&hir).expect("lowering should succeed");
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
         assert_eq!(mir.functions.len(), 1);
         let f = &mir.functions[0];
         // Should have a let statement for x
@@ -2223,6 +2289,7 @@ mod tests {
 
     #[test]
     fn test_zero_param_literal_promoted_to_const() {
+        let arena = Allocator::new();
         // maxLights = 64  →  should become `const maxLights: i32 = 64i;`
         let hir = HirProgram {
             functions: vec![HirFunction {
@@ -2240,7 +2307,7 @@ mod tests {
             constants: vec![],
         };
 
-        let mir = lower_hir_to_mir(&hir).expect("lowering should succeed");
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
         assert_eq!(
             mir.functions.len(),
             0,
@@ -2254,6 +2321,7 @@ mod tests {
 
     #[test]
     fn test_zero_param_arithmetic_promoted_to_const() {
+        let arena = Allocator::new();
         // stride = 4 * 3  →  should become `const stride: i32 = (4i * 3i);`
         let hir = HirProgram {
             functions: vec![HirFunction {
@@ -2277,7 +2345,7 @@ mod tests {
             constants: vec![],
         };
 
-        let mir = lower_hir_to_mir(&hir).expect("lowering should succeed");
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
         assert_eq!(
             mir.functions.len(),
             0,
@@ -2289,6 +2357,7 @@ mod tests {
 
     #[test]
     fn test_zero_param_with_let_body_not_promoted() {
+        let arena = Allocator::new();
         // f = let x = 42 in x + 1  →  should stay as function (has statements)
         let hir = HirProgram {
             functions: vec![HirFunction {
@@ -2317,7 +2386,7 @@ mod tests {
             constants: vec![],
         };
 
-        let mir = lower_hir_to_mir(&hir).expect("lowering should succeed");
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
         assert_eq!(
             mir.functions.len(),
             1,
@@ -2328,6 +2397,7 @@ mod tests {
 
     #[test]
     fn test_function_with_params_not_promoted() {
+        let arena = Allocator::new();
         // f x = x  →  should stay as function
         let hir = HirProgram {
             functions: vec![HirFunction {
@@ -2345,7 +2415,7 @@ mod tests {
             constants: vec![],
         };
 
-        let mir = lower_hir_to_mir(&hir).expect("lowering should succeed");
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
         assert_eq!(
             mir.functions.len(),
             1,
@@ -2356,6 +2426,7 @@ mod tests {
 
     #[test]
     fn test_zero_param_negation_promoted_to_const() {
+        let arena = Allocator::new();
         // neg1 = -1  →  should become `const neg1: i32 = -(1i);`
         let hir = HirProgram {
             functions: vec![HirFunction {
@@ -2377,7 +2448,7 @@ mod tests {
             constants: vec![],
         };
 
-        let mir = lower_hir_to_mir(&hir).expect("lowering should succeed");
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
         assert_eq!(
             mir.functions.len(),
             0,
@@ -2389,6 +2460,7 @@ mod tests {
 
     #[test]
     fn test_zero_param_unit_return_not_promoted() {
+        let arena = Allocator::new();
         // sideEffect = ()  →  should stay as function (Unit return type)
         let hir = HirProgram {
             functions: vec![HirFunction {
@@ -2406,7 +2478,7 @@ mod tests {
             constants: vec![],
         };
 
-        let mir = lower_hir_to_mir(&hir).expect("lowering should succeed");
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
         assert_eq!(
             mir.functions.len(),
             1,

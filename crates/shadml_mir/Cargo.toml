@@ -4,6 +4,7 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+shadml_allocator = { workspace = true }
 shadml_span = { workspace = true }
 shadml_hir = { workspace = true }
 shadml_typechecker = { workspace = true }

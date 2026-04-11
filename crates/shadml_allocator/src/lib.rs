@@ -35,6 +35,12 @@ impl Allocator {
         self.bump.alloc(val)
     }
 
+    /// Allocate a string slice in the arena, returning an arena-borrowed `&str`.
+    #[inline]
+    pub fn alloc_str(&self, s: &str) -> &str {
+        self.bump.alloc_str(s)
+    }
+
     /// Create a new empty vector in the arena.
     #[inline]
     pub fn vec<T>(&self) -> Vec<'_, T> {

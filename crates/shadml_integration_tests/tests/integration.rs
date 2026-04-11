@@ -1117,21 +1117,23 @@ mod fixture_tests {
 
 mod codegen_tests {
     use super::*;
+    use shadml_allocator::Allocator;
 
     #[test]
     fn codegen_simple_add_function() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "add".to_string(),
+                name: arena.alloc_str("add"),
                 params: vec![
                     MirParam {
-                        name: "x".to_string(),
+                        name: arena.alloc_str("x"),
                         ty: MirType::I32,
                     },
                     MirParam {
-                        name: "y".to_string(),
+                        name: arena.alloc_str("y"),
                         ty: MirType::I32,
                     },
                 ],
@@ -1139,8 +1141,8 @@ mod codegen_tests {
                 body: vec![],
                 return_expr: Some(MirExpr::BinOp(
                     MirBinOp::Add,
-                    Box::new(MirExpr::Var("x".to_string(), MirType::I32)),
-                    Box::new(MirExpr::Var("y".to_string(), MirType::I32)),
+                    arena.alloc(MirExpr::Var(arena.alloc_str("x"), MirType::I32)),
+                    arena.alloc(MirExpr::Var(arena.alloc_str("y"), MirType::I32)),
                     MirType::I32,
                 )),
                 comments: vec![],
@@ -1160,39 +1162,40 @@ mod codegen_tests {
 
     #[test]
     fn codegen_compute_shader_entry_point() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
-                name: "ComputeInput".to_string(),
+                name: arena.alloc_str("ComputeInput"),
                 fields: vec![MirField {
-                    name: "gid".to_string(),
-                    ty: MirType::Vec(3, Box::new(MirType::U32)),
+                    name: arena.alloc_str("gid"),
+                    ty: MirType::Vec(3, arena.alloc(MirType::U32)),
                     attributes: vec![MirAttribute {
-                        name: "builtin".to_string(),
-                        args: vec!["global_invocation_id".to_string()],
+                        name: arena.alloc_str("builtin"),
+                        args: vec![arena.alloc_str("global_invocation_id")],
                     }],
                 }],
             }],
             globals: vec![],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "main".to_string(),
+                name: arena.alloc_str("main"),
                 stage: ShaderStage::Compute,
                 workgroup_size: Some([64, 1, 1]),
                 params: vec![MirParam {
-                    name: "input".to_string(),
-                    ty: MirType::Struct("ComputeInput".to_string()),
+                    name: arena.alloc_str("input"),
+                    ty: MirType::Struct(arena.alloc_str("ComputeInput")),
                 }],
                 return_ty: MirType::Unit,
                 body: vec![MirStmt::Let(
-                    "idx".to_string(),
+                    arena.alloc_str("idx"),
                     MirType::U32,
                     MirExpr::FieldAccess(
-                        Box::new(MirExpr::Var(
-                            "input".to_string(),
-                            MirType::Struct("ComputeInput".to_string()),
+                        arena.alloc(MirExpr::Var(
+                            arena.alloc_str("input"),
+                            MirType::Struct(arena.alloc_str("ComputeInput")),
                         )),
-                        "gid".to_string(),
-                        MirType::Vec(3, Box::new(MirType::U32)),
+                        arena.alloc_str("gid"),
+                        MirType::Vec(3, arena.alloc(MirType::U32)),
                     ),
                 )],
                 return_expr: None,
@@ -1217,17 +1220,18 @@ mod codegen_tests {
 
     #[test]
     fn codegen_struct_and_function_ordering() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
-                name: "Particle".to_string(),
+                name: arena.alloc_str("Particle"),
                 fields: vec![
                     MirField {
-                        name: "pos".to_string(),
-                        ty: MirType::Vec(3, Box::new(MirType::F32)),
+                        name: arena.alloc_str("pos"),
+                        ty: MirType::Vec(3, arena.alloc(MirType::F32)),
                         attributes: vec![],
                     },
                     MirField {
-                        name: "life".to_string(),
+                        name: arena.alloc_str("life"),
                         ty: MirType::F32,
                         attributes: vec![],
                     },
@@ -1235,19 +1239,19 @@ mod codegen_tests {
             }],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "get_life".to_string(),
+                name: arena.alloc_str("get_life"),
                 params: vec![MirParam {
-                    name: "p".to_string(),
-                    ty: MirType::Struct("Particle".to_string()),
+                    name: arena.alloc_str("p"),
+                    ty: MirType::Struct(arena.alloc_str("Particle")),
                 }],
                 return_ty: MirType::F32,
                 body: vec![],
                 return_expr: Some(MirExpr::FieldAccess(
-                    Box::new(MirExpr::Var(
-                        "p".to_string(),
-                        MirType::Struct("Particle".to_string()),
+                    arena.alloc(MirExpr::Var(
+                        arena.alloc_str("p"),
+                        MirType::Struct(arena.alloc_str("Particle")),
                     )),
-                    "life".to_string(),
+                    arena.alloc_str("life"),
                     MirType::F32,
                 )),
                 comments: vec![],
@@ -1271,18 +1275,19 @@ mod codegen_tests {
 
     #[test]
     fn codegen_if_else_statement() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "max_val".to_string(),
+                name: arena.alloc_str("max_val"),
                 params: vec![
                     MirParam {
-                        name: "a".to_string(),
+                        name: arena.alloc_str("a"),
                         ty: MirType::I32,
                     },
                     MirParam {
-                        name: "b".to_string(),
+                        name: arena.alloc_str("b"),
                         ty: MirType::I32,
                     },
                 ],
@@ -1290,12 +1295,18 @@ mod codegen_tests {
                 body: vec![MirStmt::If(
                     MirExpr::BinOp(
                         MirBinOp::Gt,
-                        Box::new(MirExpr::Var("a".to_string(), MirType::I32)),
-                        Box::new(MirExpr::Var("b".to_string(), MirType::I32)),
+                        arena.alloc(MirExpr::Var(arena.alloc_str("a"), MirType::I32)),
+                        arena.alloc(MirExpr::Var(arena.alloc_str("b"), MirType::I32)),
                         MirType::Bool,
                     ),
-                    vec![MirStmt::Return(MirExpr::Var("a".to_string(), MirType::I32))],
-                    vec![MirStmt::Return(MirExpr::Var("b".to_string(), MirType::I32))],
+                    vec![MirStmt::Return(MirExpr::Var(
+                        arena.alloc_str("a"),
+                        MirType::I32,
+                    ))],
+                    vec![MirStmt::Return(MirExpr::Var(
+                        arena.alloc_str("b"),
+                        MirType::I32,
+                    ))],
                 )],
                 return_expr: None,
                 comments: vec![],
@@ -1313,26 +1324,27 @@ mod codegen_tests {
 
     #[test]
     fn codegen_vertex_shader() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "vs_main".to_string(),
+                name: arena.alloc_str("vs_main"),
                 stage: ShaderStage::Vertex,
                 workgroup_size: None,
                 params: vec![],
-                return_ty: MirType::Vec(4, Box::new(MirType::F32)),
+                return_ty: MirType::Vec(4, arena.alloc(MirType::F32)),
                 body: vec![],
                 return_expr: Some(MirExpr::Call(
-                    "vec4".to_string(),
+                    arena.alloc_str("vec4"),
                     vec![
                         MirExpr::Lit(MirLit::F32(0.0)),
                         MirExpr::Lit(MirLit::F32(0.5)),
                         MirExpr::Lit(MirLit::F32(0.0)),
                         MirExpr::Lit(MirLit::F32(1.0)),
                     ],
-                    MirType::Vec(4, Box::new(MirType::F32)),
+                    MirType::Vec(4, arena.alloc(MirType::F32)),
                 )),
                 comments: vec![],
             }],
@@ -1347,26 +1359,27 @@ mod codegen_tests {
 
     #[test]
     fn codegen_fragment_shader() {
+        let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
-                name: "fs_main".to_string(),
+                name: arena.alloc_str("fs_main"),
                 stage: ShaderStage::Fragment,
                 workgroup_size: None,
                 params: vec![],
-                return_ty: MirType::Vec(4, Box::new(MirType::F32)),
+                return_ty: MirType::Vec(4, arena.alloc(MirType::F32)),
                 body: vec![],
                 return_expr: Some(MirExpr::Call(
-                    "vec4".to_string(),
+                    arena.alloc_str("vec4"),
                     vec![
                         MirExpr::Lit(MirLit::F32(1.0)),
                         MirExpr::Lit(MirLit::F32(0.0)),
                         MirExpr::Lit(MirLit::F32(0.0)),
                         MirExpr::Lit(MirLit::F32(1.0)),
                     ],
-                    MirType::Vec(4, Box::new(MirType::F32)),
+                    MirType::Vec(4, arena.alloc(MirType::F32)),
                 )),
                 comments: vec![],
             }],
@@ -1381,26 +1394,27 @@ mod codegen_tests {
 
     #[test]
     fn codegen_mir_type_display() {
+        let arena = Allocator::new();
         assert_eq!(format!("{}", MirType::I32), "i32");
         assert_eq!(format!("{}", MirType::U32), "u32");
         assert_eq!(format!("{}", MirType::F32), "f32");
         assert_eq!(format!("{}", MirType::Bool), "bool");
         assert_eq!(
-            format!("{}", MirType::Vec(3, Box::new(MirType::F32))),
+            format!("{}", MirType::Vec(3, arena.alloc(MirType::F32))),
             "vec3<f32>"
         );
         assert_eq!(
-            format!("{}", MirType::Mat(4, 4, Box::new(MirType::F32))),
+            format!("{}", MirType::Mat(4, 4, arena.alloc(MirType::F32))),
             "mat4x4<f32>"
         );
         assert_eq!(
-            format!("{}", MirType::Array(Box::new(MirType::F32), 16)),
+            format!("{}", MirType::Array(arena.alloc(MirType::F32), 16)),
             "array<f32, 16>"
         );
         assert_eq!(
             format!(
                 "{}",
-                MirType::Array(Box::new(MirType::Array(Box::new(MirType::F32), 4)), 2)
+                MirType::Array(arena.alloc(MirType::Array(arena.alloc(MirType::F32), 4)), 2)
             ),
             "array<array<f32, 4>, 2>"
         );
@@ -1613,18 +1627,19 @@ show c = match c
 
     #[test]
     fn mir_to_wgsl_round_trip_is_valid_text() {
+        let arena = shadml_allocator::Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "identity".to_string(),
+                name: arena.alloc_str("identity"),
                 params: vec![MirParam {
-                    name: "x".to_string(),
+                    name: arena.alloc_str("x"),
                     ty: MirType::I32,
                 }],
                 return_ty: MirType::I32,
                 body: vec![],
-                return_expr: Some(MirExpr::Var("x".to_string(), MirType::I32)),
+                return_expr: Some(MirExpr::Var(arena.alloc_str("x"), MirType::I32)),
                 comments: vec![],
             }],
             entry_points: vec![],
@@ -1643,21 +1658,30 @@ show c = match c
 
     #[test]
     fn wgsl_codegen_no_spurious_semicolons() {
+        let arena = shadml_allocator::Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "f".to_string(),
+                name: arena.alloc_str("f"),
                 params: vec![],
                 return_ty: MirType::I32,
                 body: vec![
-                    MirStmt::Let("a".to_string(), MirType::I32, MirExpr::Lit(MirLit::I32(1))),
-                    MirStmt::Let("b".to_string(), MirType::I32, MirExpr::Lit(MirLit::I32(2))),
+                    MirStmt::Let(
+                        arena.alloc_str("a"),
+                        MirType::I32,
+                        MirExpr::Lit(MirLit::I32(1)),
+                    ),
+                    MirStmt::Let(
+                        arena.alloc_str("b"),
+                        MirType::I32,
+                        MirExpr::Lit(MirLit::I32(2)),
+                    ),
                 ],
                 return_expr: Some(MirExpr::BinOp(
                     MirBinOp::Add,
-                    Box::new(MirExpr::Var("a".to_string(), MirType::I32)),
-                    Box::new(MirExpr::Var("b".to_string(), MirType::I32)),
+                    arena.alloc(MirExpr::Var(arena.alloc_str("a"), MirType::I32)),
+                    arena.alloc(MirExpr::Var(arena.alloc_str("b"), MirType::I32)),
                     MirType::I32,
                 )),
                 comments: vec![],
@@ -1676,18 +1700,19 @@ show c = match c
 
     #[test]
     fn wgsl_codegen_proper_indentation() {
+        let arena = shadml_allocator::Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![MirFunction {
-                name: "f".to_string(),
+                name: arena.alloc_str("f"),
                 params: vec![MirParam {
-                    name: "x".to_string(),
+                    name: arena.alloc_str("x"),
                     ty: MirType::I32,
                 }],
                 return_ty: MirType::I32,
                 body: vec![],
-                return_expr: Some(MirExpr::Var("x".to_string(), MirType::I32)),
+                return_expr: Some(MirExpr::Var(arena.alloc_str("x"), MirType::I32)),
                 comments: vec![],
             }],
             entry_points: vec![],
@@ -1722,51 +1747,52 @@ show c = match c
 
     #[test]
     fn full_mir_program_with_all_shader_stages() {
+        let arena = shadml_allocator::Allocator::new();
         let program = MirProgram {
             structs: vec![],
             globals: vec![],
             functions: vec![],
             entry_points: vec![
                 MirEntryPoint {
-                    name: "vs_main".to_string(),
+                    name: arena.alloc_str("vs_main"),
                     stage: ShaderStage::Vertex,
                     workgroup_size: None,
                     params: vec![],
-                    return_ty: MirType::Vec(4, Box::new(MirType::F32)),
+                    return_ty: MirType::Vec(4, arena.alloc(MirType::F32)),
                     body: vec![],
                     return_expr: Some(MirExpr::Call(
-                        "vec4".to_string(),
+                        arena.alloc_str("vec4"),
                         vec![
                             MirExpr::Lit(MirLit::F32(0.0)),
                             MirExpr::Lit(MirLit::F32(0.0)),
                             MirExpr::Lit(MirLit::F32(0.0)),
                             MirExpr::Lit(MirLit::F32(1.0)),
                         ],
-                        MirType::Vec(4, Box::new(MirType::F32)),
+                        MirType::Vec(4, arena.alloc(MirType::F32)),
                     )),
                     comments: vec![],
                 },
                 MirEntryPoint {
-                    name: "fs_main".to_string(),
+                    name: arena.alloc_str("fs_main"),
                     stage: ShaderStage::Fragment,
                     workgroup_size: None,
                     params: vec![],
-                    return_ty: MirType::Vec(4, Box::new(MirType::F32)),
+                    return_ty: MirType::Vec(4, arena.alloc(MirType::F32)),
                     body: vec![],
                     return_expr: Some(MirExpr::Call(
-                        "vec4".to_string(),
+                        arena.alloc_str("vec4"),
                         vec![
                             MirExpr::Lit(MirLit::F32(1.0)),
                             MirExpr::Lit(MirLit::F32(0.0)),
                             MirExpr::Lit(MirLit::F32(0.0)),
                             MirExpr::Lit(MirLit::F32(1.0)),
                         ],
-                        MirType::Vec(4, Box::new(MirType::F32)),
+                        MirType::Vec(4, arena.alloc(MirType::F32)),
                     )),
                     comments: vec![],
                 },
                 MirEntryPoint {
-                    name: "cs_main".to_string(),
+                    name: arena.alloc_str("cs_main"),
                     stage: ShaderStage::Compute,
                     workgroup_size: Some([64, 1, 1]),
                     params: vec![],
@@ -1823,7 +1849,8 @@ mod full_pipeline_tests {
             return Err("HIR lowering error".into());
         }
 
-        let mir = shadml_mir::lower::lower_hir_to_mir(&hir).map_err(|e| e.join(", "))?;
+        let arena = shadml_allocator::Allocator::new();
+        let mir = shadml_mir::lower::lower_hir_to_mir(&arena, &hir).map_err(|e| e.join(", "))?;
         let mir = shadml_mir::reachability::eliminate_dead_code(&mir);
 
         Ok(emit_wgsl(&mir))
@@ -2036,7 +2063,8 @@ mod trait_tests {
             return Err("HIR lowering error".into());
         }
 
-        let mir = shadml_mir::lower::lower_hir_to_mir(&hir).map_err(|e| e.join(", "))?;
+        let arena = shadml_allocator::Allocator::new();
+        let mir = shadml_mir::lower::lower_hir_to_mir(&arena, &hir).map_err(|e| e.join(", "))?;
         let mir = shadml_mir::reachability::eliminate_dead_code(&mir);
 
         Ok(shadml_wgsl_codegen::emit_wgsl(&mir))
@@ -2370,7 +2398,8 @@ mod const_promotion_tests {
             return Err("HIR lowering error".into());
         }
 
-        let mir = shadml_mir::lower::lower_hir_to_mir(&hir).map_err(|e| e.join(", "))?;
+        let arena = shadml_allocator::Allocator::new();
+        let mir = shadml_mir::lower::lower_hir_to_mir(&arena, &hir).map_err(|e| e.join(", "))?;
         let mir = shadml_mir::reachability::eliminate_dead_code(&mir);
 
         Ok(shadml_wgsl_codegen::emit_wgsl(&mir))
@@ -2527,7 +2556,8 @@ mod bitwise_tests {
             return Err("HIR lowering error".into());
         }
 
-        let mir = shadml_mir::lower::lower_hir_to_mir(&hir).map_err(|e| e.join(", "))?;
+        let arena = shadml_allocator::Allocator::new();
+        let mir = shadml_mir::lower::lower_hir_to_mir(&arena, &hir).map_err(|e| e.join(", "))?;
         let mir = shadml_mir::reachability::eliminate_dead_code(&mir);
 
         Ok(shadml_wgsl_codegen::emit_wgsl(&mir))
@@ -2805,7 +2835,8 @@ mod fold_range_tests {
             return Err("HIR lowering error".into());
         }
 
-        let mir = shadml_mir::lower::lower_hir_to_mir(&hir).map_err(|e| e.join(", "))?;
+        let arena = shadml_allocator::Allocator::new();
+        let mir = shadml_mir::lower::lower_hir_to_mir(&arena, &hir).map_err(|e| e.join(", "))?;
         let mir = shadml_mir::reachability::eliminate_dead_code(&mir);
 
         Ok(shadml_wgsl_codegen::emit_wgsl(&mir))
@@ -2946,7 +2977,8 @@ mod naga_validation {
             return Err("HIR lowering error".into());
         }
 
-        let mir = shadml_mir::lower::lower_hir_to_mir(&hir).map_err(|e| e.join(", "))?;
+        let arena = shadml_allocator::Allocator::new();
+        let mir = shadml_mir::lower::lower_hir_to_mir(&arena, &hir).map_err(|e| e.join(", "))?;
         let mir = shadml_mir::reachability::eliminate_dead_code(&mir);
 
         Ok(emit_wgsl(&mir))
