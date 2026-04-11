@@ -20,12 +20,15 @@
 //!   (for WASM).
 
 pub mod config;
+mod manifest;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use shadml_parser::module_resolver::ModuleGraph;
 use shadml_parser::parser::{Decl, Program};
+
+pub use manifest::*;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -173,12 +176,7 @@ impl std::fmt::Display for BundleError {
             BundleError::NameCollisions(collisions) => {
                 write!(f, "name collisions across modules:")?;
                 for c in collisions {
-                    write!(
-                        f,
-                        "\n  {} '{}' defined in:",
-                        c.kind,
-                        c.name
-                    )?;
+                    write!(f, "\n  {} '{}' defined in:", c.kind, c.name)?;
                     for definition in &c.definitions {
                         write!(
                             f,
@@ -264,6 +262,77 @@ pub fn bundle(config: &BundleConfig) -> Result<BundleOutput, BundleError> {
     })
 }
 
+/// Compile a bundle manifest for one fixed feature set.
+pub fn bundle_manifest(
+    config: &BundleConfig,
+    profile_key: impl Into<String>,
+) -> Result<ShaderBundleManifest, BundleError> {
+    if config.entries.is_empty() {
+        return Err(BundleError::Config("no entry files specified".into()));
+    }
+
+    let reader = shadml_parser::FsReader;
+    let features = shadml_parser::FeatureSet::from_flags(&config.features);
+    let mut profile_entries = Vec::new();
+    let mut profile_modules: HashMap<String, CompiledModule> = HashMap::new();
+    let mut profile_types: HashMap<String, ExportedType> = HashMap::new();
+    let mut profile_source_files = Vec::new();
+
+    for entry_file in &config.entries {
+        let source = std::fs::read_to_string(entry_file)
+            .map_err(|e| BundleError::Io(format!("{}: {}", entry_file.display(), e)))?;
+
+        let result = bundle_single_entry(
+            entry_file,
+            &source,
+            &config.source_roots,
+            &features,
+            &reader,
+            config.preserve_comments,
+            config.split_entry_points,
+        )?;
+
+        profile_entries.extend(result.compiled_entries);
+
+        for module in result.modules {
+            profile_modules.entry(module.name.clone()).or_insert(module);
+        }
+
+        for exported in result.exported_types {
+            profile_types
+                .entry(exported.name.clone())
+                .or_insert(exported);
+        }
+
+        for path in result.source_files {
+            if !profile_source_files.contains(&path) {
+                profile_source_files.push(path);
+            }
+        }
+    }
+
+    ensure_unique_compiled_entry_names(&profile_entries)?;
+
+    let mut modules = profile_modules.into_values().collect::<Vec<_>>();
+    modules.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+
+    let mut exported_types = profile_types.into_values().collect::<Vec<_>>();
+    exported_types.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+
+    profile_source_files.sort();
+
+    Ok(ShaderBundleManifest {
+        profiles: vec![CompiledProfile {
+            profile_key: profile_key.into(),
+            enabled_features: config.features.clone(),
+            source_files: profile_source_files,
+            modules,
+            entries: profile_entries,
+            exported_types,
+        }],
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Bundle from in-memory sources (for WASM)
 // ---------------------------------------------------------------------------
@@ -326,8 +395,11 @@ pub fn bundle_virtual(
 
 struct SingleEntryResult {
     entries: Vec<BundleEntry>,
+    compiled_entries: Vec<CompiledEntry>,
     diagnostics: Vec<BundleDiagnostic>,
     source_files: Vec<PathBuf>,
+    modules: Vec<CompiledModule>,
+    exported_types: Vec<ExportedType>,
 }
 
 fn bundle_single_entry(
@@ -363,7 +435,7 @@ fn bundle_single_entry(
     shadml_parser::evaluate_features(&mut root_program, features);
 
     // 3. Resolve module graph
-    let (merged, source_files) = if has_imports(&root_program) {
+    let (merged, source_files, modules, root_module_path) = if has_imports(&root_program) {
         let source_root = if source_roots.is_empty() {
             vec![entry_file
                 .parent()
@@ -386,10 +458,38 @@ fn bundle_single_entry(
         }
 
         let files: Vec<PathBuf> = graph.modules.iter().map(|m| m.path.clone()).collect();
+        let modules = graph
+            .modules
+            .iter()
+            .map(|module| CompiledModule {
+                name: module.name.clone(),
+                path: module.path.clone(),
+                dependencies: module
+                    .imports
+                    .iter()
+                    .map(|import| import.module_path.clone())
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let root_module_path = graph
+            .modules
+            .last()
+            .map(|module| split_module_path(&module.name))
+            .unwrap_or_else(|| logical_module_path(entry_file, source_roots, None));
         let merged = shadml_parser::merge_modules(&graph);
-        (merged, files)
+        (merged, files, modules, root_module_path)
     } else {
-        (root_program, vec![entry_file.to_path_buf()])
+        let module_name = logical_module_name(entry_file, source_roots, Some(&root_program));
+        (
+            root_program,
+            vec![entry_file.to_path_buf()],
+            vec![CompiledModule {
+                name: module_name.clone(),
+                path: entry_file.to_path_buf(),
+                dependencies: Vec::new(),
+            }],
+            split_module_path(&module_name),
+        )
     };
 
     // 5. Prepend prelude
@@ -461,13 +561,24 @@ fn bundle_single_entry(
     })?;
 
     // 9. Generate outputs
-    let entries = if split_entry_points && mir.entry_points.len() > 1 {
+    let exported_types = exported_types_from_structs(&mir.structs);
+    let exported_type_names = exported_type_names(&exported_types);
+
+    let (entries, compiled_entries) = if split_entry_points && mir.entry_points.len() > 1 {
         // Per-entry-point splitting: each entry point gets its own WGSL
         // with only the code reachable from that entry point.
-        generate_split_outputs(&mir, entry_file, source_roots, preserve_comments)
+        generate_split_outputs(
+            &mir,
+            entry_file,
+            source_roots,
+            &root_module_path,
+            &source_files,
+            preserve_comments,
+        )?
     } else {
         // Single output with all entry points, standard DCE.
         let mir = shadml_mir::reachability::eliminate_dead_code(&mir);
+        validate_mir_for_bundle(&mir, entry_file)?;
         let wgsl = if preserve_comments {
             shadml_wgsl_codegen::emit_wgsl_with_comments(&mir)
         } else {
@@ -485,19 +596,40 @@ fn bundle_single_entry(
             .collect();
 
         let name = output_base_name(entry_file, source_roots);
-
-        vec![BundleEntry {
-            name,
+        let bundle_entry = BundleEntry {
+            name: name.clone(),
             source_file: entry_file.to_path_buf(),
-            stages,
-            wgsl,
-        }]
+            stages: stages.clone(),
+            wgsl: wgsl.clone(),
+        };
+
+        let compiled_entries = mir
+            .entry_points
+            .iter()
+            .map(|ep| CompiledEntry {
+                rust_mod_path: root_module_path.clone(),
+                shader_name: name.clone(),
+                stage: ep.stage,
+                entry_point: ep.name.to_string(),
+                wgsl_source: wgsl.clone(),
+                bind_groups: bind_groups_from_globals(&mir.globals),
+                push_constants: None,
+                workgroup_size: ep.workgroup_size,
+                source_files: source_files.clone(),
+                exported_type_names: exported_type_names.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        (vec![bundle_entry], compiled_entries)
     };
 
     Ok(SingleEntryResult {
         entries,
+        compiled_entries,
         diagnostics,
         source_files,
+        modules,
+        exported_types,
     })
 }
 
@@ -510,9 +642,12 @@ fn generate_split_outputs<'a>(
     mir: &shadml_mir::MirProgram<'a>,
     source_file: &Path,
     source_roots: &[PathBuf],
+    rust_mod_path: &[String],
+    source_files: &[PathBuf],
     preserve_comments: bool,
-) -> Vec<BundleEntry> {
+) -> Result<(Vec<BundleEntry>, Vec<CompiledEntry>), BundleError> {
     let mut entries = Vec::new();
+    let mut compiled_entries = Vec::new();
 
     for ep in &mir.entry_points {
         // Create a MIR program with just this one entry point
@@ -526,6 +661,7 @@ fn generate_split_outputs<'a>(
 
         // Run DCE scoped to this entry point
         let trimmed = shadml_mir::reachability::eliminate_dead_code(&single_ep_mir);
+        validate_mir_for_bundle(&trimmed, source_file)?;
 
         let wgsl = if preserve_comments {
             shadml_wgsl_codegen::emit_wgsl_with_comments(&trimmed)
@@ -533,21 +669,59 @@ fn generate_split_outputs<'a>(
             shadml_wgsl_codegen::emit_wgsl(&trimmed)
         };
 
-        let name = format!("{}_{}", output_base_name(source_file, source_roots), ep.name);
+        let name = format!(
+            "{}_{}",
+            output_base_name(source_file, source_roots),
+            ep.name
+        );
+        let bind_groups = bind_groups_from_globals(&trimmed.globals);
+        let exported_types = exported_types_from_structs(&trimmed.structs);
 
         entries.push(BundleEntry {
-            name,
+            name: name.clone(),
             source_file: source_file.to_path_buf(),
             stages: vec![ShaderStageInfo {
                 name: ep.name.to_string(),
                 stage: ep.stage,
                 workgroup_size: ep.workgroup_size,
             }],
-            wgsl,
+            wgsl: wgsl.clone(),
+        });
+
+        compiled_entries.push(CompiledEntry {
+            rust_mod_path: rust_mod_path.to_vec(),
+            shader_name: name,
+            stage: ep.stage,
+            entry_point: ep.name.to_string(),
+            wgsl_source: wgsl,
+            bind_groups,
+            push_constants: None,
+            workgroup_size: ep.workgroup_size,
+            source_files: source_files.to_vec(),
+            exported_type_names: exported_type_names(&exported_types),
         });
     }
 
-    entries
+    Ok((entries, compiled_entries))
+}
+
+fn validate_mir_for_bundle(
+    mir: &shadml_mir::MirProgram<'_>,
+    source_file: &Path,
+) -> Result<(), BundleError> {
+    shadml_mir::validate::validate_program(mir).map_err(|errors| {
+        BundleError::Compilation(
+            errors
+                .into_iter()
+                .map(|message| BundleDiagnostic {
+                    file: Some(source_file.to_path_buf()),
+                    severity: BundleSeverity::Error,
+                    message,
+                    help: None,
+                })
+                .collect(),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -560,8 +734,7 @@ fn generate_split_outputs<'a>(
 /// Module/import declarations are excluded from collision detection.
 pub fn detect_name_collisions(graph: &ModuleGraph) -> Vec<NameCollision> {
     // Track (name, kind) -> list of module definitions
-    let mut definitions: HashMap<(String, &'static str), Vec<CollisionDefinition>> =
-        HashMap::new();
+    let mut definitions: HashMap<(String, &'static str), Vec<CollisionDefinition>> = HashMap::new();
 
     for module in &graph.modules {
         for decl in &module.program.decls {
@@ -644,6 +817,25 @@ fn convert_severity(severity: shadml_diagnostics::Severity) -> BundleSeverity {
     }
 }
 
+fn ensure_unique_compiled_entry_names(entries: &[CompiledEntry]) -> Result<(), BundleError> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for entry in entries {
+        *seen.entry(&entry.shader_name).or_insert(0) += 1;
+    }
+
+    let mut collisions: Vec<String> = seen
+        .into_iter()
+        .filter_map(|(name, count)| (count > 1).then_some(name.to_string()))
+        .collect();
+    collisions.sort();
+
+    if collisions.is_empty() {
+        Ok(())
+    } else {
+        Err(BundleError::OutputNameCollisions(collisions))
+    }
+}
+
 fn ensure_unique_output_names(entries: &[BundleEntry]) -> Result<(), BundleError> {
     let mut seen: HashMap<&str, usize> = HashMap::new();
     for entry in entries {
@@ -661,6 +853,62 @@ fn ensure_unique_output_names(entries: &[BundleEntry]) -> Result<(), BundleError
     } else {
         Err(BundleError::OutputNameCollisions(collisions))
     }
+}
+
+fn split_module_path(module_name: &str) -> Vec<String> {
+    module_name
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+        .collect()
+}
+
+fn logical_module_path(
+    path: &Path,
+    source_roots: &[PathBuf],
+    program: Option<&Program>,
+) -> Vec<String> {
+    split_module_path(&logical_module_name(path, source_roots, program))
+}
+
+fn logical_module_name(path: &Path, source_roots: &[PathBuf], program: Option<&Program>) -> String {
+    program
+        .and_then(module_decl_name)
+        .unwrap_or_else(|| derive_module_name(path, source_roots))
+}
+
+fn module_decl_name(program: &Program) -> Option<String> {
+    program.decls.iter().find_map(|decl| match decl {
+        Decl::ModuleDecl { name, .. } => Some(name.clone()),
+        _ => None,
+    })
+}
+
+fn derive_module_name(path: &Path, source_roots: &[PathBuf]) -> String {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+
+    for root in source_roots {
+        if let Ok(relative) = path.strip_prefix(root) {
+            let name = relative
+                .with_extension("")
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join(".");
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("Main")
+        .to_string()
 }
 
 fn output_base_name(path: &Path, source_roots: &[PathBuf]) -> String {
@@ -970,18 +1218,14 @@ helper x = x + 1
         assert_eq!(collisions.len(), 1);
         assert_eq!(collisions[0].name, "foo");
         assert_eq!(collisions[0].kind, "function");
-        assert!(
-            collisions[0]
-                .definitions
-                .iter()
-                .any(|definition| definition.module == "A")
-        );
-        assert!(
-            collisions[0]
-                .definitions
-                .iter()
-                .any(|definition| definition.module == "B")
-        );
+        assert!(collisions[0]
+            .definitions
+            .iter()
+            .any(|definition| definition.module == "A"));
+        assert!(collisions[0]
+            .definitions
+            .iter()
+            .any(|definition| definition.module == "B"));
     }
 
     #[test]
@@ -1030,7 +1274,11 @@ helper x = x + 1
         };
 
         let result = bundle(&config).expect("should bundle");
-        let names: Vec<&str> = result.entries.iter().map(|entry| entry.name.as_str()).collect();
+        let names: Vec<&str> = result
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
         assert!(names.contains(&"src__Main"));
         assert!(names.contains(&"examples__Main"));
 
