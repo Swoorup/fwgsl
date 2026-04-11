@@ -1,0 +1,17 @@
+[package]
+name = "shadml_bindgen"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+shadml_bundler = { workspace = true }
+shadml_mir = { workspace = true }
+naga = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
+thiserror = { workspace = true }
+heck = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -17,6 +17,7 @@ members = [
     "crates/shadml_mir",
     "crates/shadml_wgsl_codegen",
     "crates/shadml_bundler",
+    "crates/shadml_bindgen",
     "crates/shadml_formatter",
     "crates/shadml_cli",
     "crates/shadml_wasm",
@@ -40,6 +41,7 @@ default-members = [
     "crates/shadml_mir",
     "crates/shadml_wgsl_codegen",
     "crates/shadml_bundler",
+    "crates/shadml_bindgen",
     "crates/shadml_formatter",
     "crates/shadml_cli",
     "crates/shadml_language_server",
@@ -67,6 +69,7 @@ shadml_hir = { path = "crates/shadml_hir" }
 shadml_mir = { path = "crates/shadml_mir" }
 shadml_wgsl_codegen = { path = "crates/shadml_wgsl_codegen" }
 shadml_bundler = { path = "crates/shadml_bundler" }
+shadml_bindgen = { path = "crates/shadml_bindgen" }
 shadml_formatter = { path = "crates/shadml_formatter" }
 shadml_language_server = { path = "crates/shadml_language_server" }
 
@@ -84,6 +87,7 @@ serde = "1"
 serde_json = "1"
 tempfile = "3"
 tokio = "1"
+toml = "0.8"
 tower-lsp = "0.20"
 wasm-bindgen = "0.2"
 
