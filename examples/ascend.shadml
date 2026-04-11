@@ -1,0 +1,134 @@
+-- Ascend: Volumetric fractal cloud raymarcher
+-- Original compact GLSL by Xor, converted to shadml.
+--
+-- Algorithm overview
+-- ──────────────────
+-- Outer loop  (i = 1..100)  : march 100 steps along a camera ray,
+--   threading accumulated colour `o` and opacity `k`.
+-- Inner loop  (a = 0.01, doubling until ≥ 3 → ~9 iters) : per step,
+--   apply a fractal rotation and subtract noise contributions to
+--   refine the cloud SDF `d` and elongated-sphere SDF `l`.
+-- V macro    : volume integration — clamp d, update k, accumulate o.
+-- N macro    : abs(dot(sin(p*(x/a)), splat3(a*y))) — fractal noise.
+
+-- ─────────────────────────────────────────────────────────────────────
+-- rotateZY
+-- In GLSL: p.zy *= 0.1 * mat2(8, 6, -6, 8)
+-- mat2 is column-major, so M = [[8,6],[-6,8]].
+-- Row-vector multiply (v * M):
+--   new_z = p.z * 8  + p.y * (-6)  = (8·p.z - 6·p.y)
+--   new_y = p.z * 6  + p.y *   8   = (6·p.z + 8·p.y)
+-- then scale by 0.1.
+-- ─────────────────────────────────────────────────────────────────────
+rotateZY : Vec 3 F32 -> Vec 3 F32
+rotateZY p =
+  vec3 p.x
+       (0.1 * (6.0 * p.z + 8.0 * p.y))
+       (0.1 * (8.0 * p.z - 6.0 * p.y))
+
+-- ─────────────────────────────────────────────────────────────────────
+-- noiseN — the N(x,y) macro
+-- N(x,y) = abs(dot(sin(p/a*x), p-p+a*y))
+-- Note p-p = 0, so this simplifies to:
+--   abs(dot(sin(p*(x/a)), splat3(a*y)))
+-- ─────────────────────────────────────────────────────────────────────
+noiseN : Vec 3 F32 -> F32 -> F32 -> F32 -> F32
+noiseN p x y a = abs (dot (sin (p * splat3 (x / a))) (splat3 (a * y)))
+
+-- ─────────────────────────────────────────────────────────────────────
+-- fractalOctaves — inner loop
+-- a doubles from 0.01 until it reaches 3.0 (≈ 9 iterations).
+-- Each octave rotates p.zy then subtracts noise from d and l.
+-- Returns the refined (d', l') packed into a Vec 2 F32.
+-- ─────────────────────────────────────────────────────────────────────
+fractalOctaves : Vec 3 F32 -> F32 -> F32 -> Vec 2 F32
+fractalOctaves p0 d0 l0 =
+  loop go (p = p0) (d = d0) (l = l0) (a = 0.01) in
+    if a >= 3.0
+      then vec2 d l
+      else
+        let p' = rotateZY p
+        in go p' (d - noiseN p' 4.0 0.2 a) (l - noiseN p' 5.0 0.01 a) (a + a)
+
+-- ─────────────────────────────────────────────────────────────────────
+-- RayAcc — outer-loop accumulator
+-- ─────────────────────────────────────────────────────────────────────
+data RayAcc = RayAcc { o : Vec 3 F32, k : F32 }
+
+-- ─────────────────────────────────────────────────────────────────────
+-- vAccum — the V macro expanded
+-- V:  d' = min(d, 0)
+--     a  = d'·k − d'    (then k += a)
+--     o += a / exp(s·1.3) · (1 + d') · tint
+-- ─────────────────────────────────────────────────────────────────────
+vAccum : F32 -> RayAcc -> Vec 3 F32 -> F32 -> RayAcc
+vAccum d acc tint s =
+  let dc = min d 0.0
+      a  = dc * acc.k - dc
+      o' = acc.o + tint * splat3 (a / exp (s * 1.3) * (1.0 + dc))
+  in RayAcc { o = o', k = acc.k + a }
+
+-- ─────────────────────────────────────────────────────────────────────
+-- rayStep — one outer ray-march step  (i runs 1..100)
+-- Matches the outer for-loop body + update in the original GLSL.
+-- ─────────────────────────────────────────────────────────────────────
+rayStep : Vec 2 F32 -> Vec 2 F32 -> F32 -> RayAcc -> I32 -> RayAcc
+rayStep fragCoord resolution time acc i =
+  let fi    = toF32 i
+
+      -- Ray direction: normalize(vec3(2·P - R, R.y))
+      dir2d = fragCoord * splat2 2.0 - resolution
+      dir   = normalize (vec3 dir2d.x dir2d.y resolution.y)
+
+      -- Step i units along the ray (scaled by 0.05), shift -3 on Z
+      p0    = dir * splat3 (fi * 0.05)
+      p     = vec3 p0.x p0.y (p0.z - 3.0)
+
+      -- Cloud sphere centred at (1.5, 0.7, 0); s = distance to centre
+      qC    = p - vec3 1.5 0.7 0.0
+      s     = length qC
+
+      -- Elongated-sphere SDF: clamp q.y to [0, +∞) above y = 0.7
+      --   q.y = p.y - min(p.y, 0.7)  =  max(p.y - 0.7, 0)
+      qY    = p.y - min p.y 0.7
+      q     = vec3 qC.x qY qC.z
+      l0    = length q
+
+      -- Animate cloud along Y with time (p.y += T in original)
+      pT    = vec3 p.x (p.y + time) p.z
+
+      -- Initial coarse distance estimate: ground disc / far-plane clip
+      d0    = min (length p.xz) (1.0 - p.z)
+
+      -- Fractal octave refinement (inner loop)
+      dl    = fractalOctaves pT d0 l0
+      d'    = dl.x
+      l'    = dl.y
+
+      -- Volume shading parameters
+      qCol  = vec3 3.0 1.0 0.7
+      x     = max (2.0 - l') 0.0 * 0.8
+
+      -- First V pass: blend sky (cool) → cloud (warm) by x
+      acc1  = vAccum d' acc (mix (vec3 0.0 1.5 3.0) qCol x) s
+
+      -- Second V pass: cloud self-glow (d reset to l')
+      acc2  = vAccum l' acc1 (qCol * splat3 20.0) s
+
+      -- Ambient haze: scattered light term  (x - x·k) / s / 400
+      o3    = acc2.o + splat3 ((x - x * acc2.k) / s / 400.0)
+
+  in RayAcc { o = o3, k = acc2.k }
+
+-- ─────────────────────────────────────────────────────────────────────
+-- shade — fragment entry point
+-- Matches:  O = vec4(tanh(o), 1)
+-- ─────────────────────────────────────────────────────────────────────
+shade : Vec 2 F32 -> F32 -> Vec 2 F32 -> Vec 4 F32
+shade fragCoord time resolution =
+  let init  = RayAcc { o = vec3 0.0 0.0 0.0, k = 0.0 }
+      -- foldRange [1, 101) mirrors the original i++ < 1e2 loop
+      -- (post-increment means i is 1..100 when the body executes)
+      final = foldRange 1 101 init (rayStep fragCoord resolution time)
+      rgb   = tanh final.o
+  in vec4 rgb.x rgb.y rgb.z 1.0
