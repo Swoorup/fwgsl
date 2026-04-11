@@ -262,13 +262,28 @@ impl MirExpr {
     }
 
     /// Produce a zero/default value for the given MIR type.
+    ///
+    /// For composite types (vec, mat, struct, array) we emit a
+    /// zero-value constructor — e.g. `vec3<f32>()` or `MyStruct()` —
+    /// which WGSL defines as all-zeros / false / 0.0.
     pub fn default_value(ty: &MirType) -> MirExpr {
         match ty {
             MirType::I32 => MirExpr::Lit(MirLit::I32(0)),
             MirType::U32 => MirExpr::Lit(MirLit::U32(0)),
             MirType::F32 => MirExpr::Lit(MirLit::F32(0.0)),
             MirType::Bool => MirExpr::Lit(MirLit::Bool(false)),
-            _ => MirExpr::Lit(MirLit::I32(0)),
+            // vec / mat: use short names so is_type_constructor_call matches
+            MirType::Vec(n, _) => MirExpr::Call(format!("vec{}", n), vec![], ty.clone()),
+            MirType::Mat(cols, rows, _) => {
+                MirExpr::Call(format!("mat{}x{}", cols, rows), vec![], ty.clone())
+            }
+            // Struct: zero-value constructor is just TypeName()
+            MirType::Struct(name) => MirExpr::Call(name.clone(), vec![], ty.clone()),
+            // Array: zero-value constructor is array<T, N>()
+            MirType::Array(..) | MirType::RuntimeArray(_) => {
+                MirExpr::Call(ty.to_string(), vec![], ty.clone())
+            }
+            MirType::Unit => MirExpr::Lit(MirLit::I32(0)),
         }
     }
 }
