@@ -51,11 +51,17 @@ impl AstLowering {
         };
 
         let body = desugar_where(body, where_binds, span);
-        self.active_constraints_stack.push(active_constraints.clone());
+        self.active_constraints_stack
+            .push(active_constraints.clone());
         let (mut hir_body, body_ty) = self.lower_expr(&body, &mut local_env);
         self.active_constraints_stack.pop();
         if !param_pattern_binds.is_empty() {
-            hir_body = HirExpr::Let(param_pattern_binds, Box::new(hir_body), body_ty.clone(), span);
+            hir_body = HirExpr::Let(
+                param_pattern_binds,
+                Box::new(hir_body),
+                body_ty.clone(),
+                span,
+            );
         }
 
         // Resolve inferred predicates before unifying body type with return
@@ -66,10 +72,16 @@ impl AstLowering {
         // cannot unify with concrete types.
         let inferred_constraints =
             self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
-        shadml_semantic::resolve_assoc_projections_in_subst(&mut self.engine.subst, &self.impls, &self.builtin_impls);
+        shadml_semantic::resolve_assoc_projections_in_subst(
+            &mut self.engine.subst,
+            &self.impls,
+            &self.builtin_impls,
+        );
         let body_ty_resolved = body_ty.apply_subst(&self.engine.subst);
         let body_ty_resolved = shadml_semantic::resolve_assoc_projections_with_impls(
-            &body_ty_resolved, &self.impls, &self.builtin_impls,
+            &body_ty_resolved,
+            &self.impls,
+            &self.builtin_impls,
         );
         self.engine.unify(&body_ty_resolved, &ret_ty_var, span);
         for predicate in inferred_constraints {
@@ -105,6 +117,7 @@ impl AstLowering {
     }
 
     /// Lower an impl method body into a regular HIR function.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn lower_impl_method(
         &mut self,
         local_name: &str,
@@ -159,6 +172,7 @@ impl AstLowering {
     }
 
     /// Lower a standalone impl method — infer types from parameters and body.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn lower_standalone_impl_method(
         &mut self,
         local_name: &str,
@@ -257,20 +271,32 @@ impl AstLowering {
             vec![]
         };
 
-        self.active_constraints_stack.push(active_constraints.clone());
+        self.active_constraints_stack
+            .push(active_constraints.clone());
         let (mut hir_body, body_ty) = self.lower_expr(body, &mut local_env);
         self.active_constraints_stack.pop();
         if !param_pattern_binds.is_empty() {
-            hir_body = HirExpr::Let(param_pattern_binds, Box::new(hir_body), body_ty.clone(), span);
+            hir_body = HirExpr::Let(
+                param_pattern_binds,
+                Box::new(hir_body),
+                body_ty.clone(),
+                span,
+            );
         }
         // Resolve inferred predicates before unifying body type with return
         // type (same as in lower_function).
         let inferred_constraints =
             self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
-        shadml_semantic::resolve_assoc_projections_in_subst(&mut self.engine.subst, &self.impls, &self.builtin_impls);
+        shadml_semantic::resolve_assoc_projections_in_subst(
+            &mut self.engine.subst,
+            &self.impls,
+            &self.builtin_impls,
+        );
         let body_ty_resolved = body_ty.apply_subst(&self.engine.subst);
         let body_ty_resolved = shadml_semantic::resolve_assoc_projections_with_impls(
-            &body_ty_resolved, &self.impls, &self.builtin_impls,
+            &body_ty_resolved,
+            &self.impls,
+            &self.builtin_impls,
         );
         self.engine.unify(&body_ty_resolved, &ret_ty_var, span);
         for predicate in inferred_constraints {
@@ -340,7 +366,9 @@ impl AstLowering {
     pub(crate) fn eagerly_resolve_assoc_proj_in_ret(&mut self, ret_ty: &Ty, span: Span) {
         let ret_substituted = ret_ty.apply_subst(&self.engine.subst);
         let ret_resolved = shadml_semantic::resolve_assoc_projections_with_impls(
-            &ret_substituted, &self.impls, &self.builtin_impls,
+            &ret_substituted,
+            &self.impls,
+            &self.builtin_impls,
         );
         if ret_resolved != ret_substituted {
             if let Ty::Var(v) = ret_ty {
@@ -368,7 +396,12 @@ impl AstLowering {
         )
     }
 
-    pub(crate) fn lower_data_decl(&self, name: &str, type_params: &[String], cons: &[ConDecl]) -> HirDataType {
+    pub(crate) fn lower_data_decl(
+        &self,
+        name: &str,
+        type_params: &[String],
+        cons: &[ConDecl],
+    ) -> HirDataType {
         let mut hir_cons = Vec::new();
         for (tag, con) in cons.iter().enumerate() {
             let fields = match &con.fields {
@@ -418,5 +451,4 @@ impl AstLowering {
             constructors: hir_cons,
         }
     }
-
 }

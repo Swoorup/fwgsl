@@ -59,33 +59,33 @@ fn parse_and_analyze(source: &str) -> (SemanticAnalyzer, bool) {
 // 1. Parse tests -- single-line and single-declaration inputs
 // =========================================================================
 
-#[path = "test_modules/parse_single_decl_tests.rs"]
-mod parse_single_decl_tests;
-#[path = "test_modules/parse_multi_decl_tests.rs"]
-mod parse_multi_decl_tests;
-#[path = "test_modules/lexer_tests.rs"]
-mod lexer_tests;
-#[path = "test_modules/semantic_tests.rs"]
-mod semantic_tests;
-#[path = "test_modules/fixture_tests.rs"]
-mod fixture_tests;
-#[path = "test_modules/codegen_tests.rs"]
-mod codegen_tests;
-#[path = "test_modules/error_recovery_tests.rs"]
-mod error_recovery_tests;
-#[path = "test_modules/pipeline_tests.rs"]
-mod pipeline_tests;
-#[path = "test_modules/full_pipeline_tests.rs"]
-mod full_pipeline_tests;
-#[path = "test_modules/trait_tests.rs"]
-mod trait_tests;
-#[path = "test_modules/const_promotion_tests.rs"]
-mod const_promotion_tests;
 #[path = "test_modules/bitwise_tests.rs"]
 mod bitwise_tests;
+#[path = "test_modules/codegen_tests.rs"]
+mod codegen_tests;
+#[path = "test_modules/const_promotion_tests.rs"]
+mod const_promotion_tests;
+#[path = "test_modules/error_recovery_tests.rs"]
+mod error_recovery_tests;
+#[path = "test_modules/fixture_tests.rs"]
+mod fixture_tests;
 #[path = "test_modules/fold_range_tests.rs"]
 mod fold_range_tests;
+#[path = "test_modules/full_pipeline_tests.rs"]
+mod full_pipeline_tests;
+#[path = "test_modules/lexer_tests.rs"]
+mod lexer_tests;
 #[path = "test_modules/naga_validation.rs"]
 mod naga_validation;
+#[path = "test_modules/parse_multi_decl_tests.rs"]
+mod parse_multi_decl_tests;
+#[path = "test_modules/parse_single_decl_tests.rs"]
+mod parse_single_decl_tests;
+#[path = "test_modules/pipeline_tests.rs"]
+mod pipeline_tests;
 #[path = "test_modules/render_block_tests.rs"]
 mod render_block_tests;
+#[path = "test_modules/semantic_tests.rs"]
+mod semantic_tests;
+#[path = "test_modules/trait_tests.rs"]
+mod trait_tests;

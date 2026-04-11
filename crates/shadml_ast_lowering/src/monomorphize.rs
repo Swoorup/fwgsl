@@ -92,7 +92,9 @@ impl AstLowering {
                 let flat_head_ty = flat_param_tys
                     .iter()
                     .rev()
-                    .fold(function.return_ty.clone(), |acc, ty| Ty::arrow(ty.clone(), acc));
+                    .fold(function.return_ty.clone(), |acc, ty| {
+                        Ty::arrow(ty.clone(), acc)
+                    });
                 (
                     function.name.clone(),
                     AbiInfo {
@@ -166,10 +168,7 @@ impl AstLowering {
             Err(message) => {
                 self.engine.diagnostics.push(
                     shadml_diagnostics::Diagnostic::error(message).with_label(
-                        shadml_diagnostics::Label::primary(
-                            function.span,
-                            "tuple lowering failed",
-                        ),
+                        shadml_diagnostics::Label::primary(function.span, "tuple lowering failed"),
                     ),
                 );
                 HirExpr::Lit(HirLit::Int(0), Ty::Error, function.span)
@@ -226,7 +225,11 @@ impl AstLowering {
             }
         };
 
-        HirEntryPoint { params, body, ..entry }
+        HirEntryPoint {
+            params,
+            body,
+            ..entry
+        }
     }
 
     pub(crate) fn eliminate_tuple_const(
@@ -273,13 +276,15 @@ impl AstLowering {
                 let ty = expr.ty().clone();
                 Ok(TupleValue::Scalar(expr, ty))
             }
-            HirExpr::Var(name, ty, span) if !matches!(ty, Ty::Tuple(_)) => Ok(
-                TupleValue::Scalar(HirExpr::Var(name, ty.clone(), span), ty),
-            ),
-            HirExpr::Var(name, _ty, span) => tuple_env
-                .get(&name)
-                .cloned()
-                .ok_or_else(|| format!("tuple value `{}` escaped tuple ABI lowering at {:?}", name, span)),
+            HirExpr::Var(name, ty, span) if !matches!(ty, Ty::Tuple(_)) => {
+                Ok(TupleValue::Scalar(HirExpr::Var(name, ty.clone(), span), ty))
+            }
+            HirExpr::Var(name, _ty, span) => tuple_env.get(&name).cloned().ok_or_else(|| {
+                format!(
+                    "tuple value `{}` escaped tuple ABI lowering at {:?}",
+                    name, span
+                )
+            }),
             HirExpr::Tuple(items, ty, span) => {
                 // Unit `()` is represented as an empty tuple with type Ty::Con("()").
                 // It's a scalar value, not a multi-component tuple that needs ABI lowering.
@@ -302,7 +307,10 @@ impl AstLowering {
                 let base = self.rewrite_tuple_expr(*base, abi_map, tuple_env)?;
                 match base {
                     TupleValue::Tuple(items, _) => items.into_iter().nth(index).ok_or_else(|| {
-                        format!("tuple index {} out of bounds during tuple ABI lowering at {:?}", index, span)
+                        format!(
+                            "tuple index {} out of bounds during tuple ABI lowering at {:?}",
+                            index, span
+                        )
                     }),
                     TupleValue::Scalar(_, _) => Err(format!(
                         "tuple projection applied to a non-tuple value at {:?}",
@@ -325,7 +333,12 @@ impl AstLowering {
                             Ok(TupleValue::Scalar(body_expr, body_ty))
                         } else {
                             Ok(TupleValue::Scalar(
-                                HirExpr::Let(flat_binds, Box::new(body_expr), body_ty.clone(), span),
+                                HirExpr::Let(
+                                    flat_binds,
+                                    Box::new(body_expr),
+                                    body_ty.clone(),
+                                    span,
+                                ),
                                 body_ty,
                             ))
                         }
@@ -340,7 +353,9 @@ impl AstLowering {
                 let scrutinee = self
                     .rewrite_tuple_expr(*scrutinee, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple scrutinee escaped tuple ABI lowering at {:?}", span))?;
+                    .ok_or_else(|| {
+                        format!("tuple scrutinee escaped tuple ABI lowering at {:?}", span)
+                    })?;
                 let arms = arms
                     .into_iter()
                     .map(|arm| {
@@ -360,7 +375,9 @@ impl AstLowering {
                         let body = self
                             .rewrite_tuple_expr(arm.body, abi_map, tuple_env)?
                             .into_scalar()
-                            .ok_or_else(|| format!("tuple case body escaped tuple ABI lowering at {:?}", span))?;
+                            .ok_or_else(|| {
+                                format!("tuple case body escaped tuple ABI lowering at {:?}", span)
+                            })?;
                         Ok(HirCaseArm {
                             pattern: arm.pattern,
                             guard,
@@ -377,17 +394,29 @@ impl AstLowering {
                 let cond = self
                     .rewrite_tuple_expr(*cond, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple condition escaped tuple ABI lowering at {:?}", span))?;
+                    .ok_or_else(|| {
+                        format!("tuple condition escaped tuple ABI lowering at {:?}", span)
+                    })?;
                 let then_expr = self
                     .rewrite_tuple_expr(*then_expr, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple then-branch escaped tuple ABI lowering at {:?}", span))?;
+                    .ok_or_else(|| {
+                        format!("tuple then-branch escaped tuple ABI lowering at {:?}", span)
+                    })?;
                 let else_expr = self
                     .rewrite_tuple_expr(*else_expr, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple else-branch escaped tuple ABI lowering at {:?}", span))?;
+                    .ok_or_else(|| {
+                        format!("tuple else-branch escaped tuple ABI lowering at {:?}", span)
+                    })?;
                 Ok(TupleValue::Scalar(
-                    HirExpr::If(Box::new(cond), Box::new(then_expr), Box::new(else_expr), ty.clone(), span),
+                    HirExpr::If(
+                        Box::new(cond),
+                        Box::new(then_expr),
+                        Box::new(else_expr),
+                        ty.clone(),
+                        span,
+                    ),
                     ty,
                 ))
             }
@@ -409,22 +438,46 @@ impl AstLowering {
                 let inner = self
                     .rewrite_tuple_expr(*inner, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple unary operand escaped tuple ABI lowering at {:?}", span))?;
-                Ok(TupleValue::Scalar(HirExpr::UnaryNeg(Box::new(inner), ty.clone(), span), ty))
+                    .ok_or_else(|| {
+                        format!(
+                            "tuple unary operand escaped tuple ABI lowering at {:?}",
+                            span
+                        )
+                    })?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::UnaryNeg(Box::new(inner), ty.clone(), span),
+                    ty,
+                ))
             }
             HirExpr::UnaryNot(inner, ty, span) => {
                 let inner = self
                     .rewrite_tuple_expr(*inner, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple unary operand escaped tuple ABI lowering at {:?}", span))?;
-                Ok(TupleValue::Scalar(HirExpr::UnaryNot(Box::new(inner), ty.clone(), span), ty))
+                    .ok_or_else(|| {
+                        format!(
+                            "tuple unary operand escaped tuple ABI lowering at {:?}",
+                            span
+                        )
+                    })?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::UnaryNot(Box::new(inner), ty.clone(), span),
+                    ty,
+                ))
             }
             HirExpr::UnaryBitNot(inner, ty, span) => {
                 let inner = self
                     .rewrite_tuple_expr(*inner, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple unary operand escaped tuple ABI lowering at {:?}", span))?;
-                Ok(TupleValue::Scalar(HirExpr::UnaryBitNot(Box::new(inner), ty.clone(), span), ty))
+                    .ok_or_else(|| {
+                        format!(
+                            "tuple unary operand escaped tuple ABI lowering at {:?}",
+                            span
+                        )
+                    })?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::UnaryBitNot(Box::new(inner), ty.clone(), span),
+                    ty,
+                ))
             }
             HirExpr::ConstructorCall(name, tag, args, ty, span) => {
                 let args = args
@@ -433,7 +486,10 @@ impl AstLowering {
                         self.rewrite_tuple_expr(arg, abi_map, tuple_env)?
                             .into_scalar()
                             .ok_or_else(|| {
-                                format!("tuple constructor argument escaped tuple ABI lowering at {:?}", span)
+                                format!(
+                                    "tuple constructor argument escaped tuple ABI lowering at {:?}",
+                                    span
+                                )
                             })
                     })
                     .collect::<Result<Vec<_>, String>>()?;
@@ -446,7 +502,9 @@ impl AstLowering {
                 let base = self
                     .rewrite_tuple_expr(*base, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple field base escaped tuple ABI lowering at {:?}", span))?;
+                    .ok_or_else(|| {
+                        format!("tuple field base escaped tuple ABI lowering at {:?}", span)
+                    })?;
                 Ok(TupleValue::Scalar(
                     HirExpr::FieldAccess(Box::new(base), field, ty.clone(), span),
                     ty,
@@ -456,11 +514,15 @@ impl AstLowering {
                 let base = self
                     .rewrite_tuple_expr(*base, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple index base escaped tuple ABI lowering at {:?}", span))?;
+                    .ok_or_else(|| {
+                        format!("tuple index base escaped tuple ABI lowering at {:?}", span)
+                    })?;
                 let index = self
                     .rewrite_tuple_expr(*index, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple index escaped tuple ABI lowering at {:?}", span))?;
+                    .ok_or_else(|| {
+                        format!("tuple index escaped tuple ABI lowering at {:?}", span)
+                    })?;
                 Ok(TupleValue::Scalar(
                     HirExpr::Index(Box::new(base), Box::new(index), ty.clone(), span),
                     ty,
@@ -473,7 +535,10 @@ impl AstLowering {
                         self.rewrite_tuple_expr(expr, abi_map, tuple_env)?
                             .into_scalar()
                             .ok_or_else(|| {
-                                format!("tuple loop binding escaped tuple ABI lowering at {:?}", span)
+                                format!(
+                                    "tuple loop binding escaped tuple ABI lowering at {:?}",
+                                    span
+                                )
                             })
                             .map(|expr| (name, expr))
                     })
@@ -481,7 +546,9 @@ impl AstLowering {
                 let body = self
                     .rewrite_tuple_expr(*body, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple loop body escaped tuple ABI lowering at {:?}", span))?;
+                    .ok_or_else(|| {
+                        format!("tuple loop body escaped tuple ABI lowering at {:?}", span)
+                    })?;
                 Ok(TupleValue::Scalar(
                     HirExpr::Loop(loop_name, bindings, Box::new(body), ty.clone(), span),
                     ty,
@@ -511,7 +578,12 @@ impl AstLowering {
                 let base = self
                     .rewrite_tuple_expr(*base, abi_map, tuple_env)?
                     .into_scalar()
-                    .ok_or_else(|| format!("tuple bitfield base escaped tuple ABI lowering at {:?}", span))?;
+                    .ok_or_else(|| {
+                        format!(
+                            "tuple bitfield base escaped tuple ABI lowering at {:?}",
+                            span
+                        )
+                    })?;
                 let fields = fields
                     .into_iter()
                     .map(|(field_name, expr)| {
@@ -563,7 +635,10 @@ impl AstLowering {
                 let mut app = HirExpr::Var(name.clone(), abi.flat_head_ty.clone(), *span);
                 for arg in flat_args {
                     let Ty::Arrow(_, to) = cursor else {
-                        return Err(format!("flattened tuple ABI for `{}` is not callable", name));
+                        return Err(format!(
+                            "flattened tuple ABI for `{}` is not callable",
+                            name
+                        ));
                     };
                     let next_ty = (*to).clone();
                     app = HirExpr::App(Box::new(app), Box::new(arg), next_ty.clone(), *span);
@@ -578,11 +653,21 @@ impl AstLowering {
         let func = self
             .rewrite_tuple_expr(*func, abi_map, tuple_env)?
             .into_scalar()
-            .ok_or_else(|| format!("tuple-valued callee escaped tuple ABI lowering at {:?}", span))?;
+            .ok_or_else(|| {
+                format!(
+                    "tuple-valued callee escaped tuple ABI lowering at {:?}",
+                    span
+                )
+            })?;
         let arg = self
             .rewrite_tuple_expr(*arg, abi_map, tuple_env)?
             .into_scalar()
-            .ok_or_else(|| format!("tuple-valued argument escaped tuple ABI lowering at {:?}", span))?;
+            .ok_or_else(|| {
+                format!(
+                    "tuple-valued argument escaped tuple ABI lowering at {:?}",
+                    span
+                )
+            })?;
         Ok(TupleValue::Scalar(
             HirExpr::App(Box::new(func), Box::new(arg), ty.clone(), span),
             ty,
@@ -608,13 +693,7 @@ impl AstLowering {
             TupleValue::Tuple(items, ty) => {
                 for (index, item) in items.into_iter().enumerate() {
                     let component_name = tuple_component_name(name, index);
-                    self.emit_tuple_bindings(
-                        &component_name,
-                        item,
-                        span,
-                        flat_binds,
-                        tuple_env,
-                    );
+                    self.emit_tuple_bindings(&component_name, item, span, flat_binds, tuple_env);
                 }
                 tuple_env.insert(name.to_string(), tuple_value_from_binding(name, &ty, span));
             }
@@ -634,9 +713,7 @@ impl AstLowering {
             pending,
             &spec.subst,
         );
-        let body = resolve_hir_expr_assoc_projections(
-            body, &self.impls, &self.builtin_impls,
-        );
+        let body = resolve_hir_expr_assoc_projections(body, &self.impls, &self.builtin_impls);
         let impls = &self.impls;
         let builtin_impls = &self.builtin_impls;
         let resolve = |ty: &Ty| -> Ty {
@@ -1012,7 +1089,6 @@ impl AstLowering {
 
         rename_hir_app_head(expr, &concrete_name, head_ty, span)
     }
-
 }
 
 pub(crate) fn collect_specialization_bindings(
@@ -1066,10 +1142,7 @@ pub(crate) fn collect_specialization_bindings(
 
 pub(crate) fn flatten_tuple_ty_components(ty: &Ty) -> Vec<Ty> {
     match ty {
-        Ty::Tuple(items) => items
-            .iter()
-            .flat_map(flatten_tuple_ty_components)
-            .collect(),
+        Ty::Tuple(items) => items.iter().flat_map(flatten_tuple_ty_components).collect(),
         _ => vec![ty.clone()],
     }
 }
@@ -1103,22 +1176,23 @@ pub(crate) fn tuple_value_from_binding(base: &str, ty: &Ty, span: Span) -> Tuple
                 .collect(),
             ty.clone(),
         ),
-        _ => TupleValue::Scalar(
-            HirExpr::Var(base.to_string(), ty.clone(), span),
-            ty.clone(),
-        ),
+        _ => TupleValue::Scalar(HirExpr::Var(base.to_string(), ty.clone(), span), ty.clone()),
     }
 }
 
-pub(crate) fn expand_tuple_argument(value: TupleValue, param_ty: &Ty) -> Result<Vec<HirExpr>, String> {
+pub(crate) fn expand_tuple_argument(
+    value: TupleValue,
+    param_ty: &Ty,
+) -> Result<Vec<HirExpr>, String> {
     match (value, param_ty) {
         (TupleValue::Scalar(_, _), Ty::Tuple(_)) => Err(format!(
             "expected a tuple argument for parameter type `{}`",
             param_ty
         )),
-        (TupleValue::Tuple(_, _), ty) if !matches!(ty, Ty::Tuple(_)) => {
-            Err(format!("tuple argument does not match non-tuple parameter type `{}`", ty))
-        }
+        (TupleValue::Tuple(_, _), ty) if !matches!(ty, Ty::Tuple(_)) => Err(format!(
+            "tuple argument does not match non-tuple parameter type `{}`",
+            ty
+        )),
         (TupleValue::Scalar(expr, _), _) => Ok(vec![expr]),
         (TupleValue::Tuple(items, _), Ty::Tuple(param_items)) => {
             if items.len() != param_items.len() {
@@ -1138,7 +1212,12 @@ pub(crate) fn expand_tuple_argument(value: TupleValue, param_ty: &Ty) -> Result<
     }
 }
 
-pub(crate) fn rename_hir_app_head(expr: HirExpr, new_name: &str, new_ty: Ty, span: Span) -> HirExpr {
+pub(crate) fn rename_hir_app_head(
+    expr: HirExpr,
+    new_name: &str,
+    new_ty: Ty,
+    span: Span,
+) -> HirExpr {
     match expr {
         HirExpr::App(func, arg, ty, app_span) => HirExpr::App(
             Box::new(rename_hir_app_head(*func, new_name, new_ty, span)),
@@ -1220,8 +1299,13 @@ pub(crate) fn ty_to_mono_suffix_local(ty: &Ty) -> String {
             .join("_"),
         Ty::Forall(_, body) => ty_to_mono_suffix_local(body),
         Ty::Error => "error".to_string(),
-        Ty::AssocProj { name, trait_name, .. } => {
-            debug_assert!(!trait_name.is_empty(), "AssocProj with empty trait_name should not reach mangling");
+        Ty::AssocProj {
+            name, trait_name, ..
+        } => {
+            debug_assert!(
+                !trait_name.is_empty(),
+                "AssocProj with empty trait_name should not reach mangling"
+            );
             format!("{}_{}", trait_name.to_lowercase(), name.to_lowercase())
         }
     }

@@ -183,7 +183,11 @@ impl Ty {
             ),
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| e.apply_subst(subst)).collect()),
             Ty::Forall(vars, body) => Ty::Forall(vars.clone(), Box::new(body.apply_subst(subst))),
-            Ty::AssocProj { trait_params, name, trait_name } => Ty::AssocProj {
+            Ty::AssocProj {
+                trait_params,
+                name,
+                trait_name,
+            } => Ty::AssocProj {
                 trait_params: trait_params.iter().map(|t| t.apply_subst(subst)).collect(),
                 name: name.clone(),
                 trait_name: trait_name.clone(),
@@ -267,7 +271,11 @@ pub fn normalize_type_aliases(ty: &Ty) -> Ty {
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(normalize_type_aliases).collect()),
         Ty::Forall(vars, body) => Ty::Forall(vars.clone(), Box::new(normalize_type_aliases(body))),
         Ty::Var(_) | Ty::Nat(_) | Ty::Error => ty.clone(),
-        Ty::AssocProj { trait_params, name, trait_name } => Ty::AssocProj {
+        Ty::AssocProj {
+            trait_params,
+            name,
+            trait_name,
+        } => Ty::AssocProj {
             trait_params: trait_params.iter().map(normalize_type_aliases).collect(),
             name: name.clone(),
             trait_name: trait_name.clone(),
@@ -331,9 +339,17 @@ impl fmt::Display for Ty {
             }
             Ty::Nat(n) => write!(f, "{}", n),
             Ty::Error => write!(f, "<error>"),
-            Ty::AssocProj { trait_params, name, trait_name } => {
-                debug_assert!(!trait_name.is_empty(), "AssocProj with empty trait_name should not reach Display");
-                let params = trait_params.iter()
+            Ty::AssocProj {
+                trait_params,
+                name,
+                trait_name,
+            } => {
+                debug_assert!(
+                    !trait_name.is_empty(),
+                    "AssocProj with empty trait_name should not reach Display"
+                );
+                let params = trait_params
+                    .iter()
                     .map(|t| t.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -453,7 +469,10 @@ fn apply_optional_subst(ty: &Ty, subst: Option<&Substitution>) -> Ty {
     subst.map_or_else(|| ty.clone(), |subst| ty.apply_subst(subst))
 }
 
-fn apply_optional_subst_predicate(predicate: &Predicate, subst: Option<&Substitution>) -> Predicate {
+fn apply_optional_subst_predicate(
+    predicate: &Predicate,
+    subst: Option<&Substitution>,
+) -> Predicate {
     subst.map_or_else(|| predicate.clone(), |subst| predicate.apply_subst(subst))
 }
 
@@ -507,8 +526,13 @@ fn format_ty_surface(ty: &Ty, names: &HashMap<TyVarId, String>, prec: u8) -> Str
         Ty::Con(name) => name.clone(),
         Ty::Nat(n) => n.to_string(),
         Ty::Error => "<error>".into(),
-        Ty::AssocProj { trait_params, name: proj_name, trait_name } => {
-            let params = trait_params.iter()
+        Ty::AssocProj {
+            trait_params,
+            name: proj_name,
+            trait_name,
+        } => {
+            let params = trait_params
+                .iter()
                 .map(|t| format_ty_surface(t, names, 2))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -664,6 +688,7 @@ impl TypeEnv {
 }
 
 /// Type inference engine.
+#[derive(Debug, Clone)]
 pub struct InferEngine {
     next_var: TyVarId,
     pub subst: Substitution,
@@ -741,8 +766,16 @@ impl InferEngine {
                 }
             }
             (
-                Ty::AssocProj { trait_params: a_params, name: a_name, trait_name: a_trait },
-                Ty::AssocProj { trait_params: b_params, name: b_name, trait_name: b_trait },
+                Ty::AssocProj {
+                    trait_params: a_params,
+                    name: a_name,
+                    trait_name: a_trait,
+                },
+                Ty::AssocProj {
+                    trait_params: b_params,
+                    name: b_name,
+                    trait_name: b_trait,
+                },
             ) if a_name == b_name && a_trait == b_trait && a_params.len() == b_params.len() => {
                 for (a_p, b_p) in a_params.iter().zip(b_params.iter()) {
                     self.unify(a_p, b_p, span);
@@ -759,9 +792,7 @@ impl InferEngine {
             // - `length (uv - mouseN)` where subtraction returns `(Vec2f).Output`
             // - `cos (scale + 1.0)` where `+` returns `(t.Output)` with `t`
             //   still free (from e.g. matrix indexing), and `cos` expects F32
-            (Ty::AssocProj { .. }, _)
-            | (_, Ty::AssocProj { .. }) =>
-            {
+            (Ty::AssocProj { .. }, _) | (_, Ty::AssocProj { .. }) => {
                 // Accept the unification. The associated type resolution
                 // in the semantic analyzer will replace AssocProj with
                 // its concrete value, and then the type will be correct.
@@ -1001,6 +1032,44 @@ pub fn extract_mat_type(ty: &Ty) -> Option<(u8, u8, Ty)> {
             }
         }
     }
+    None
+}
+
+/// Extract tensor/array element type and optional size.
+///
+/// Handles both `Tensor<N, Elem>` (dimension first) and `Array<Elem, N>`
+/// (element first, which normalizes internally to `Tensor<Elem, N>`).
+///
+/// Returns `Some((Some(size), elem))` for fixed-size arrays,
+/// `Some((None, elem))` for runtime arrays,
+/// and `None` if the type is not a tensor/array.
+pub fn extract_tensor_type(ty: &Ty) -> Option<(Option<u64>, Ty)> {
+    let ty = normalize_type_aliases(ty);
+
+    // Fully applied: App(App(Con("Tensor"), a), b)
+    if let Ty::App(f, arg2) = &ty {
+        if let Ty::App(g, arg1) = f.as_ref() {
+            if let Ty::Con(name) = g.as_ref() {
+                if name == ty_name::TENSOR {
+                    return match (arg1.as_ref(), arg2.as_ref()) {
+                        (Ty::Nat(n), _) => Some((Some(*n), arg2.as_ref().clone())),
+                        (_, Ty::Nat(n)) => Some((Some(*n), arg1.as_ref().clone())),
+                        _ => Some((None, arg2.as_ref().clone())),
+                    };
+                }
+            }
+        }
+    }
+
+    // Partially applied (runtime array): App(Con("Tensor"), elem)
+    if let Ty::App(f, elem) = &ty {
+        if let Ty::Con(name) = f.as_ref() {
+            if name == ty_name::TENSOR {
+                return Some((None, elem.as_ref().clone()));
+            }
+        }
+    }
+
     None
 }
 
@@ -1317,10 +1386,7 @@ mod tests {
             vec![138],
             Ty::arrow(
                 Ty::Tuple(vec![Ty::Var(138), Ty::Var(138)]),
-                Ty::arrow(
-                    Ty::Tuple(vec![Ty::Var(138), Ty::Var(138)]),
-                    Ty::Var(138),
-                ),
+                Ty::arrow(Ty::Tuple(vec![Ty::Var(138), Ty::Var(138)]), Ty::Var(138)),
             ),
         );
         assert_eq!(
@@ -1461,7 +1527,10 @@ mod tests {
         let a = engine.fresh_var();
         let proj = assoc_proj("Add", vec![a.clone(), Ty::f32()], "Output");
         engine.unify(&a, &proj, span());
-        assert!(!engine.diagnostics.has_errors(), "assoc proj occurs check should bypass");
+        assert!(
+            !engine.diagnostics.has_errors(),
+            "assoc proj occurs check should bypass"
+        );
     }
 
     #[test]
@@ -1473,7 +1542,10 @@ mod tests {
         let proj = assoc_proj("Add", vec![a.clone(), Ty::f32()], "Output");
         let ty = Ty::arrow(a.clone(), proj);
         engine.unify(&a, &ty, span());
-        assert!(engine.diagnostics.has_errors(), "structural occurs check should fire");
+        assert!(
+            engine.diagnostics.has_errors(),
+            "structural occurs check should fire"
+        );
     }
 
     #[test]

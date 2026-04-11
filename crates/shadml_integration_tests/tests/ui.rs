@@ -132,7 +132,10 @@ fn ui_tests() {
         .join("ui");
 
     let files = collect_shadml_files(&ui_dir);
-    assert!(!files.is_empty(), "no .shadml test files found in {ui_dir:?}");
+    assert!(
+        !files.is_empty(),
+        "no .shadml test files found in {ui_dir:?}"
+    );
 
     for path in &files {
         let file_stem = path.file_stem().unwrap().to_str().unwrap().to_string();

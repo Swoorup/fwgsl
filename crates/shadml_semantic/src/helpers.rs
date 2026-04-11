@@ -41,7 +41,11 @@ pub fn scope_vars(scope: &HashMap<String, TyVarId>) -> Vec<TyVarId> {
 ///
 /// Looks up each parameter name in `scope` and builds a curried application:
 /// `Con(name) param1 param2 ...`.
-pub fn apply_type_params(name: &str, type_params: &[String], scope: &HashMap<String, TyVarId>) -> Ty {
+pub fn apply_type_params(
+    name: &str,
+    type_params: &[String],
+    scope: &HashMap<String, TyVarId>,
+) -> Ty {
     type_params
         .iter()
         .fold(Ty::Con(name.to_string()), |ty, param| {
@@ -71,7 +75,10 @@ pub(crate) fn all_decls_and_render_block_contents<'a>(
 ) -> impl Iterator<Item = &'a Decl> {
     decls.iter().copied().flat_map(|decl| {
         let mut v = vec![decl];
-        if let Decl::RenderBlock { bindings, entries, .. } = decl {
+        if let Decl::RenderBlock {
+            bindings, entries, ..
+        } = decl
+        {
             v.extend(bindings.iter());
             v.extend(entries.iter());
         }
@@ -90,8 +97,13 @@ pub fn format_type_suffix(ty: &Ty) -> String {
             .map(format_type_suffix)
             .collect::<Vec<_>>()
             .join("_"),
-        Ty::AssocProj { trait_name, name, .. } => {
-            debug_assert!(!trait_name.is_empty(), "AssocProj with empty trait_name should not reach mangling");
+        Ty::AssocProj {
+            trait_name, name, ..
+        } => {
+            debug_assert!(
+                !trait_name.is_empty(),
+                "AssocProj with empty trait_name should not reach mangling"
+            );
             format!("{}_{}", trait_name.to_lowercase(), name.to_lowercase())
         }
         Ty::Arrow(_, _) => "fn".to_string(),
@@ -144,14 +156,21 @@ pub(crate) fn canonical_trait_method_name(trait_name: &str, method_name: &str) -
     }
 }
 
-pub(crate) fn resolve_impl_method_name(impls: &[ImplInfo], name: &str, receiver_ty: &Ty) -> Option<String> {
+pub(crate) fn resolve_impl_method_name(
+    impls: &[ImplInfo],
+    name: &str,
+    receiver_ty: &Ty,
+) -> Option<String> {
     impls
         .iter()
         .filter(|inst| inst.tys.len() == 1 && inst.tys[0] == *receiver_ty)
         .find_map(|inst| inst.methods.get(name).cloned())
 }
 
-pub(crate) fn resolve_unique_standalone_impl_method_name(impls: &[ImplInfo], name: &str) -> Option<String> {
+pub(crate) fn resolve_unique_standalone_impl_method_name(
+    impls: &[ImplInfo],
+    name: &str,
+) -> Option<String> {
     let mut matches = impls
         .iter()
         .filter(|inst| inst.trait_name.is_none())
@@ -177,7 +196,11 @@ pub fn resolve_dot_call_target(
 }
 
 pub(crate) fn format_predicate(predicate: &Predicate) -> String {
-    format!("{} {}", predicate.trait_name, format_impl_head(&predicate.tys))
+    format!(
+        "{} {}",
+        predicate.trait_name,
+        format_impl_head(&predicate.tys)
+    )
 }
 
 pub(crate) fn format_constraints(predicates: &[Predicate]) -> String {
@@ -197,11 +220,15 @@ pub fn format_impl_head(tys: &[Ty]) -> String {
 
 pub fn predicate_matches_head(predicate: &Predicate, head: &[Ty]) -> bool {
     predicate.tys.len() == head.len()
-        && predicate.tys.iter().zip(head.iter()).all(|(actual, expected)| {
-            let actual = normalize_type_aliases(actual);
-            let expected = normalize_type_aliases(expected);
-            actual == expected || !actual.free_vars().is_empty()
-        })
+        && predicate
+            .tys
+            .iter()
+            .zip(head.iter())
+            .all(|(actual, expected)| {
+                let actual = normalize_type_aliases(actual);
+                let expected = normalize_type_aliases(expected);
+                actual == expected || !actual.free_vars().is_empty()
+            })
 }
 
 pub fn builtin_head_for_predicate(predicate: &Predicate) -> Option<Vec<Ty>> {
@@ -209,7 +236,9 @@ pub fn builtin_head_for_predicate(predicate: &Predicate) -> Option<Vec<Ty>> {
 
     fn scalar_numeric_name(ty: &Ty) -> Option<&str> {
         match ty {
-            Ty::Con(name) if matches!(name.as_str(), ty_name::F32 | ty_name::I32 | ty_name::U32) => {
+            Ty::Con(name)
+                if matches!(name.as_str(), ty_name::F32 | ty_name::I32 | ty_name::U32) =>
+            {
                 Some(name.as_str())
             }
             _ => None,
@@ -265,7 +294,10 @@ pub fn builtin_head_for_predicate(predicate: &Predicate) -> Option<Vec<Ty>> {
                 }
             }
             if let Some(lhs) = first_concrete(&[a, b]) {
-                if same_or_var(&lhs, a) && same_or_var(&lhs, b) && (extract_vec_type(&lhs).is_some() || extract_mat_type(&lhs).is_some()) {
+                if same_or_var(&lhs, a)
+                    && same_or_var(&lhs, b)
+                    && (extract_vec_type(&lhs).is_some() || extract_mat_type(&lhs).is_some())
+                {
                     return Some(vec![lhs.clone(), lhs]);
                 }
             }
@@ -299,7 +331,10 @@ pub fn builtin_head_for_predicate(predicate: &Predicate) -> Option<Vec<Ty>> {
             {
                 if cols == cols_b && elem_a == elem_b {
                     // Result type is a vector with rows elements
-                    return Some(vec![normalize_type_aliases(a), vector_ty(rows as u64, elem_a)]);
+                    return Some(vec![
+                        normalize_type_aliases(a),
+                        vector_ty(rows as u64, elem_a),
+                    ]);
                 }
             }
             None
@@ -353,8 +388,15 @@ pub fn replace_trait_vars(ty: &Ty, trait_vars: &[TyVarId], replacements: &[Ty]) 
             vars.clone(),
             Box::new(replace_trait_vars(body, trait_vars, replacements)),
         ),
-        Ty::AssocProj { trait_params, name, trait_name } => Ty::AssocProj {
-            trait_params: trait_params.iter().map(|t| replace_trait_vars(t, trait_vars, replacements)).collect(),
+        Ty::AssocProj {
+            trait_params,
+            name,
+            trait_name,
+        } => Ty::AssocProj {
+            trait_params: trait_params
+                .iter()
+                .map(|t| replace_trait_vars(t, trait_vars, replacements))
+                .collect(),
             name: name.clone(),
             trait_name: trait_name.clone(),
         },
@@ -371,8 +413,15 @@ where
     F: Fn(&str, &[Ty], &str) -> Option<Ty>,
 {
     match ty {
-        Ty::AssocProj { trait_params, name, trait_name } => {
-            debug_assert!(!trait_name.is_empty(), "AssocProj with empty trait_name should not reach resolution");
+        Ty::AssocProj {
+            trait_params,
+            name,
+            trait_name,
+        } => {
+            debug_assert!(
+                !trait_name.is_empty(),
+                "AssocProj with empty trait_name should not reach resolution"
+            );
             let resolved_params: Vec<Ty> = trait_params
                 .iter()
                 .map(|t| resolve_assoc_projections_with(t, lookup))
@@ -404,7 +453,10 @@ where
             Box::new(resolve_assoc_projections_with(b, lookup)),
         ),
         Ty::Tuple(elems) => Ty::Tuple(
-            elems.iter().map(|e| resolve_assoc_projections_with(e, lookup)).collect(),
+            elems
+                .iter()
+                .map(|e| resolve_assoc_projections_with(e, lookup))
+                .collect(),
         ),
         Ty::Forall(vars, body) => Ty::Forall(
             vars.clone(),
@@ -458,11 +510,15 @@ pub(crate) fn lookup_assoc_type_binding(
     for inst in builtin_impls {
         if inst.trait_name == trait_name {
             let matches = inst.tys.len() == normalized_params.len()
-                && inst.tys.iter().zip(normalized_params.iter())
+                && inst
+                    .tys
+                    .iter()
+                    .zip(normalized_params.iter())
                     .all(|(inst_ty, param)| normalize_type_aliases(inst_ty) == *param);
             if matches {
                 if let Some(binding) = inst.associated_type_bindings.get(assoc_name) {
-                    let resolved = resolve_assoc_projections_with_impls(binding, impls, builtin_impls);
+                    let resolved =
+                        resolve_assoc_projections_with_impls(binding, impls, builtin_impls);
                     match &found_binding {
                         Some(existing) if *existing != resolved => return None, // ambiguous
                         _ => found_binding = Some(resolved),
@@ -474,17 +530,19 @@ pub(crate) fn lookup_assoc_type_binding(
 
     // Also check user impls
     for inst in impls {
-        if inst.trait_name.as_deref() == Some(trait_name) {
-            if inst.tys.len() == normalized_params.len()
-                && inst.tys.iter().zip(normalized_params.iter())
-                    .all(|(inst_ty, param)| normalize_type_aliases(inst_ty) == *param)
-            {
-                if let Some(binding) = inst.associated_type_bindings.get(assoc_name) {
-                    let resolved = resolve_assoc_projections_with_impls(binding, impls, builtin_impls);
-                    match &found_binding {
-                        Some(existing) if *existing != resolved => return None, // ambiguous
-                        _ => found_binding = Some(resolved),
-                    }
+        if inst.trait_name.as_deref() == Some(trait_name)
+            && inst.tys.len() == normalized_params.len()
+            && inst
+                .tys
+                .iter()
+                .zip(normalized_params.iter())
+                .all(|(inst_ty, param)| normalize_type_aliases(inst_ty) == *param)
+        {
+            if let Some(binding) = inst.associated_type_bindings.get(assoc_name) {
+                let resolved = resolve_assoc_projections_with_impls(binding, impls, builtin_impls);
+                match &found_binding {
+                    Some(existing) if *existing != resolved => return None, // ambiguous
+                    _ => found_binding = Some(resolved),
                 }
             }
         }
@@ -532,6 +590,19 @@ pub fn extract_vec_type(ty: &Ty) -> Option<(u8, Ty)> {
         }
     }
     None
+}
+
+/// Extract the element type from any indexed/container type.
+///
+/// Handles `Vec`, `Mat`, and `Tensor`/`Array`.
+pub fn extract_element_type(ty: &Ty) -> Option<Ty> {
+    if let Some((_, elem)) = extract_vec_type(ty) {
+        return Some(elem);
+    }
+    if let Some((_, _, elem)) = shadml_typechecker::extract_mat_type(ty) {
+        return Some(elem);
+    }
+    shadml_typechecker::extract_tensor_type(ty).map(|(_, elem)| elem)
 }
 
 pub fn predicate_has_impl(
@@ -617,7 +688,9 @@ pub fn try_improve_predicate_with_impls(
     // Resolve associated type projections in predicate types.
     // This converts `Add F32 (F32.Output)` to `Add F32 F32` so that
     // the predicate can match impls correctly.
-    let resolved_tys: Vec<Ty> = predicate.tys.iter()
+    let resolved_tys: Vec<Ty> = predicate
+        .tys
+        .iter()
         .map(|ty| resolve_assoc_projections_with_impls(ty, impls, builtin_impls))
         .collect();
     let predicate = Predicate {
@@ -802,21 +875,18 @@ pub fn resolve_predicates_fixpoint(
     // Retention phase: deduplicate, check against active constraints,
     // and verify concrete predicates have impls.
     let mut retained = Vec::new();
-    for predicate in pending
-        .into_iter()
-        .map(|predicate| {
-            let substituted = predicate.apply_subst(&engine.subst);
-            let resolved_tys: Vec<Ty> = substituted
-                .tys
-                .iter()
-                .map(|ty| resolve_assoc_projections_with_impls(ty, impls, builtin_impls))
-                .collect();
-            Predicate {
-                trait_name: substituted.trait_name,
-                tys: resolved_tys,
-            }
-        })
-    {
+    for predicate in pending.into_iter().map(|predicate| {
+        let substituted = predicate.apply_subst(&engine.subst);
+        let resolved_tys: Vec<Ty> = substituted
+            .tys
+            .iter()
+            .map(|ty| resolve_assoc_projections_with_impls(ty, impls, builtin_impls))
+            .collect();
+        Predicate {
+            trait_name: substituted.trait_name,
+            tys: resolved_tys,
+        }
+    }) {
         if retained.iter().any(|existing| existing == &predicate) {
             continue;
         }

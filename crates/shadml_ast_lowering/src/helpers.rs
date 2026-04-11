@@ -75,8 +75,15 @@ pub(crate) fn substitute_ty_vars(ty: &Ty, subst: &HashMap<TyVarId, Ty>) -> Ty {
         Ty::Forall(vars, body) => {
             Ty::Forall(vars.clone(), Box::new(substitute_ty_vars(body, subst)))
         }
-        Ty::AssocProj { trait_params, name, trait_name } => Ty::AssocProj {
-            trait_params: trait_params.iter().map(|t| substitute_ty_vars(t, subst)).collect(),
+        Ty::AssocProj {
+            trait_params,
+            name,
+            trait_name,
+        } => Ty::AssocProj {
+            trait_params: trait_params
+                .iter()
+                .map(|t| substitute_ty_vars(t, subst))
+                .collect(),
             name: name.clone(),
             trait_name: trait_name.clone(),
         },
@@ -98,16 +105,16 @@ where
         HirExpr::Lit(lit, ty, span) => HirExpr::Lit(lit, f(&ty), span),
         HirExpr::Var(name, ty, span) => HirExpr::Var(name, f(&ty), span),
         HirExpr::Tuple(items, ty, span) => HirExpr::Tuple(
-            items.into_iter().map(|item| map_hir_expr_types(item, f)).collect(),
+            items
+                .into_iter()
+                .map(|item| map_hir_expr_types(item, f))
+                .collect(),
             f(&ty),
             span,
         ),
-        HirExpr::TupleIndex(base, index, ty, span) => HirExpr::TupleIndex(
-            Box::new(map_hir_expr_types(*base, f)),
-            index,
-            f(&ty),
-            span,
-        ),
+        HirExpr::TupleIndex(base, index, ty, span) => {
+            HirExpr::TupleIndex(Box::new(map_hir_expr_types(*base, f)), index, f(&ty), span)
+        }
         HirExpr::App(func, arg, ty, span) => HirExpr::App(
             Box::new(map_hir_expr_types(*func, f)),
             Box::new(map_hir_expr_types(*arg, f)),
@@ -115,7 +122,8 @@ where
             span,
         ),
         HirExpr::Let(binds, body, ty, span) => HirExpr::Let(
-            binds.into_iter()
+            binds
+                .into_iter()
                 .map(|(name, expr)| (name, map_hir_expr_types(expr, f)))
                 .collect(),
             Box::new(map_hir_expr_types(*body, f)),
@@ -148,34 +156,27 @@ where
             f(&ty),
             span,
         ),
-        HirExpr::UnaryNeg(inner, ty, span) => HirExpr::UnaryNeg(
-            Box::new(map_hir_expr_types(*inner, f)),
-            f(&ty),
-            span,
-        ),
-        HirExpr::UnaryNot(inner, ty, span) => HirExpr::UnaryNot(
-            Box::new(map_hir_expr_types(*inner, f)),
-            f(&ty),
-            span,
-        ),
-        HirExpr::UnaryBitNot(inner, ty, span) => HirExpr::UnaryBitNot(
-            Box::new(map_hir_expr_types(*inner, f)),
-            f(&ty),
-            span,
-        ),
+        HirExpr::UnaryNeg(inner, ty, span) => {
+            HirExpr::UnaryNeg(Box::new(map_hir_expr_types(*inner, f)), f(&ty), span)
+        }
+        HirExpr::UnaryNot(inner, ty, span) => {
+            HirExpr::UnaryNot(Box::new(map_hir_expr_types(*inner, f)), f(&ty), span)
+        }
+        HirExpr::UnaryBitNot(inner, ty, span) => {
+            HirExpr::UnaryBitNot(Box::new(map_hir_expr_types(*inner, f)), f(&ty), span)
+        }
         HirExpr::ConstructorCall(name, tag, args, ty, span) => HirExpr::ConstructorCall(
             name,
             tag,
-            args.into_iter().map(|arg| map_hir_expr_types(arg, f)).collect(),
+            args.into_iter()
+                .map(|arg| map_hir_expr_types(arg, f))
+                .collect(),
             f(&ty),
             span,
         ),
-        HirExpr::FieldAccess(base, field, ty, span) => HirExpr::FieldAccess(
-            Box::new(map_hir_expr_types(*base, f)),
-            field,
-            f(&ty),
-            span,
-        ),
+        HirExpr::FieldAccess(base, field, ty, span) => {
+            HirExpr::FieldAccess(Box::new(map_hir_expr_types(*base, f)), field, f(&ty), span)
+        }
         HirExpr::Index(base, index, ty, span) => HirExpr::Index(
             Box::new(map_hir_expr_types(*base, f)),
             Box::new(map_hir_expr_types(*index, f)),
@@ -184,7 +185,8 @@ where
         ),
         HirExpr::Loop(loop_name, bindings, body, ty, span) => HirExpr::Loop(
             loop_name,
-            bindings.into_iter()
+            bindings
+                .into_iter()
                 .map(|(name, expr)| (name, map_hir_expr_types(expr, f)))
                 .collect(),
             Box::new(map_hir_expr_types(*body, f)),
@@ -193,7 +195,8 @@ where
         ),
         HirExpr::BitfieldConstruct(name, fields, ty, span) => HirExpr::BitfieldConstruct(
             name,
-            fields.into_iter()
+            fields
+                .into_iter()
                 .map(|(field_name, expr)| (field_name, map_hir_expr_types(expr, f)))
                 .collect(),
             f(&ty),
@@ -202,7 +205,8 @@ where
         HirExpr::BitfieldUpdate(name, base, fields, ty, span) => HirExpr::BitfieldUpdate(
             name,
             Box::new(map_hir_expr_types(*base, f)),
-            fields.into_iter()
+            fields
+                .into_iter()
                 .map(|(field_name, expr)| (field_name, map_hir_expr_types(expr, f)))
                 .collect(),
             f(&ty),
@@ -222,7 +226,10 @@ pub(crate) fn resolve_hir_expr_assoc_projections(
     })
 }
 
-pub(crate) fn substitute_pattern_ty_vars(pattern: HirPattern, subst: &HashMap<TyVarId, Ty>) -> HirPattern {
+pub(crate) fn substitute_pattern_ty_vars(
+    pattern: HirPattern,
+    subst: &HashMap<TyVarId, Ty>,
+) -> HirPattern {
     match pattern {
         HirPattern::Wild => HirPattern::Wild,
         HirPattern::Var(name, ty) => HirPattern::Var(name, substitute_ty_vars(&ty, subst)),

@@ -104,7 +104,7 @@ pub fn filter_reachable<'a>(program: &MirProgram<'a>, reachable: &ReachableSet) 
         structs: program
             .structs
             .iter()
-            .filter(|s| reachable.structs.contains(s.name))
+            .filter(|s| reachable.structs.contains(s.name) || s.bitfield_fields.is_some())
             .cloned()
             .collect(),
         globals: program
@@ -355,10 +355,8 @@ fn walk_type_for_struct_deps(
     reachable: &mut ReachableSet,
 ) {
     match ty {
-        MirType::Struct(dep) => {
-            if reachable.structs.insert(dep.to_string()) {
-                mark_struct_deps(dep, structs_by_name, reachable);
-            }
+        MirType::Struct(dep) if reachable.structs.insert(dep.to_string()) => {
+            mark_struct_deps(dep, structs_by_name, reachable);
         }
         MirType::Vec(_, inner) | MirType::Array(inner, _) | MirType::RuntimeArray(inner) => {
             walk_type_for_struct_deps(inner, structs_by_name, reachable);
@@ -474,7 +472,9 @@ mod tests {
                         ty: MirType::F32,
                         attributes: vec![],
                     }],
-                origin_module: None,
+                    origin_module: None,
+                    adt_variants: None,
+                    bitfield_fields: None,
                 },
                 MirStruct {
                     name: arena.alloc_str("Unused"),
@@ -483,7 +483,9 @@ mod tests {
                         ty: MirType::I32,
                         attributes: vec![],
                     }],
-                origin_module: None,
+                    origin_module: None,
+                    adt_variants: None,
+                    bitfield_fields: None,
                 },
             ],
             globals: vec![],
@@ -521,24 +523,20 @@ mod tests {
             structs: vec![],
             globals: vec![
                 MirGlobal {
-
                     name: arena.alloc_str("used_buf"),
                     address_space: AddressSpace::StorageReadWrite,
                     ty: MirType::Array(arena.alloc(MirType::F32), 64),
                     group: 0,
                     binding: 0,
                     origin_module: None,
-
                 },
                 MirGlobal {
-
                     name: arena.alloc_str("unused_buf"),
                     address_space: AddressSpace::Uniform,
                     ty: MirType::F32,
                     group: 0,
                     binding: 1,
                     origin_module: None,
-
                 },
             ],
             functions: vec![],
@@ -579,10 +577,11 @@ mod tests {
                     ty: MirType::Vec(3, arena.alloc(MirType::F32)),
                     attributes: vec![],
                 }],
-            origin_module: None,
+                origin_module: None,
+                adt_variants: None,
+                bitfield_fields: None,
             }],
             globals: vec![MirGlobal {
-
                 name: arena.alloc_str("particles"),
                 address_space: AddressSpace::StorageReadWrite,
                 ty: MirType::Array(
@@ -592,7 +591,6 @@ mod tests {
                 group: 0,
                 binding: 0,
                 origin_module: None,
-
             }],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
@@ -634,11 +632,11 @@ mod tests {
         let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
-
                 name: arena.alloc_str("Foo"),
                 fields: vec![],
                 origin_module: None,
-
+                adt_variants: None,
+                bitfield_fields: None,
             }],
             globals: vec![],
             functions: vec![make_simple_fn(&arena, "helper", &[])],
@@ -665,14 +663,16 @@ mod tests {
                         ty: MirType::F32,
                         attributes: vec![],
                     }],
-                origin_module: None,
+                    origin_module: None,
+                    adt_variants: None,
+                    bitfield_fields: None,
                 },
                 MirStruct {
-
                     name: arena.alloc_str("Unused"),
                     fields: vec![],
                     origin_module: None,
-
+                    adt_variants: None,
+                    bitfield_fields: None,
                 },
             ],
             globals: vec![],
@@ -713,7 +713,9 @@ mod tests {
                         ty: MirType::F32,
                         attributes: vec![],
                     }],
-                origin_module: None,
+                    origin_module: None,
+                    adt_variants: None,
+                    bitfield_fields: None,
                 },
                 MirStruct {
                     name: arena.alloc_str("Outer"),
@@ -722,14 +724,16 @@ mod tests {
                         ty: MirType::Struct(arena.alloc_str("Inner")),
                         attributes: vec![],
                     }],
-                origin_module: None,
+                    origin_module: None,
+                    adt_variants: None,
+                    bitfield_fields: None,
                 },
                 MirStruct {
-
                     name: arena.alloc_str("Unrelated"),
                     fields: vec![],
                     origin_module: None,
-
+                    adt_variants: None,
+                    bitfield_fields: None,
                 },
             ],
             globals: vec![],

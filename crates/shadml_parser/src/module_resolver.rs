@@ -431,11 +431,7 @@ fn extract_imports(program: &Program) -> Vec<ModuleImport> {
 /// `src/Math/Fp64.shadml` with source root `src/` → `Math.Fp64`.
 /// Falls back to just the file stem if no source root matches.
 fn derive_module_name(path: &Path, source_roots: &[PathBuf]) -> String {
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        path.to_path_buf()
-    };
+    let path = path.to_path_buf();
     for root in source_roots {
         if let Ok(relative) = path.strip_prefix(root) {
             let name = relative

@@ -91,6 +91,7 @@ impl Diagnostic {
 }
 
 /// A collection of diagnostics accumulated during compilation.
+#[derive(Clone, Debug)]
 pub struct DiagnosticSink {
     diagnostics: Vec<Diagnostic>,
 }
@@ -184,12 +185,7 @@ fn source_line(source: &str, line: usize) -> &str {
 pub fn format_diagnostics(diagnostics: &[Diagnostic], source_name: &str, source: &str) -> String {
     // Sort by first label span offset for determinism
     let mut sorted: Vec<&Diagnostic> = diagnostics.iter().collect();
-    sorted.sort_by_key(|d| {
-        d.labels
-            .first()
-            .map(|l| l.span.start)
-            .unwrap_or(u32::MAX)
-    });
+    sorted.sort_by_key(|d| d.labels.first().map(|l| l.span.start).unwrap_or(u32::MAX));
 
     let mut out = String::new();
     for (i, diag) in sorted.iter().enumerate() {
@@ -212,8 +208,13 @@ pub fn format_diagnostics(diagnostics: &[Diagnostic], source_name: &str, source:
 
             let src_line = source_line(source, line);
             let line_num_width = format!("{}", line).len();
-            out.push_str(&format!("   |\n"));
-            out.push_str(&format!("{:width$} | {}\n", line, src_line, width = line_num_width));
+            out.push_str("   |\n");
+            out.push_str(&format!(
+                "{:width$} | {}\n",
+                line,
+                src_line,
+                width = line_num_width
+            ));
 
             // Underline: put tildes under the span
             let span_len = if label.span.end > label.span.start {
@@ -225,9 +226,13 @@ pub fn format_diagnostics(diagnostics: &[Diagnostic], source_name: &str, source:
             let underline = "~".repeat(span_len as usize);
             out.push_str(&format!(
                 "{:width$} | {}{} {}\n",
-                "", prefix, underline, label.message, width = line_num_width
+                "",
+                prefix,
+                underline,
+                label.message,
+                width = line_num_width
             ));
-            out.push_str(&format!("   |\n"));
+            out.push_str("   |\n");
         }
 
         // Additional labels (secondary)
@@ -250,7 +255,11 @@ pub fn format_diagnostics(diagnostics: &[Diagnostic], source_name: &str, source:
             let underline = "-".repeat(span_len as usize);
             out.push_str(&format!(
                 "{:width$} | {}{} {}\n",
-                "", prefix, underline, label.message, width = line_num_width
+                "",
+                prefix,
+                underline,
+                label.message,
+                width = line_num_width
             ));
         }
 

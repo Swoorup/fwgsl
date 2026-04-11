@@ -8,15 +8,11 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use dashmap::DashMap;
-use shadml_parser::parser::{Decl, Expr};
 use shadml_ide::{
-    all_completion_specs, build_completions_with_prelude_flag as ide_build_completions_with_prelude_flag,
-    build_goto_definition_with_prelude_flag as ide_build_goto_definition_with_prelude_flag,
-    build_hover_with_prelude_flag as ide_build_hover_with_prelude_flag,
-    build_references_with_prelude_flag as ide_build_references_with_prelude_flag,
-    completion_item_from_spec, lookup_completion_spec, spec_matches_context, CompletionContext,
-    CompletionSpec,
+    all_completion_specs, completion_item_from_spec, completions, goto_definition, hover,
+    lookup_completion_spec, references, spec_matches_context, CompletionContext, CompletionSpec,
 };
+use shadml_parser::parser::{Decl, Expr};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -28,9 +24,7 @@ use shadml_parser::{lex, Parser};
 use shadml_semantic::SemanticAnalyzer;
 use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
-use shadml_typechecker::{
-    format_scheme_surface, normalize_type_aliases, InferEngine, Scheme,
-};
+use shadml_typechecker::{format_scheme_surface, normalize_type_aliases, InferEngine, Scheme};
 
 /// Check whether the URI points at the compiler prelude file.
 fn is_compiler_prelude_uri(uri: &Url) -> bool {
@@ -130,6 +124,8 @@ pub struct ShadmlBackend {
     documents: DashMap<Url, String>,
     /// Cached module files: root URI -> list of (file_path, source_text) for imported modules.
     module_files: DashMap<Url, Vec<(std::path::PathBuf, String)>>,
+    /// Cached IDE state per document URI, to avoid rebuilding on every request.
+    ide_states: DashMap<Url, (shadml_ide::IdeState, Vec<String>)>,
 }
 
 impl ShadmlBackend {
@@ -139,7 +135,46 @@ impl ShadmlBackend {
             client,
             documents: DashMap::new(),
             module_files: DashMap::new(),
+            ide_states: DashMap::new(),
         }
+    }
+
+    /// Build and cache the IDE state for a document.
+    fn build_and_cache_ide_state(&self, uri: &Url, text: &str) {
+        let (state, errors) = if is_compiler_prelude_uri(uri) {
+            shadml_ide::build_ide_state_with_imports(text, None, &[], true)
+        } else if let Ok(file_path) = uri.to_file_path() {
+            let source_root = file_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::Path::new(".").to_path_buf());
+            shadml_ide::build_ide_state_with_imports(text, Some(&file_path), &[source_root], false)
+        } else {
+            shadml_ide::build_ide_state_with_imports(text, None, &[], false)
+        };
+        self.ide_states.insert(uri.clone(), (state, errors));
+    }
+
+    /// Get the cached IDE state for a document, or build it if missing.
+    fn get_ide_state(&self, uri: &Url) -> Option<(shadml_ide::IdeState, Vec<String>)> {
+        if let Some(entry) = self.ide_states.get(uri) {
+            return Some((entry.value().0.clone(), entry.value().1.clone()));
+        }
+        let text = self.documents.get(uri)?;
+        let (state, errors) = if is_compiler_prelude_uri(uri) {
+            shadml_ide::build_ide_state_with_imports(&text, None, &[], true)
+        } else if let Ok(file_path) = uri.to_file_path() {
+            let source_root = file_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::Path::new(".").to_path_buf());
+            shadml_ide::build_ide_state_with_imports(&text, Some(&file_path), &[source_root], false)
+        } else {
+            shadml_ide::build_ide_state_with_imports(&text, None, &[], false)
+        };
+        self.ide_states
+            .insert(uri.clone(), (state.clone(), errors.clone()));
+        Some((state, errors))
     }
 
     // -- Diagnostics ---------------------------------------------------------
@@ -163,7 +198,7 @@ impl ShadmlBackend {
 
         // Phase 2: Module resolution (if the file has imports)
         let mut program = if has_imports(&root_program) {
-            if let Some(file_path) = uri.to_file_path().ok() {
+            if let Ok(file_path) = uri.to_file_path() {
                 let source_root = file_path
                     .parent()
                     .unwrap_or_else(|| std::path::Path::new("."))
@@ -289,6 +324,7 @@ impl LanguageServer for ShadmlBackend {
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text.clone();
         self.documents.insert(uri.clone(), text.clone());
+        self.build_and_cache_ide_state(&uri, &text);
         self.run_diagnostics(uri, &text).await;
     }
 
@@ -299,6 +335,7 @@ impl LanguageServer for ShadmlBackend {
         if let Some(change) = params.content_changes.into_iter().next() {
             let text = change.text;
             self.documents.insert(uri.clone(), text.clone());
+            self.build_and_cache_ide_state(&uri, &text);
             self.run_diagnostics(uri, &text).await;
         }
     }
@@ -306,6 +343,7 @@ impl LanguageServer for ShadmlBackend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         self.documents.remove(&uri);
+        self.ide_states.remove(&uri);
         // Clear diagnostics for the closed document.
         self.client.publish_diagnostics(uri, vec![], None).await;
     }
@@ -316,12 +354,11 @@ impl LanguageServer for ShadmlBackend {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
 
-        let text = match self.documents.get(uri) {
-            Some(t) => t.clone(),
+        let (state, _) = match self.get_ide_state(uri) {
+            Some(s) => s,
             None => return Ok(None),
         };
-
-        let items = ide_build_completions_with_prelude_flag(&text, pos, is_compiler_prelude_uri(uri));
+        let items = completions(&state, pos);
         Ok(Some(CompletionResponse::Array(items)))
     }
 
@@ -331,16 +368,11 @@ impl LanguageServer for ShadmlBackend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
 
-        let text = match self.documents.get(uri) {
-            Some(t) => t.clone(),
+        let (state, _) = match self.get_ide_state(uri) {
+            Some(s) => s,
             None => return Ok(None),
         };
-
-        Ok(ide_build_hover_with_prelude_flag(
-            &text,
-            pos,
-            is_compiler_prelude_uri(uri),
-        ))
+        Ok(hover(&state, pos))
     }
 
     // -- Go to definition ---------------------------------------------------
@@ -352,22 +384,18 @@ impl LanguageServer for ShadmlBackend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
 
-        let text = match self.documents.get(uri) {
-            Some(t) => t.clone(),
+        let (state, _) = match self.get_ide_state(uri) {
+            Some(s) => s,
             None => return Ok(None),
         };
 
-        // 1. Try local goto-definition via the IDE index.
-        if let Some(result) = ide_build_goto_definition_with_prelude_flag(
-            uri,
-            &text,
-            pos,
-            is_compiler_prelude_uri(uri),
-        ) {
+        // 1. Try local goto-definition via the IDE index (now with merged imports).
+        if let Some(result) = goto_definition(&state, uri, pos) {
             return Ok(Some(result));
         }
 
         // 2. For imported names, search each imported module's IDE index.
+        let text = state.source.to_string();
         if let Some(name) = ident_at_position(&text, pos) {
             if let Some(imported) = self.module_files.get(uri) {
                 for (path, src) in imported.iter() {
@@ -405,17 +433,15 @@ impl LanguageServer for ShadmlBackend {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
 
-        let text = match self.documents.get(uri) {
-            Some(t) => t.clone(),
+        let (state, _) = match self.get_ide_state(uri) {
+            Some(s) => s,
             None => return Ok(None),
         };
-
-        Ok(ide_build_references_with_prelude_flag(
+        Ok(references(
+            &state,
             uri,
-            &text,
             pos,
             params.context.include_declaration,
-            is_compiler_prelude_uri(uri),
         ))
     }
 
@@ -844,7 +870,8 @@ fn find_builtin_operator_definition(source: &str, pos: Position) -> Option<Locat
     let prelude_uri = Url::from_file_path(shadml_parser::prelude_path()).ok()?;
 
     let mut matches = Vec::new();
-    if let Some((lhs_span, rhs_span, expr_span)) = find_operator_context(&user_program, offset, &operator)
+    if let Some((lhs_span, rhs_span, expr_span)) =
+        find_operator_context(&user_program, offset, &operator)
     {
         if let (Some(lhs_ty), Some(rhs_ty), Some(expr_ty)) = (
             analyzer.expr_types.get(&lhs_span),
@@ -891,10 +918,13 @@ fn find_builtin_operator_definition(source: &str, pos: Position) -> Option<Locat
             let Decl::BuiltinImplDecl { methods, .. } = decl else {
                 return None;
             };
-            methods.iter().find(|method| method.name == operator).map(|method| Location {
-                uri: prelude_uri.clone(),
-                range: shadml_ide::span_to_range(prelude_source, method.span),
-            })
+            methods
+                .iter()
+                .find(|method| method.name == operator)
+                .map(|method| Location {
+                    uri: prelude_uri.clone(),
+                    range: shadml_ide::span_to_range(prelude_source, method.span),
+                })
         })
 }
 
@@ -922,14 +952,11 @@ fn find_operator_context_in_expr(
     operator: &str,
 ) -> Option<(Span, Span, Span)> {
     match expr {
-        Expr::Infix(lhs, op, rhs, span) => {
-            find_operator_context_in_expr(lhs, offset, operator)
-                .or_else(|| find_operator_context_in_expr(rhs, offset, operator))
-                .or_else(|| {
-                    (op == operator && span.contains(offset))
-                        .then_some((lhs.span(), rhs.span(), *span))
-                })
-        }
+        Expr::Infix(lhs, op, rhs, span) => find_operator_context_in_expr(lhs, offset, operator)
+            .or_else(|| find_operator_context_in_expr(rhs, offset, operator))
+            .or_else(|| {
+                (op == operator && span.contains(offset)).then_some((lhs.span(), rhs.span(), *span))
+            }),
         Expr::App(lhs, rhs, _) | Expr::Index(lhs, rhs, _) => {
             find_operator_context_in_expr(lhs, offset, operator)
                 .or_else(|| find_operator_context_in_expr(rhs, offset, operator))
@@ -943,22 +970,22 @@ fn find_operator_context_in_expr(
             .iter()
             .find_map(|bind| find_operator_context_in_expr(&bind.expr, offset, operator))
             .or_else(|| find_operator_context_in_expr(body, offset, operator)),
-        Expr::Case(scrutinee, arms, _) => find_operator_context_in_expr(scrutinee, offset, operator)
-            .or_else(|| {
+        Expr::Case(scrutinee, arms, _) => {
+            find_operator_context_in_expr(scrutinee, offset, operator).or_else(|| {
                 arms.iter().find_map(|(_, guard, body)| {
                     guard
                         .as_ref()
                         .and_then(|guard| find_operator_context_in_expr(guard, offset, operator))
                         .or_else(|| find_operator_context_in_expr(body, offset, operator))
                 })
-            }),
+            })
+        }
         Expr::If(cond, then_expr, else_expr, _) => {
             find_operator_context_in_expr(cond, offset, operator)
                 .or_else(|| find_operator_context_in_expr(then_expr, offset, operator))
                 .or_else(|| find_operator_context_in_expr(else_expr, offset, operator))
         }
-        Expr::Tuple(items, _)
-        | Expr::VecLit(items, _) => items
+        Expr::Tuple(items, _) | Expr::VecLit(items, _) => items
             .iter()
             .find_map(|item| find_operator_context_in_expr(item, offset, operator)),
         Expr::Record(_, fields, _) => fields
@@ -978,12 +1005,13 @@ fn find_operator_context_in_expr(
             .iter()
             .find_map(|bind| find_operator_context_in_expr(&bind.expr, offset, operator))
             .or_else(|| find_operator_context_in_expr(body, offset, operator)),
-        Expr::RecordUpdate(base, fields, _) => find_operator_context_in_expr(base, offset, operator)
-            .or_else(|| {
+        Expr::RecordUpdate(base, fields, _) => {
+            find_operator_context_in_expr(base, offset, operator).or_else(|| {
                 fields
                     .iter()
                     .find_map(|(_, value)| find_operator_context_in_expr(value, offset, operator))
-            }),
+            })
+        }
         Expr::Lit(_, _) | Expr::Var(_, _) | Expr::Con(_, _) | Expr::OpSection(_, _) => None,
     }
 }
@@ -2330,7 +2358,12 @@ mod tests {
         let source = "add x y = x + y\nresult = add 1 2";
         let uri = Url::parse("file:///test.shadml").unwrap();
         // Position on "add" in "result = add 1 2" (line 1, col 9)
-        let result = ide_build_goto_definition_with_prelude_flag(&uri, source, Position::new(1, 9), false);
+        let result = shadml_ide::build_goto_definition_with_prelude_flag(
+            &uri,
+            source,
+            Position::new(1, 9),
+            false,
+        );
         assert!(result.is_some());
         match result.unwrap() {
             GotoDefinitionResponse::Scalar(loc) => {
@@ -2346,14 +2379,20 @@ mod tests {
         let source = "let x = 42";
         let uri = Url::parse("file:///test.shadml").unwrap();
         // Position on "=" sign
-        let result = ide_build_goto_definition_with_prelude_flag(&uri, source, Position::new(0, 6), false);
+        let result = shadml_ide::build_goto_definition_with_prelude_flag(
+            &uri,
+            source,
+            Position::new(0, 6),
+            false,
+        );
         assert!(result.is_none());
     }
 
     #[test]
     fn test_find_builtin_operator_definition_resolves_prelude_impl() {
         let source = include_str!("../../../examples/slang-generics.shadml");
-        let offset = source.find("light.lightPosition - worldPos").unwrap() + "light.lightPosition ".len();
+        let offset =
+            source.find("light.lightPosition - worldPos").unwrap() + "light.lightPosition ".len();
         let location = find_builtin_operator_definition(source, offset_to_position(source, offset))
             .expect("operator definition should resolve");
         assert!(location.uri.path().ends_with("/prelude/prelude.shadml"));
@@ -2366,8 +2405,13 @@ mod tests {
     fn test_goto_definition_resolves_named_prelude_function() {
         let source = "main x = normalize x";
         let uri = Url::parse("file:///test.shadml").unwrap();
-        let result = ide_build_goto_definition_with_prelude_flag(&uri, source, Position::new(0, 9), false)
-            .expect("prelude definition should resolve");
+        let result = shadml_ide::build_goto_definition_with_prelude_flag(
+            &uri,
+            source,
+            Position::new(0, 9),
+            false,
+        )
+        .expect("prelude definition should resolve");
         let location = match result {
             GotoDefinitionResponse::Scalar(location) => location,
             other => panic!("expected scalar location, got {other:?}"),

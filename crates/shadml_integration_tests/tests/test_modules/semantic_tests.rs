@@ -1,61 +1,60 @@
+use super::*;
 
-    use super::*;
+#[test]
+fn well_typed_function_inferred() {
+    let source = "f x = x + 1";
+    let (sa, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "well-typed inferred function should have no errors"
+    );
+    assert!(sa.env.lookup("f").is_some(), "f should be in type env");
+}
 
-    #[test]
-    fn well_typed_function_inferred() {
-        let source = "f x = x + 1";
-        let (sa, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "well-typed inferred function should have no errors"
-        );
-        assert!(sa.env.lookup("f").is_some(), "f should be in type env");
-    }
+#[test]
+fn inferred_type_for_arithmetic_function() {
+    let source = "f x = x + 1";
+    let (sa, has_errors) = parse_and_analyze(source);
+    assert!(!has_errors);
+    let scheme = sa.env.lookup("f").expect("f should be in env");
+    let ty = sa.engine.finalize(&scheme.ty);
+    let ty_str = format!("{}", ty);
+    assert_eq!(
+        ty_str, "(I32 -> I32)",
+        "f should have type I32 -> I32, got: {}",
+        ty_str
+    );
+}
 
-    #[test]
-    fn inferred_type_for_arithmetic_function() {
-        let source = "f x = x + 1";
-        let (sa, has_errors) = parse_and_analyze(source);
-        assert!(!has_errors);
-        let scheme = sa.env.lookup("f").expect("f should be in env");
-        let ty = sa.engine.finalize(&scheme.ty);
-        let ty_str = format!("{}", ty);
-        assert_eq!(
-            ty_str, "(I32 -> I32)",
-            "f should have type I32 -> I32, got: {}",
-            ty_str
-        );
-    }
+#[test]
+fn well_typed_if_expression() {
+    let source = "f x = if x > 0 then x else 0 - x";
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "if expression with consistent branches should type check"
+    );
+}
 
-    #[test]
-    fn well_typed_if_expression() {
-        let source = "f x = if x > 0 then x else 0 - x";
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "if expression with consistent branches should type check"
-        );
-    }
+#[test]
+fn well_typed_let_expression() {
+    let source = "f x = let y = x + 1 in y * 2";
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(!has_errors, "let expression should type check");
+}
 
-    #[test]
-    fn well_typed_let_expression() {
-        let source = "f x = let y = x + 1 in y * 2";
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(!has_errors, "let expression should type check");
-    }
+#[test]
+fn well_typed_where_expression() {
+    let source = "f x = y * 2 where y = x + 1";
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(!has_errors, "where clause should type check");
+}
 
-    #[test]
-    fn well_typed_where_expression() {
-        let source = "f x = y * 2 where y = x + 1";
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(!has_errors, "where clause should type check");
-    }
-
-    #[test]
-    fn well_typed_data_type_and_pattern_match() {
-        // Multi-line match arms may be affected by the parser cross-line merge.
-        // First, verify that the data type declaration and constructors are registered.
-        let source = "\
+#[test]
+fn well_typed_data_type_and_pattern_match() {
+    // Multi-line match arms may be affected by the parser cross-line merge.
+    // First, verify that the data type declaration and constructors are registered.
+    let source = "\
 data Color = Red | Green | Blue
 
 show c = match c
@@ -63,150 +62,150 @@ show c = match c
   | Green -> 1
   | Blue  -> 2
 ";
-        let (program, _parse_errors) = parse(source);
-        let mut sa = SemanticAnalyzer::new();
-        sa.analyze(&program);
-        // The constructors should be registered from the data declaration
-        assert!(
-            sa.constructors.contains_key("Red"),
-            "Red constructor should be registered"
-        );
-        assert!(
-            sa.constructors.contains_key("Green"),
-            "Green constructor should be registered"
-        );
-        assert!(
-            sa.constructors.contains_key("Blue"),
-            "Blue constructor should be registered"
-        );
-    }
+    let (program, _parse_errors) = parse(source);
+    let mut sa = SemanticAnalyzer::new();
+    sa.analyze(&program);
+    // The constructors should be registered from the data declaration
+    assert!(
+        sa.constructors.contains_key("Red"),
+        "Red constructor should be registered"
+    );
+    assert!(
+        sa.constructors.contains_key("Green"),
+        "Green constructor should be registered"
+    );
+    assert!(
+        sa.constructors.contains_key("Blue"),
+        "Blue constructor should be registered"
+    );
+}
 
-    #[test]
-    fn lambda_type_inference() {
-        let source = "f = \\x -> x + 1";
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(!has_errors, "lambda should infer correctly");
-    }
+#[test]
+fn lambda_type_inference() {
+    let source = "f = \\x -> x + 1";
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(!has_errors, "lambda should infer correctly");
+}
 
-    #[test]
-    fn data_type_constructors_have_correct_tags() {
-        let source = "data Direction = North | South | East | West";
-        let (sa, has_errors) = parse_and_analyze(source);
-        assert!(!has_errors);
-        assert_eq!(sa.constructors["North"].tag, 0);
-        assert_eq!(sa.constructors["South"].tag, 1);
-        assert_eq!(sa.constructors["East"].tag, 2);
-        assert_eq!(sa.constructors["West"].tag, 3);
-    }
+#[test]
+fn data_type_constructors_have_correct_tags() {
+    let source = "data Direction = North | South | East | West";
+    let (sa, has_errors) = parse_and_analyze(source);
+    assert!(!has_errors);
+    assert_eq!(sa.constructors["North"].tag, 0);
+    assert_eq!(sa.constructors["South"].tag, 1);
+    assert_eq!(sa.constructors["East"].tag, 2);
+    assert_eq!(sa.constructors["West"].tag, 3);
+}
 
-    #[test]
-    fn data_type_info_is_registered() {
-        let source = "data Color = Red | Green | Blue";
-        let (sa, has_errors) = parse_and_analyze(source);
-        assert!(!has_errors);
-        let dt = sa
-            .data_types
-            .get("Color")
-            .expect("Color should be in data_types");
-        assert_eq!(dt.name, "Color");
-        assert_eq!(dt.constructors.len(), 3);
-        assert!(dt.type_params.is_empty());
-    }
+#[test]
+fn data_type_info_is_registered() {
+    let source = "data Color = Red | Green | Blue";
+    let (sa, has_errors) = parse_and_analyze(source);
+    assert!(!has_errors);
+    let dt = sa
+        .data_types
+        .get("Color")
+        .expect("Color should be in data_types");
+    assert_eq!(dt.name, "Color");
+    assert_eq!(dt.constructors.len(), 3);
+    assert!(dt.type_params.is_empty());
+}
 
-    #[test]
-    fn generic_constructor_is_registered_polymorphically() {
-        let source = "data Box a = Box a";
-        let (sa, has_errors) = parse_and_analyze(source);
-        assert!(!has_errors);
+#[test]
+fn generic_constructor_is_registered_polymorphically() {
+    let source = "data Box a = Box a";
+    let (sa, has_errors) = parse_and_analyze(source);
+    assert!(!has_errors);
 
-        let scheme = sa
-            .env
-            .lookup("Box")
-            .expect("Box constructor should be in env");
-        assert_eq!(scheme.vars.len(), 1);
+    let scheme = sa
+        .env
+        .lookup("Box")
+        .expect("Box constructor should be in env");
+    assert_eq!(scheme.vars.len(), 1);
 
-        let dt = sa
-            .data_types
-            .get("Box")
-            .expect("Box should be in data_types");
-        assert_eq!(dt.type_params, vec!["a"]);
-    }
+    let dt = sa
+        .data_types
+        .get("Box")
+        .expect("Box should be in data_types");
+    assert_eq!(dt.type_params, vec!["a"]);
+}
 
-    #[test]
-    fn empty_program_has_no_errors() {
-        let (_, has_errors) = parse_and_analyze("");
-        assert!(!has_errors, "empty program should have no errors");
-    }
+#[test]
+fn empty_program_has_no_errors() {
+    let (_, has_errors) = parse_and_analyze("");
+    assert!(!has_errors, "empty program should have no errors");
+}
 
-    #[test]
-    fn comment_only_program_has_no_errors() {
-        let (_, has_errors) = parse_and_analyze("-- just a comment\n");
-        assert!(!has_errors, "comment-only program should have no errors");
-    }
+#[test]
+fn comment_only_program_has_no_errors() {
+    let (_, has_errors) = parse_and_analyze("-- just a comment\n");
+    assert!(!has_errors, "comment-only program should have no errors");
+}
 
-    #[test]
-    fn multiple_constructors_registered_in_environment() {
-        let source = "data Color = Red | Green | Blue";
-        let (sa, _) = parse_and_analyze(source);
-        assert!(sa.env.lookup("Red").is_some(), "Red should be in env");
-        assert!(sa.env.lookup("Green").is_some(), "Green should be in env");
-        assert!(sa.env.lookup("Blue").is_some(), "Blue should be in env");
-    }
+#[test]
+fn multiple_constructors_registered_in_environment() {
+    let source = "data Color = Red | Green | Blue";
+    let (sa, _) = parse_and_analyze(source);
+    assert!(sa.env.lookup("Red").is_some(), "Red should be in env");
+    assert!(sa.env.lookup("Green").is_some(), "Green should be in env");
+    assert!(sa.env.lookup("Blue").is_some(), "Blue should be in env");
+}
 
-    #[test]
-    fn constructor_type_is_correct() {
-        let source = "data Color = Red | Green | Blue";
-        let (sa, has_errors) = parse_and_analyze(source);
-        assert!(!has_errors);
-        let scheme = sa.env.lookup("Red").expect("Red should be in env");
-        let ty = sa.engine.finalize(&scheme.ty);
-        let ty_str = format!("{}", ty);
-        assert_eq!(
-            ty_str, "Color",
-            "Red should have type Color, got: {}",
-            ty_str
-        );
-    }
+#[test]
+fn constructor_type_is_correct() {
+    let source = "data Color = Red | Green | Blue";
+    let (sa, has_errors) = parse_and_analyze(source);
+    assert!(!has_errors);
+    let scheme = sa.env.lookup("Red").expect("Red should be in env");
+    let ty = sa.engine.finalize(&scheme.ty);
+    let ty_str = format!("{}", ty);
+    assert_eq!(
+        ty_str, "Color",
+        "Red should have type Color, got: {}",
+        ty_str
+    );
+}
 
-    #[test]
-    fn comparison_returns_bool_typed_expression() {
-        let source = "f x = if x == 0 then 1 else 0";
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "comparison should type check when used in if condition"
-        );
-    }
+#[test]
+fn comparison_returns_bool_typed_expression() {
+    let source = "f x = if x == 0 then 1 else 0";
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "comparison should type check when used in if condition"
+    );
+}
 
-    #[test]
-    fn boolean_operators_type_check() {
-        let source = "f x = if x == 0 && x == 1 then 1 else 0";
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(!has_errors, "boolean operators should type check");
-    }
+#[test]
+fn boolean_operators_type_check() {
+    let source = "f x = if x == 0 && x == 1 then 1 else 0";
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(!has_errors, "boolean operators should type check");
+}
 
-    // Regression: AssocProj with free type variables from indexing must
-    // resolve through predicate improvement, not cause type mismatches
-    // during inference. Previously, `p.basis[0][0] + 1.0` failed because
-    // the matrix index type variable wasn't resolved before the `+`
-    // operator created an AssocProj with a free param.
-    #[test]
-    fn assoc_proj_with_indexed_type_variable() {
-        let source = r#"
+// Regression: AssocProj with free type variables from indexing must
+// resolve through predicate improvement, not cause type mismatches
+// during inference. Previously, `p.basis[0][0] + 1.0` failed because
+// the matrix index type variable wasn't resolved before the `+`
+// operator created an AssocProj with a free param.
+#[test]
+fn assoc_proj_with_indexed_type_variable() {
+    let source = r#"
 data Params = Params { basis : Mat<3, 3, F32> }
 test : Params -> F32
 test p = p.basis[0][0] + 1.0
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "indexed expression used with arithmetic operator should type check"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "indexed expression used with arithmetic operator should type check"
+    );
+}
 
-    #[test]
-    fn assoc_proj_with_indexed_type_variable_in_vec2() {
-        let source = r#"
+#[test]
+fn assoc_proj_with_indexed_type_variable_in_vec2() {
+    let source = r#"
 data Params = Params { basis : Mat<3, 3, F32> }
 test : Params -> Vec<2, F32>
 test p =
@@ -214,23 +213,23 @@ test p =
       uv = vec2 1.0 1.0
   in uv - vec2 (0.38 * cos (scale + 1.0)) (0.24 * sin scale)
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "indexed expression in nested arithmetic + vec2 should type check"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "indexed expression in nested arithmetic + vec2 should type check"
+    );
+}
 
-    // ========================================================================
-    // Type name conflict tests
-    // ========================================================================
+// ========================================================================
+// Type name conflict tests
+// ========================================================================
 
-    /// A trait associated type named the same as a data type.
-    /// E.g. `type Output` in a trait where `Output` is also a data type.
-    /// Associated types are scoped to their trait, so they don't conflict.
-    #[test]
-    fn assoc_type_same_name_as_data_type() {
-        let source = r#"
+/// A trait associated type named the same as a data type.
+/// E.g. `type Output` in a trait where `Output` is also a data type.
+/// Associated types are scoped to their trait, so they don't conflict.
+#[test]
+fn assoc_type_same_name_as_data_type() {
+    let source = r#"
 data Output = MkOutput F32
 
 trait Scale a where
@@ -244,19 +243,19 @@ impl Scale F32 where
 test : F32
 test = scaleTo 2.0 3.0
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "associated type 'Output' should not conflict with data type 'Output'"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "associated type 'Output' should not conflict with data type 'Output'"
+    );
+}
 
-    /// A trait associated type named the same as a type alias.
-    /// `type Output` where `Output` is also a type alias for `F32`.
-    /// Bare `Output` resolves to the alias; `Self.Output` resolves to the associated type.
-    #[test]
-    fn assoc_type_same_name_as_type_alias() {
-        let source = r#"
+/// A trait associated type named the same as a type alias.
+/// `type Output` where `Output` is also a type alias for `F32`.
+/// Bare `Output` resolves to the alias; `Self.Output` resolves to the associated type.
+#[test]
+fn assoc_type_same_name_as_type_alias() {
+    let source = r#"
 alias Output = F32
 trait Combine a b where
   type Output
@@ -267,87 +266,87 @@ impl Combine F32 F32 where
 test : F32
 test = combine 1.0 2.0
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "associated type 'Output' should not conflict with type alias 'Output'"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "associated type 'Output' should not conflict with type alias 'Output'"
+    );
+}
 
-    /// A data constructor with the same name as a top-level function.
-    /// Both live in the value namespace, so the later one shadows the earlier.
-    #[test]
-    fn constructor_same_name_as_function() {
-        let source = r#"
+/// A data constructor with the same name as a top-level function.
+/// Both live in the value namespace, so the later one shadows the earlier.
+#[test]
+fn constructor_same_name_as_function() {
+    let source = r#"
 data Duo a b = Duo a b
 myDuo : Duo F32 F32
 myDuo = Duo 1.0 2.0
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "constructor and function can share a name when they refer to the same thing"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "constructor and function can share a name when they refer to the same thing"
+    );
+}
 
-    /// A record type where a field name collides with a top-level binding.
-    #[test]
-    fn record_field_same_name_as_top_level_binding() {
-        let source = r#"
+/// A record type where a field name collides with a top-level binding.
+#[test]
+fn record_field_same_name_as_top_level_binding() {
+    let source = r#"
 data Point = Point { x : F32, y : F32 }
 scale : F32
 scale = 2.0
 test : Point
 test = Point { x = 1.0, y = scale }
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "record field and top-level binding in separate scopes should not conflict"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "record field and top-level binding in separate scopes should not conflict"
+    );
+}
 
-    /// An ADT with multiple constructors, where one constructor name
-    /// shadows a builtin function name.
-    #[test]
-    fn adt_constructor_shadows_builtin() {
-        let source = r#"
+/// An ADT with multiple constructors, where one constructor name
+/// shadows a builtin function name.
+#[test]
+fn adt_constructor_shadows_builtin() {
+    let source = r#"
 data Wrap = Wrap F32
 test : F32
 test = let w = Wrap 1.0 in 3.0
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        // `Wrap` shadows whatever `Wrap` might be in the prelude, but there's
-        // nothing called `Wrap` in the prelude, so this should be fine.
-        assert!(
-            !has_errors,
-            "ADT constructor should work even if it shadows a potential name"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    // `Wrap` shadows whatever `Wrap` might be in the prelude, but there's
+    // nothing called `Wrap` in the prelude, so this should be fine.
+    assert!(
+        !has_errors,
+        "ADT constructor should work even if it shadows a potential name"
+    );
+}
 
-    /// A trait with an associated type whose name is the same as one of
-    /// the trait's type parameters.
-    #[test]
-    fn assoc_type_same_name_as_trait_param() {
-        let source = r#"
+/// A trait with an associated type whose name is the same as one of
+/// the trait's type parameters.
+#[test]
+fn assoc_type_same_name_as_trait_param() {
+    let source = r#"
 trait Container a where
   type a
   get : a -> a
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        // This is an ambiguous/shadowing situation: `type a` in the trait
-        // body could be interpreted as a lowercase type variable or as
-        // an associated type declaration. The parser only accepts UpperIdent
-        // for associated type names, so `type a` should fail to parse
-        // as an associated type. This test documents the current behavior.
-        let _ = has_errors;
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    // This is an ambiguous/shadowing situation: `type a` in the trait
+    // body could be interpreted as a lowercase type variable or as
+    // an associated type declaration. The parser only accepts UpperIdent
+    // for associated type names, so `type a` should fail to parse
+    // as an associated type. This test documents the current behavior.
+    let _ = has_errors;
+}
 
-    /// Using a trait's associated type in a function signature with
-    /// explicit `Type.Proj` syntax.
-    #[test]
-    fn assoc_type_proj_in_function_signature() {
-        let source = r#"
+/// Using a trait's associated type in a function signature with
+/// explicit `Type.Proj` syntax.
+#[test]
+fn assoc_type_proj_in_function_signature() {
+    let source = r#"
 trait Container a where
   type Elem
   get : a -> Elem
@@ -358,17 +357,17 @@ impl Container (Box a) where
 test : Box F32
 test = Box 3.0
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        // Tests that the associated type `Elem` doesn't conflict
-        // with anything and can be used in method signatures.
-        let _ = has_errors;
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    // Tests that the associated type `Elem` doesn't conflict
+    // with anything and can be used in method signatures.
+    let _ = has_errors;
+}
 
-    /// Multiple traits with the same associated type name.
-    /// Each trait's associated type is in its own namespace.
-    #[test]
-    fn multiple_traits_same_assoc_type_name() {
-        let source = r#"
+/// Multiple traits with the same associated type name.
+/// Each trait's associated type is in its own namespace.
+#[test]
+fn multiple_traits_same_assoc_type_name() {
+    let source = r#"
 trait Plus a b where
   type Output
   plus : a -> b -> Self.Output
@@ -384,18 +383,18 @@ impl Times F32 F32 where
 test : F32
 test = plus 2.0 (times 3.0 4.0)
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "two traits with the same associated type name 'Output' should coexist"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "two traits with the same associated type name 'Output' should coexist"
+    );
+}
 
-    /// A trait and an impl where the trait's type parameter name
-    /// collides with a data type name.
-    #[test]
-    fn trait_type_param_shadows_data_type() {
-        let source = r#"
+/// A trait and an impl where the trait's type parameter name
+/// collides with a data type name.
+#[test]
+fn trait_type_param_shadows_data_type() {
+    let source = r#"
 data Outcome = Outcome { value : F32 }
 trait Show a where
   show : a -> F32
@@ -404,17 +403,17 @@ impl Show Outcome where
 test : F32
 test = show (Outcome { value = 42.0 })
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "trait type param 'a' should not conflict with data type 'Outcome'"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "trait type param 'a' should not conflict with data type 'Outcome'"
+    );
+}
 
-    /// An impl for a type that has the same name as a trait.
-    #[test]
-    fn impl_for_type_named_like_trait() {
-        let source = r#"
+/// An impl for a type that has the same name as a trait.
+#[test]
+fn impl_for_type_named_like_trait() {
+    let source = r#"
 data Light = Light { brightness : F32 }
 trait HasBrightness a where
   brightness : a -> F32
@@ -423,25 +422,110 @@ impl HasBrightness Light where
 test : F32
 test = brightness (Light { brightness = 0.5 })
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "data type and trait can have similar names without conflict"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "data type and trait can have similar names without conflict"
+    );
+}
 
-    /// An ADT with a single constructor that has the same name as the type.
-    /// This is the "newtype" pattern — very common in functional languages.
-    #[test]
-    fn newtype_same_constructor_and_type_name() {
-        let source = r#"
+/// An ADT with a single constructor that has the same name as the type.
+/// This is the "newtype" pattern — very common in functional languages.
+#[test]
+fn newtype_same_constructor_and_type_name() {
+    let source = r#"
 data Velocity = Velocity (Vec<3, F32>)
 test : Velocity
 test = Velocity [1.0, 0.0, 0.0]
 "#;
-        let (_, has_errors) = parse_and_analyze(source);
-        assert!(
-            !has_errors,
-            "newtype pattern (same constructor and type name) should work"
-        );
-    }
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "newtype pattern (same constructor and type name) should work"
+    );
+}
+
+/// Array indexing should infer the element type correctly.
+/// Regression: `shapes[0]` was typed as a fresh variable instead of the element type.
+#[test]
+fn array_index_infers_element_type() {
+    let source = r#"
+data Shape = Circle { center : Vec<2, F32> }
+
+@group(0) @binding(0) storage(read) shapes : Array<Shape, 8>
+
+getShape : Shape
+getShape = load shapes[0]
+"#;
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "array index should infer element type, not a fresh variable"
+    );
+}
+
+/// Tensor indexing should infer the element type correctly.
+#[test]
+fn tensor_index_infers_element_type() {
+    let source = r#"
+data Shape = Circle { center : Vec<2, F32> }
+
+@group(0) @binding(0) storage(read) shapes : Tensor<8, Shape>
+
+getShape : Shape
+getShape = load shapes[0]
+"#;
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "tensor index should infer element type, not a fresh variable"
+    );
+}
+
+/// Runtime array indexing should infer the element type correctly.
+#[test]
+fn runtime_array_index_infers_element_type() {
+    let source = r#"
+data Shape = Circle { center : Vec<2, F32> }
+
+@group(0) @binding(0) storage(read) shapes : Array<Shape>
+
+getShape : Shape
+getShape = load shapes[0]
+"#;
+    let (_, has_errors) = parse_and_analyze(source);
+    assert!(
+        !has_errors,
+        "runtime array index should infer element type, not a fresh variable"
+    );
+}
+
+/// Array indexing in a let binding should record the element type in local binding schemes.
+#[test]
+fn array_index_local_binding_scheme_records_element_type() {
+    let source = r#"
+data Shape = Circle { center : Vec<2, F32> }
+
+@group(0) @binding(0) storage(read) shapes : Array<Shape, 8>
+
+test : Shape
+test =
+  let s0 = load shapes[0]
+  in s0
+"#;
+    let (sa, has_errors) = parse_and_analyze(source);
+    assert!(!has_errors, "should type check without errors");
+    // Verify that the local binding for `s0` has type `Shape`, not a variable.
+    let s0_scheme = sa.local_binding_schemes.values().find(|s| {
+        let ty_str = shadml_typechecker::format_ty_surface_inferred(&s.ty, None);
+        ty_str == "Shape"
+    });
+    assert!(
+        s0_scheme.is_some(),
+        "local binding `s0` should have inferred type `Shape`, got: {:?}",
+        sa.local_binding_schemes
+            .values()
+            .map(|s| { shadml_typechecker::format_ty_surface_inferred(&s.ty, None) })
+            .collect::<Vec<_>>()
+    );
+}

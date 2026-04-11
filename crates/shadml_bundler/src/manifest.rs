@@ -15,7 +15,7 @@ struct TypeLayout {
 
 /// Round `value` up to the next multiple of `alignment`.
 fn round_up(value: u32, alignment: u32) -> u32 {
-    (value + alignment - 1) / alignment * alignment
+    value.div_ceil(alignment) * alignment
 }
 
 /// Compute the WGSL layout (size + alignment) of a MIR type.
@@ -30,10 +30,22 @@ fn mir_type_layout<'a>(ty: &MirType<'a>, structs: &HashMap<&str, &MirStruct<'a>>
             alignment: 4,
         },
         MirType::Vec(n, _) => match *n {
-            2 => TypeLayout { size: 8, alignment: 8 },
-            3 => TypeLayout { size: 12, alignment: 16 },
-            4 => TypeLayout { size: 16, alignment: 16 },
-            _ => TypeLayout { size: *n as u32 * 4, alignment: 16 },
+            2 => TypeLayout {
+                size: 8,
+                alignment: 8,
+            },
+            3 => TypeLayout {
+                size: 12,
+                alignment: 16,
+            },
+            4 => TypeLayout {
+                size: 16,
+                alignment: 16,
+            },
+            _ => TypeLayout {
+                size: *n as u32 * 4,
+                alignment: 16,
+            },
         },
         MirType::Mat(cols, rows, _) => {
             let col_layout = mir_type_layout(&MirType::Vec(*rows, &MirType::F32), structs);
@@ -46,7 +58,12 @@ fn mir_type_layout<'a>(ty: &MirType<'a>, structs: &HashMap<&str, &MirStruct<'a>>
         MirType::Struct(name) => {
             let s = match structs.get(name) {
                 Some(s) => s,
-                None => return TypeLayout { size: 0, alignment: 1 },
+                None => {
+                    return TypeLayout {
+                        size: 0,
+                        alignment: 1,
+                    }
+                }
             };
             struct_layout(s, structs)
         }
@@ -65,15 +82,15 @@ fn mir_type_layout<'a>(ty: &MirType<'a>, structs: &HashMap<&str, &MirStruct<'a>>
         | MirType::Texture2dArray(_)
         | MirType::Sampler
         | MirType::SamplerComparison
-        | MirType::BindingArray(..) => TypeLayout { size: 0, alignment: 1 },
+        | MirType::BindingArray(..) => TypeLayout {
+            size: 0,
+            alignment: 1,
+        },
     }
 }
 
 /// Compute the WGSL layout of a struct by iterating fields with alignment-based offsets.
-fn struct_layout<'a>(
-    s: &MirStruct<'a>,
-    structs: &HashMap<&str, &MirStruct<'a>>,
-) -> TypeLayout {
+fn struct_layout<'a>(s: &MirStruct<'a>, structs: &HashMap<&str, &MirStruct<'a>>) -> TypeLayout {
     let mut offset: u32 = 0;
     let mut struct_align: u32 = 1;
     for field in &s.fields {
@@ -82,8 +99,15 @@ fn struct_layout<'a>(
         offset = round_up(offset, field_layout.alignment);
         offset += field_layout.size;
     }
-    let size = if s.fields.is_empty() { 0 } else { round_up(offset, struct_align) };
-    TypeLayout { size, alignment: struct_align }
+    let size = if s.fields.is_empty() {
+        0
+    } else {
+        round_up(offset, struct_align)
+    };
+    TypeLayout {
+        size,
+        alignment: struct_align,
+    }
 }
 
 /// Compiler artifact consumed by the Rust bindgen layer.
@@ -173,8 +197,7 @@ pub(crate) fn push_constants_from_globals<'a>(
     globals: &[MirGlobal<'a>],
     structs: &[MirStruct<'a>],
 ) -> Option<PushConstantInfo> {
-    let structs_map: HashMap<&str, &MirStruct<'a>> =
-        structs.iter().map(|s| (s.name, s)).collect();
+    let structs_map: HashMap<&str, &MirStruct<'a>> = structs.iter().map(|s| (s.name, s)).collect();
     let mut name = String::new();
     let mut ty = ManifestType::Unit;
     let mut total_size: u32 = 0;
@@ -210,6 +233,26 @@ pub struct ExportedType {
     /// Rust module path where this type is defined.
     pub rust_mod_path: Vec<String>,
     pub fields: Vec<ExportedField>,
+    /// If this type was lowered from a multi-constructor ADT, preserve variant metadata.
+    pub adt_variants: Option<Vec<ExportedAdtVariant>>,
+    /// If this type was lowered from a bitfield, preserve field bit-ranges.
+    pub bitfield_fields: Option<Vec<ExportedBitfieldField>>,
+}
+
+/// Metadata for a single ADT variant, exported for bindgen.
+#[derive(Debug, Clone)]
+pub struct ExportedAdtVariant {
+    pub name: String,
+    pub tag: u32,
+    pub fields: Vec<ExportedField>,
+}
+
+/// Metadata for a single bitfield field, exported for bindgen.
+#[derive(Debug, Clone)]
+pub struct ExportedBitfieldField {
+    pub name: String,
+    pub offset: u32,
+    pub width: u32,
 }
 
 /// An attribute annotation on an exported field.
@@ -301,6 +344,26 @@ pub(crate) fn exported_types_from_structs(
                     .iter()
                     .map(exported_field_from_mir)
                     .collect(),
+                adt_variants: structure.adt_variants.as_ref().map(|variants| {
+                    variants
+                        .iter()
+                        .map(|v| ExportedAdtVariant {
+                            name: v.name.to_string(),
+                            tag: v.tag,
+                            fields: v.fields.iter().map(exported_field_from_mir).collect(),
+                        })
+                        .collect()
+                }),
+                bitfield_fields: structure.bitfield_fields.as_ref().map(|fields| {
+                    fields
+                        .iter()
+                        .map(|f| ExportedBitfieldField {
+                            name: f.name.to_string(),
+                            offset: f.offset,
+                            width: f.width,
+                        })
+                        .collect()
+                }),
             }
         })
         .collect::<Vec<_>>();
@@ -454,14 +517,22 @@ mod tests {
         // offset at 0 (size 4, align 4), dir at 16 (size 12, align 16)
         // total = round_up(16 + 12, 16) = 32
         let s = MirStruct {
-
             name: "S",
             fields: vec![
-                MirField { name: "offset", ty: MirType::F32, attributes: vec![] },
-                MirField { name: "dir", ty: MirType::Vec(3, &MirType::F32), attributes: vec![] },
+                MirField {
+                    name: "offset",
+                    ty: MirType::F32,
+                    attributes: vec![],
+                },
+                MirField {
+                    name: "dir",
+                    ty: MirType::Vec(3, &MirType::F32),
+                    attributes: vec![],
+                },
             ],
             origin_module: None,
-
+            adt_variants: None,
+            bitfield_fields: None,
         };
         let arr = [s];
         let structs = make_structs(&arr);
@@ -476,13 +547,15 @@ mod tests {
         // transform at 0 (size 48, align 16)
         // total = round_up(48, 16) = 48
         let s = MirStruct {
-
             name: "M",
-            fields: vec![
-                MirField { name: "transform", ty: MirType::Mat(3, 3, &MirType::F32), attributes: vec![] },
-            ],
+            fields: vec![MirField {
+                name: "transform",
+                ty: MirType::Mat(3, 3, &MirType::F32),
+                attributes: vec![],
+            }],
             origin_module: None,
-
+            adt_variants: None,
+            bitfield_fields: None,
         };
         let arr = [s];
         let structs = make_structs(&arr);
@@ -504,7 +577,10 @@ mod tests {
     fn array_of_vec3() {
         // array<vec3<f32>, 3>: stride = round_up(12, 16) = 16, size = 16 * 3 = 48
         let structs = empty_structs();
-        let layout = mir_type_layout(&MirType::Array(&MirType::Vec(3, &MirType::F32), 3), &structs);
+        let layout = mir_type_layout(
+            &MirType::Array(&MirType::Vec(3, &MirType::F32), 3),
+            &structs,
+        );
         assert_eq!(layout.size, 48);
         assert_eq!(layout.alignment, 16);
     }
@@ -520,24 +596,30 @@ mod tests {
     #[test]
     fn push_constants_from_globals_with_struct() {
         let s = MirStruct {
-
             name: "Params",
             fields: vec![
-                MirField { name: "offset", ty: MirType::F32, attributes: vec![] },
-                MirField { name: "dir", ty: MirType::Vec(3, &MirType::F32), attributes: vec![] },
+                MirField {
+                    name: "offset",
+                    ty: MirType::F32,
+                    attributes: vec![],
+                },
+                MirField {
+                    name: "dir",
+                    ty: MirType::Vec(3, &MirType::F32),
+                    attributes: vec![],
+                },
             ],
             origin_module: None,
-
+            adt_variants: None,
+            bitfield_fields: None,
         };
         let globals = vec![MirGlobal {
-
             name: "imm",
             address_space: AddressSpace::Immediate,
             ty: MirType::Struct("Params"),
             group: 0,
             binding: 0,
             origin_module: None,
-
         }];
         let result = push_constants_from_globals(&globals, &[s]);
         assert!(result.is_some());
@@ -549,14 +631,12 @@ mod tests {
     #[test]
     fn push_constants_no_immediate() {
         let globals: Vec<MirGlobal> = vec![MirGlobal {
-
             name: "buf",
             address_space: AddressSpace::Uniform,
             ty: MirType::F32,
             group: 0,
             binding: 0,
             origin_module: None,
-
         }];
         let result = push_constants_from_globals(&globals, &[]);
         assert!(result.is_none());

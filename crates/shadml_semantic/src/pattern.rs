@@ -1,8 +1,5 @@
-
-use shadml_diagnostics::{Diagnostic, Label};
-use shadml_parser::parser::*;
-use shadml_typechecker::*;
 use super::*;
+use shadml_diagnostics::{Diagnostic, Label};
 
 impl SemanticAnalyzer {
     pub(crate) fn bind_pattern(&mut self, pat: &Pat, ty: &Ty, env: &mut TypeEnv) {

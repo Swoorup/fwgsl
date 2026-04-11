@@ -111,6 +111,26 @@ pub struct MirStruct<'a> {
     pub fields: Vec<MirField<'a>>,
     /// The module name where this struct was originally defined.
     pub origin_module: Option<&'a str>,
+    /// If this struct was lowered from a multi-constructor ADT, preserve variant metadata.
+    pub adt_variants: Option<Vec<MirAdtVariant<'a>>>,
+    /// If this struct was lowered from a bitfield, preserve field bit-ranges.
+    pub bitfield_fields: Option<Vec<MirBitfieldFieldDef<'a>>>,
+}
+
+/// Metadata for a single ADT variant, preserved during lowering for bindgen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MirAdtVariant<'a> {
+    pub name: &'a str,
+    pub tag: u32,
+    pub fields: Vec<MirField<'a>>,
+}
+
+/// Metadata for a single bitfield field, preserved during lowering for bindgen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MirBitfieldFieldDef<'a> {
+    pub name: &'a str,
+    pub offset: u32,
+    pub width: u32,
 }
 
 /// A single field in a struct.
@@ -178,7 +198,9 @@ impl fmt::Display for MirType<'_> {
             MirType::Array(inner, len) => write!(f, "array<{}, {}>", inner, len),
             MirType::RuntimeArray(inner) => write!(f, "array<{}>", inner),
             MirType::Texture2d(inner) => write!(f, "texture_2d<{}>", inner),
-            MirType::Texture2dMultisampled(inner) => write!(f, "texture_multisampled_2d<{}>", inner),
+            MirType::Texture2dMultisampled(inner) => {
+                write!(f, "texture_multisampled_2d<{}>", inner)
+            }
             MirType::Texture2dArray(inner) => write!(f, "texture_2d_array<{}>", inner),
             MirType::Sampler => write!(f, "sampler"),
             MirType::SamplerComparison => write!(f, "sampler_comparison"),

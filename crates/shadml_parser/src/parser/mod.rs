@@ -1099,7 +1099,6 @@ impl Parser {
     // ═════════════════════════════════════════════════════════════════════
     // Declarations
     // ═════════════════════════════════════════════════════════════════════
-
 }
 
 mod helpers;
@@ -1561,7 +1560,11 @@ main x =
   fsMain input = vec4 1.0 0.0 0.0 1.0
 "#;
         let prog = parse(source);
-        assert_eq!(prog.decls.len(), 1, "expected exactly one render block decl");
+        assert_eq!(
+            prog.decls.len(),
+            1,
+            "expected exactly one render block decl"
+        );
         match &prog.decls[0] {
             Decl::RenderBlock {
                 name,
@@ -1577,7 +1580,11 @@ main x =
                     }
                     other => panic!("expected BindingDecl, got {:?}", other),
                 }
-                assert_eq!(entries.len(), 4, "expected 4 entries: 2 type sigs + 2 entry points");
+                assert_eq!(
+                    entries.len(),
+                    4,
+                    "expected 4 entries: 2 type sigs + 2 entry points"
+                );
                 assert!(
                     matches!(&entries[0],
                         Decl::TypeSig { name, .. } if name == "vsMain"

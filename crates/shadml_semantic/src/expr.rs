@@ -1,16 +1,30 @@
-
-use shadml_diagnostics::{Diagnostic, Label};
-use shadml_parser::parser::*;
-use shadml_typechecker::*;
-use crate::helpers::*;
 use super::*;
+use shadml_diagnostics::{Diagnostic, Label};
 
 impl SemanticAnalyzer {
+    /// Convenience wrapper: infer without an expected-type hint.
     pub(crate) fn infer_expr(
         &mut self,
         expr: &Expr,
         env: &mut TypeEnv,
         active_constraints: &[Predicate],
+    ) -> Ty {
+        self.infer_expr_with_hint(expr, env, active_constraints, None)
+    }
+
+    /// Infer an expression, optionally guided by an expected type from context.
+    ///
+    /// When `expected_ty` is `Some(ty)`, the expression is checked against `ty`.
+    /// For lambdas, this propagates the expected function type into parameter
+    /// types, eliminating the fresh-variable problem that causes unresolved
+    /// vector-arithmetic trait constraints inside lambdas passed to known
+    /// higher-order functions.
+    pub(crate) fn infer_expr_with_hint(
+        &mut self,
+        expr: &Expr,
+        env: &mut TypeEnv,
+        active_constraints: &[Predicate],
+        expected_ty: Option<&Ty>,
     ) -> Ty {
         let ty = match expr {
             Expr::Lit(lit, _) => self.lit_type(lit),
@@ -60,12 +74,26 @@ impl SemanticAnalyzer {
             }
 
             Expr::App(func, arg, span) => {
+                // Algorithm M: infer the function first, then unify it with
+                // (expected_arg -> expected_ret) BEFORE inferring the argument.
+                // This lets the expected argument type flow into the argument
+                // expression (crucial for lambdas, records, tuples, etc.).
                 let func_ty = self.infer_expr(func, env, active_constraints);
-                let arg_ty = self.infer_expr(arg, env, active_constraints);
-                let ret_ty = self.engine.fresh_var();
-                let expected = Ty::arrow(arg_ty, ret_ty.clone());
+                let fresh_arg_ty = self.engine.fresh_var();
+                let fresh_ret_ty = self.engine.fresh_var();
+                let expected = Ty::arrow(fresh_arg_ty.clone(), fresh_ret_ty.clone());
                 self.engine.unify(&func_ty, &expected, *span);
-                ret_ty
+
+                // The substitution may have already resolved fresh_arg_ty to a
+                // concrete type (e.g. when func_ty was a known arrow type).
+                // Apply the substitution before using it as a hint so that
+                // lambdas receive their *concrete* expected parameter types.
+                let arg_hint = fresh_arg_ty.apply_subst(&self.engine.subst);
+
+                let arg_ty =
+                    self.infer_expr_with_hint(arg, env, active_constraints, Some(&arg_hint));
+                self.engine.unify(&arg_ty, &fresh_arg_ty, *span);
+                fresh_ret_ty
             }
 
             Expr::Infix(lhs, op, rhs, span) => {
@@ -94,21 +122,13 @@ impl SemanticAnalyzer {
                     *span,
                 );
                 // Eagerly resolve associated type projections in the return type.
-                // When an operator like `(+)` returns `a.Output`, the substitution
-                // maps ret_ty to an AssocProj. If the trait params are already
-                // concrete (e.g., after unifying lhs and rhs), we can resolve
-                // the projection immediately.
-                //
-                // We must update the substitution directly rather than calling
-                // unify, because if subst[ret_ty_var] is already AssocProj,
-                // unify would normalize ret_ty to AssocProj and the permissive
-                // AssocProj-vs-concrete case would accept it without updating
-                // the substitution.
                 let ret_substituted = ret_ty.apply_subst(&self.engine.subst);
-                let ret_resolved = resolve_assoc_projections_with_impls(&ret_substituted, &self.impls, &self.builtin_impls);
+                let ret_resolved = resolve_assoc_projections_with_impls(
+                    &ret_substituted,
+                    &self.impls,
+                    &self.builtin_impls,
+                );
                 if ret_resolved != ret_substituted {
-                    // The AssocProj resolved to a concrete type. Update the
-                    // substitution entry for ret_ty directly.
                     if let Ty::Var(v) = ret_ty {
                         self.engine.subst.insert(v, ret_resolved);
                     } else {
@@ -121,12 +141,26 @@ impl SemanticAnalyzer {
             Expr::Lambda(pats, body, _span) => {
                 let mut local_env = env.clone();
                 let mut param_types = Vec::new();
+                // Walk the expected function type, peeling off arrows to get
+                // concrete parameter types. This avoids fresh vars for params
+                // when the lambda is passed to a known higher-order function.
+                let mut expected_cursor = expected_ty;
                 for pat in pats {
-                    let ty = self.engine.fresh_var();
-                    self.bind_pattern(pat, &ty, &mut local_env);
-                    param_types.push(ty);
+                    let param_ty = if let Some(Ty::Arrow(from, to)) = expected_cursor {
+                        expected_cursor = Some(to.as_ref());
+                        from.apply_subst(&self.engine.subst)
+                    } else {
+                        self.engine.fresh_var()
+                    };
+                    self.bind_pattern(pat, &param_ty, &mut local_env);
+                    param_types.push(param_ty);
                 }
-                let body_ty = self.infer_expr(body, &mut local_env, active_constraints);
+                let body_ty = self.infer_expr_with_hint(
+                    body,
+                    &mut local_env,
+                    active_constraints,
+                    expected_cursor,
+                );
                 let mut result = body_ty;
                 for pt in param_types.into_iter().rev() {
                     result = Ty::arrow(pt, result);
@@ -139,26 +173,27 @@ impl SemanticAnalyzer {
                 for bind in binds {
                     let predicate_start = self.inferred_predicates.len();
                     let ty = self.infer_expr(&bind.expr, &mut local_env, active_constraints);
-                    let inferred_constraints =
-                        self.resolve_inferred_predicates(
-                            predicate_start,
-                            active_constraints,
-                            bind.expr.span(),
-                        );
-                    // Apply substitution and resolve AssocProj after predicate resolution
+                    let inferred_constraints = self.resolve_inferred_predicates(
+                        predicate_start,
+                        active_constraints,
+                        bind.expr.span(),
+                    );
                     let ty = self.apply_subst_resolve(&ty);
-                    let scheme = self
-                        .engine
-                        .generalize_with_constraints(&local_env, &ty, &inferred_constraints);
+                    let scheme = self.engine.generalize_with_constraints(
+                        &local_env,
+                        &ty,
+                        &inferred_constraints,
+                    );
                     self.local_binding_schemes
                         .insert(bind.name_span, scheme.clone());
                     local_env.insert(bind.name.clone(), scheme);
-                    // After resolving predicates and AssocProj for this binding,
-                    // resolve AssocProj in the substitution so that subsequent
-                    // expressions can use the resolved types.
-                    resolve_assoc_projections_in_subst(&mut self.engine.subst, &self.impls, &self.builtin_impls);
+                    resolve_assoc_projections_in_subst(
+                        &mut self.engine.subst,
+                        &self.impls,
+                        &self.builtin_impls,
+                    );
                 }
-                self.infer_expr(body, &mut local_env, active_constraints)
+                self.infer_expr_with_hint(body, &mut local_env, active_constraints, expected_ty)
             }
 
             Expr::Case(scrutinee, arms, span) => {
@@ -172,7 +207,12 @@ impl SemanticAnalyzer {
                             self.infer_expr(guard_expr, &mut arm_env, active_constraints);
                         self.engine.unify(&guard_ty, &Ty::bool(), *span);
                     }
-                    let body_ty = self.infer_expr(body, &mut arm_env, active_constraints);
+                    let body_ty = self.infer_expr_with_hint(
+                        body,
+                        &mut arm_env,
+                        active_constraints,
+                        Some(&result_ty),
+                    );
                     self.engine.unify(&result_ty, &body_ty, *span);
                 }
                 result_ty
@@ -181,13 +221,20 @@ impl SemanticAnalyzer {
             Expr::If(cond, then_expr, else_expr, span) => {
                 let cond_ty = self.infer_expr(cond, env, active_constraints);
                 self.engine.unify(&cond_ty, &Ty::bool(), *span);
-                let then_ty = self.infer_expr(then_expr, env, active_constraints);
-                let else_ty = self.infer_expr(else_expr, env, active_constraints);
+                let result_ty = expected_ty
+                    .cloned()
+                    .unwrap_or_else(|| self.engine.fresh_var());
+                let then_ty =
+                    self.infer_expr_with_hint(then_expr, env, active_constraints, Some(&result_ty));
+                let else_ty =
+                    self.infer_expr_with_hint(else_expr, env, active_constraints, Some(&result_ty));
                 self.engine.unify(&then_ty, &else_ty, *span);
-                then_ty
+                result_ty
             }
 
-            Expr::Paren(inner, _) => self.infer_expr(inner, env, active_constraints),
+            Expr::Paren(inner, _) => {
+                self.infer_expr_with_hint(inner, env, active_constraints, expected_ty)
+            }
 
             Expr::Tuple(elems, _span) => {
                 let tys: Vec<Ty> = elems
@@ -219,21 +266,18 @@ impl SemanticAnalyzer {
                                 }
                             }
                         } else {
-                            // Constructor exists but has positional/empty fields, infer anyway
                             for (_, expr) in fields {
                                 self.infer_expr(expr, env, active_constraints);
                             }
                         }
                         con_info.result_ty.clone()
                     } else {
-                        // Unknown constructor name, fall back to old behavior
                         for (_, expr) in fields {
                             self.infer_expr(expr, env, active_constraints);
                         }
                         Ty::Con(con_name.clone())
                     }
                 } else {
-                    // Anonymous record
                     for (_, expr) in fields {
                         self.infer_expr(expr, env, active_constraints);
                     }
@@ -245,7 +289,6 @@ impl SemanticAnalyzer {
                 let base_ty = self.infer_expr(expr, env, active_constraints);
                 let base_ty = self.engine.finalize(&base_ty);
 
-                // Check for Vec swizzle patterns
                 if is_swizzle(field) {
                     if let Some((n, scalar)) = extract_vec_type(&base_ty) {
                         let swizzle_len = field.len();
@@ -264,7 +307,6 @@ impl SemanticAnalyzer {
                         }
                     }
 
-                    // Matrix column access: mat.x -> Vec<rows, scalar> (single-char swizzle)
                     if field.len() == 1 {
                         if let Some((rows, cols, scalar)) = extract_mat_type(&base_ty) {
                             let col_index = swizzle_index(field.chars().next().unwrap());
@@ -279,7 +321,9 @@ impl SemanticAnalyzer {
                                         "column index '{}' out of bounds for mat{}{}",
                                         field, rows, cols
                                     ))
-                                    .with_label(Label::primary(*span, "out of bounds column access")),
+                                    .with_label(
+                                        Label::primary(*span, "out of bounds column access"),
+                                    ),
                                 );
                                 return Ty::Error;
                             }
@@ -287,7 +331,6 @@ impl SemanticAnalyzer {
                     }
                 }
 
-                // Method-call syntax sugar: `x.method` → `method x`
                 if let Some(name) = resolve_dot_call_target(env, &self.impls, field, &base_ty) {
                     if let Some(scheme) = env.lookup(&name) {
                         let qualified = self.engine.instantiate_qualified(scheme);
@@ -301,7 +344,6 @@ impl SemanticAnalyzer {
                     }
                 }
 
-                // Validate field exists on known types
                 if let Ty::Con(ref type_name) = base_ty {
                     let is_known_record = self
                         .constructors
@@ -359,12 +401,19 @@ impl SemanticAnalyzer {
                 let base_ty = self.engine.finalize(&base_ty);
                 let _ = self.infer_expr(index, env, active_constraints);
 
-                // Matrix column indexing: mat[i] -> Vec<rows, scalar>
                 if let Some((rows, _cols, scalar)) = extract_mat_type(&base_ty) {
                     return Ty::app(
                         Ty::app(Ty::Con(ty_name::VEC.into()), Ty::Nat(rows as u64)),
                         scalar,
                     );
+                }
+
+                if let Some((_, elem_ty)) = extract_vec_type(&base_ty) {
+                    return elem_ty;
+                }
+
+                if let Some((_, elem_ty)) = shadml_typechecker::extract_tensor_type(&base_ty) {
+                    return elem_ty;
                 }
 
                 self.engine.fresh_var()
@@ -382,7 +431,6 @@ impl SemanticAnalyzer {
                     return Ty::Error;
                 }
 
-                // Infer types of all elements and unify their scalar types
                 let scalar_ty = self.engine.fresh_var();
                 let mut total_components: u64 = 0;
 
@@ -391,11 +439,9 @@ impl SemanticAnalyzer {
                     let elem_ty = self.engine.finalize(&elem_ty);
 
                     if let Some((n, inner_scalar)) = extract_vec_type(&elem_ty) {
-                        // Vec element: contributes n components
                         total_components += n as u64;
                         self.engine.unify(&scalar_ty, &inner_scalar, *span);
                     } else {
-                        // Scalar element: contributes 1 component
                         total_components += 1;
                         self.engine.unify(&scalar_ty, &elem_ty, *span);
                     }
@@ -433,12 +479,10 @@ impl SemanticAnalyzer {
             }
 
             Expr::Neg(inner, _span) => {
-                // Negation works on numeric types
-                self.infer_expr(inner, env, active_constraints)
+                self.infer_expr_with_hint(inner, env, active_constraints, expected_ty)
             }
 
             Expr::Not(inner, span) => {
-                // Boolean not: operand and result are Bool
                 let inner_ty = self.infer_expr(inner, env, active_constraints);
                 let bool_ty = Ty::bool();
                 self.engine.unify(&inner_ty, &bool_ty, *span);
@@ -446,8 +490,7 @@ impl SemanticAnalyzer {
             }
 
             Expr::BitNot(inner, _span) => {
-                // Bitwise not: works on integer types, result is same type
-                self.infer_expr(inner, env, active_constraints)
+                self.infer_expr_with_hint(inner, env, active_constraints, expected_ty)
             }
 
             Expr::Do(stmts, _span) => {
@@ -461,7 +504,6 @@ impl SemanticAnalyzer {
                         DoStmt::Bind(bind) => {
                             let ty =
                                 self.infer_expr(&bind.expr, &mut local_env, active_constraints);
-                            // bind extracts the inner type from m a
                             let inner_ty = self.engine.fresh_var();
                             let scheme = Scheme::mono(inner_ty);
                             self.local_binding_schemes
@@ -493,12 +535,19 @@ impl SemanticAnalyzer {
                     loop_env.insert(bind.name.clone(), scheme);
                     binding_tys.push(init_ty);
                 }
-                let result_ty = self.engine.fresh_var();
+                let result_ty = expected_ty
+                    .cloned()
+                    .unwrap_or_else(|| self.engine.fresh_var());
                 let loop_fn_ty = binding_tys.iter().rev().fold(result_ty.clone(), |acc, ty| {
                     Ty::Arrow(Box::new(ty.clone()), Box::new(acc))
                 });
                 loop_env.insert(loop_name.clone(), Scheme::mono(loop_fn_ty));
-                let body_ty = self.infer_expr(body, &mut loop_env, active_constraints);
+                let body_ty = self.infer_expr_with_hint(
+                    body,
+                    &mut loop_env,
+                    active_constraints,
+                    Some(&result_ty),
+                );
                 self.engine.unify(&result_ty, &body_ty, *span);
                 result_ty
             }

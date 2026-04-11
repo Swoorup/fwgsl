@@ -249,7 +249,14 @@ pub fn compile(source: &str) -> String {
                     }
                 }
                 Err(errors) => {
-                    format!("// MIR lowering failed: {}", errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", "))
+                    format!(
+                        "// MIR lowering failed: {}",
+                        errors
+                            .iter()
+                            .map(|e| e.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
                 }
             }
         }

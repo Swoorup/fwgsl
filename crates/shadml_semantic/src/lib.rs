@@ -81,6 +81,7 @@ pub struct BuiltinImplInfo {
 }
 
 /// The semantic analyzer: collects definitions and performs type inference.
+#[derive(Clone)]
 pub struct SemanticAnalyzer {
     pub env: TypeEnv,
     pub engine: InferEngine,
@@ -120,7 +121,6 @@ pub struct DataTypeInfo {
     pub constructors: Vec<String>,
 }
 
-
 impl SemanticAnalyzer {
     pub fn new() -> Self {
         Self {
@@ -155,7 +155,9 @@ impl SemanticAnalyzer {
         // Render-block entries are included transparently.
         for decl in all_entries_including_render_blocks(&all_decls) {
             match decl {
-                Decl::BuiltinTypeDecl { name, arity, span, .. } => {
+                Decl::BuiltinTypeDecl {
+                    name, arity, span, ..
+                } => {
                     if let Some(existing) = self.type_names.get(name) {
                         self.engine.diagnostics.push(
                             Diagnostic::error(format!(
@@ -165,12 +167,16 @@ impl SemanticAnalyzer {
                             .with_label(Label::primary(*span, "duplicate type name")),
                         );
                     } else {
-                        self.type_names.insert(name.clone(), TypeNameKind::BuiltinType);
+                        self.type_names
+                            .insert(name.clone(), TypeNameKind::BuiltinType);
                         self.builtin_types.insert(name.clone(), *arity);
                     }
                 }
                 Decl::DataDecl {
-                    name, type_params, span, ..
+                    name,
+                    type_params,
+                    span,
+                    ..
                 } => {
                     if let Some(existing) = self.type_names.get(name) {
                         self.engine.diagnostics.push(
@@ -304,7 +310,10 @@ impl SemanticAnalyzer {
                                     "Duplicate associated type '{}' in trait '{}'",
                                     at.name, name
                                 ))
-                                .with_label(Label::primary(at.span, "duplicate associated type declaration")),
+                                .with_label(Label::primary(
+                                    at.span,
+                                    "duplicate associated type declaration",
+                                )),
                             );
                         } else {
                             seen_assoc.insert(at.name.clone());
@@ -352,10 +361,7 @@ impl SemanticAnalyzer {
                 self.env.insert(name.clone(), inferred_ty);
             }
             if let Decl::BuiltinExternDecl {
-                name,
-                ty,
-                lowering,
-                ..
+                name, ty, lowering, ..
             } = decl
             {
                 let inferred_ty = self.convert_syntax_type(ty);
@@ -392,10 +398,8 @@ impl SemanticAnalyzer {
                 // Always create constraint context when in a trait body so that
                 // `Self` can resolve to the first type parameter and associated
                 // type projections like `Self.Output` can be handled.
-                let constraint_contexts: Vec<(String, Vec<Ty>)> = vec![(
-                    name.clone(),
-                    var_ids.iter().copied().map(Ty::Var).collect(),
-                )];
+                let constraint_contexts: Vec<(String, Vec<Ty>)> =
+                    vec![(name.clone(), var_ids.iter().copied().map(Ty::Var).collect())];
                 let mut trait_methods = Vec::new();
                 let mut seen_trait_methods: HashSet<String> = HashSet::new();
                 for m in methods {
@@ -411,11 +415,8 @@ impl SemanticAnalyzer {
                         continue;
                     }
                     seen_trait_methods.insert(canonical_name.clone());
-                    let mut scope: HashMap<String, TyVarId> = vars
-                        .iter()
-                        .cloned()
-                        .zip(var_ids.iter().copied())
-                        .collect();
+                    let mut scope: HashMap<String, TyVarId> =
+                        vars.iter().cloned().zip(var_ids.iter().copied()).collect();
                     let method_ty = self.convert_syntax_type_with_scope_assoc(
                         &m.ty,
                         &mut scope,
@@ -480,7 +481,10 @@ impl SemanticAnalyzer {
                                 "Duplicate associated type definition '{}' in impl",
                                 at.name
                             ))
-                            .with_label(Label::primary(at.span, "duplicate associated type definition")),
+                            .with_label(Label::primary(
+                                at.span,
+                                "duplicate associated type definition",
+                            )),
                         );
                     } else {
                         seen_assoc.insert(at.name.clone());
@@ -499,11 +503,8 @@ impl SemanticAnalyzer {
                         .unwrap_or_else(|| m.name.clone());
                     if seen_methods.contains(&logical_name) {
                         self.engine.diagnostics.push(
-                            Diagnostic::error(format!(
-                                "Duplicate method '{}' in impl",
-                                m.name
-                            ))
-                            .with_label(Label::primary(m.span, "duplicate method definition")),
+                            Diagnostic::error(format!("Duplicate method '{}' in impl", m.name))
+                                .with_label(Label::primary(m.span, "duplicate method definition")),
                         );
                         continue;
                     }
@@ -516,10 +517,15 @@ impl SemanticAnalyzer {
                         if let Some(trait_info) = self.traits.get(tname).cloned() {
                             for (tmethod_name, tmethod_ty) in trait_info.methods {
                                 if tmethod_name == logical_name {
-                                    let concrete_ty =
-                                        replace_trait_vars(&tmethod_ty, &trait_info.var_ids, &impl_tys);
-                                    let concrete_ty =
-                                        resolve_assoc_projections(&concrete_ty, &assoc_type_bindings);
+                                    let concrete_ty = replace_trait_vars(
+                                        &tmethod_ty,
+                                        &trait_info.var_ids,
+                                        &impl_tys,
+                                    );
+                                    let concrete_ty = resolve_assoc_projections(
+                                        &concrete_ty,
+                                        &assoc_type_bindings,
+                                    );
                                     if let Some(method_ty) = &m.ty {
                                         let declared_scheme = self.convert_syntax_type(method_ty);
                                         let declared_ty = self.engine.instantiate(&declared_scheme);
@@ -542,8 +548,8 @@ impl SemanticAnalyzer {
                         let scheme = if let Some(method_ty) = &m.ty {
                             let scheme = self.convert_syntax_type(method_ty);
                             let declared_ty = self.engine.instantiate(&scheme);
-                            let expected_scheme = self
-                                .standalone_impl_method_scheme(&impl_tys[0], m.params.len());
+                            let expected_scheme =
+                                self.standalone_impl_method_scheme(&impl_tys[0], m.params.len());
                             let expected_ty = self.engine.instantiate(&expected_scheme);
                             self.engine.unify(&declared_ty, &expected_ty, m.span);
                             scheme
@@ -582,10 +588,8 @@ impl SemanticAnalyzer {
                         let missing_methods: Vec<String> = trait_info
                             .methods
                             .iter()
-                            .filter_map(|(method_name, _)| {
-                                (!impl_methods.contains_key(method_name))
-                                    .then(|| method_name.clone())
-                            })
+                            .filter(|&(method_name, _)| !impl_methods.contains_key(method_name))
+                            .map(|(method_name, _)| method_name.clone())
                             .collect();
                         if !missing_methods.is_empty() {
                             self.engine.diagnostics.push(
@@ -609,7 +613,11 @@ impl SemanticAnalyzer {
                             self.engine.diagnostics.push(
                                 Diagnostic::error(format!(
                                     "'{}' is not a method of trait '{}'",
-                                    unknown_methods.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("', '"),
+                                    unknown_methods
+                                        .iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("', '"),
                                     tname
                                 ))
                                 .with_label(Label::primary(*span, "unknown method definition"))
@@ -709,7 +717,10 @@ impl SemanticAnalyzer {
                                 "Duplicate associated type definition '{}' in impl",
                                 at.name
                             ))
-                            .with_label(Label::primary(at.span, "duplicate associated type definition")),
+                            .with_label(Label::primary(
+                                at.span,
+                                "duplicate associated type definition",
+                            )),
                         );
                     } else {
                         seen_assoc.insert(at.name.clone());
@@ -764,8 +775,13 @@ impl SemanticAnalyzer {
                                     "'{}' is not a method of trait '{}'",
                                     method.name, trait_name
                                 ))
-                                .with_label(Label::primary(method.span, "unknown method definition"))
-                                .with_help("remove it from the builtin impl, or declare it in the trait"),
+                                .with_label(Label::primary(
+                                    method.span,
+                                    "unknown method definition",
+                                ))
+                                .with_help(
+                                    "remove it from the builtin impl, or declare it in the trait",
+                                ),
                             );
                         }
                     }
@@ -811,9 +827,11 @@ impl SemanticAnalyzer {
                         );
                     }
                 }
-                if self.builtin_impls.iter().any(|existing| {
-                    existing.trait_name == *trait_name && existing.tys == impl_tys
-                }) {
+                if self
+                    .builtin_impls
+                    .iter()
+                    .any(|existing| existing.trait_name == *trait_name && existing.tys == impl_tys)
+                {
                     self.engine.diagnostics.push(
                         Diagnostic::error(format!(
                             "Duplicate builtin implementation of trait '{}' for type '{}'",
@@ -858,7 +876,9 @@ impl SemanticAnalyzer {
                     attributes,
                     ..
                 } => {
-                    self.check_entry_point(name, params, body, *span, attributes, /* is_render_block */ false);
+                    self.check_entry_point(
+                        name, params, body, *span, attributes, /* is_render_block */ false,
+                    );
                 }
                 Decl::ImplDecl {
                     trait_name,
@@ -902,11 +922,7 @@ impl SemanticAnalyzer {
                         );
                     }
                 }
-                Decl::RenderBlock {
-                    entries,
-                    span,
-                    ..
-                } => {
+                Decl::RenderBlock { entries, span, .. } => {
                     // Type-check entry points inside the render block
                     for rb_decl in entries {
                         if let Decl::EntryPoint {
@@ -918,7 +934,10 @@ impl SemanticAnalyzer {
                             ..
                         } = rb_decl
                         {
-                            self.check_entry_point(name, params, body, *epan, attributes, /* is_render_block */ true);
+                            self.check_entry_point(
+                                name, params, body, *epan, attributes,
+                                /* is_render_block */ true,
+                            );
                         }
                     }
                     let _ = span;
@@ -935,7 +954,6 @@ impl SemanticAnalyzer {
     pub fn diagnostics(&self) -> &DiagnosticSink {
         &self.engine.diagnostics
     }
-
 }
 
 impl Default for SemanticAnalyzer {
@@ -948,7 +966,6 @@ mod decl;
 mod expr;
 mod pattern;
 mod types;
-
 
 #[cfg(test)]
 mod tests {
@@ -1220,10 +1237,9 @@ mod tests {
         with_prelude(&mut program);
         sa.analyze(&program);
         assert!(sa.has_errors());
-        assert!(sa
-            .diagnostics()
-            .iter()
-            .any(|diag| diag.message.contains("function `test` has 2 parameters but its type signature expects 1")));
+        assert!(sa.diagnostics().iter().any(|diag| diag
+            .message
+            .contains("function `test` has 2 parameters but its type signature expects 1")));
     }
 
     #[test]
@@ -2190,13 +2206,18 @@ vsMain pos = pos
             sa.has_errors(),
             "module-scope @vertex entry point should be an error"
         );
-        let error_messages: Vec<String> = sa.diagnostics().iter()
+        let error_messages: Vec<String> = sa
+            .diagnostics()
+            .iter()
             .filter(|d| d.severity == shadml_diagnostics::Severity::Error)
             .map(|d| d.message.clone())
             .collect();
         assert!(
-            error_messages.iter().any(|m| m.contains("must be inside a render block")),
-            "expected error about render block, got: {:?}", error_messages
+            error_messages
+                .iter()
+                .any(|m| m.contains("must be inside a render block")),
+            "expected error about render block, got: {:?}",
+            error_messages
         );
     }
 

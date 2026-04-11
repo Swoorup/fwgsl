@@ -6,7 +6,12 @@ use shadml_typechecker::*;
 use super::*;
 
 impl AstLowering {
-    pub(crate) fn build_pattern_bindings(&mut self, pat: &Pat, base: HirExpr, ty: &Ty) -> Vec<(String, HirExpr)> {
+    pub(crate) fn build_pattern_bindings(
+        &mut self,
+        pat: &Pat,
+        base: HirExpr,
+        ty: &Ty,
+    ) -> Vec<(String, HirExpr)> {
         let final_ty = self.finalize_resolve(ty);
         match pat {
             Pat::Var(name, _) => vec![(name.clone(), base)],
@@ -38,11 +43,12 @@ impl AstLowering {
         }
     }
 
-
     pub(crate) fn lower_pattern(&mut self, pat: &Pat, _scrutinee_ty: &Ty) -> HirPattern {
         match pat {
             Pat::Wild(_) => HirPattern::Wild,
-            Pat::Var(name, _) => HirPattern::Var(name.clone(), self.finalize_resolve(_scrutinee_ty)),
+            Pat::Var(name, _) => {
+                HirPattern::Var(name.clone(), self.finalize_resolve(_scrutinee_ty))
+            }
             Pat::Con(name, sub_pats, _) => {
                 if let Some(con_info) = self
                     .constructors
@@ -132,7 +138,6 @@ impl AstLowering {
         }
     }
 
-
     pub(crate) fn bind_pattern(&mut self, pat: &Pat, ty: &Ty, env: &mut TypeEnv) {
         match pat {
             Pat::Var(name, _) => {
@@ -221,7 +226,6 @@ impl AstLowering {
             }
         }
     }
-
 
     pub(crate) fn finalize_pattern(&self, pattern: HirPattern) -> HirPattern {
         match pattern {

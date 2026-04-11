@@ -1,6 +1,6 @@
 pub mod lexer;
-pub mod parser;
 pub mod module_resolver;
+pub mod parser;
 
 pub(crate) mod cfg_eval;
 pub(crate) mod layout;

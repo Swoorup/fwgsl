@@ -439,87 +439,91 @@ fn bundle_single_entry(
     shadml_parser::evaluate_features(&mut root_program, features);
 
     // 3. Resolve module graph
-    let (
-        merged,
-        source_files,
-        modules,
-        root_module_path,
-        origin_map,
-        module_path_map,
-    ) = if has_imports(&root_program) {
-        let source_root = if source_roots.is_empty() {
-            vec![entry_file
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf()]
-        } else {
-            source_roots.to_vec()
-        };
+    let (merged, source_files, modules, root_module_path, origin_map, module_path_map) =
+        if has_imports(&root_program) {
+            let source_root = if source_roots.is_empty() {
+                vec![entry_file
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf()]
+            } else {
+                source_roots.to_vec()
+            };
 
-        let graph = shadml_parser::resolve_modules(entry_file, root_program, &source_root, reader)
-            .map_err(|errors| {
-                BundleError::ModuleResolution(errors.iter().map(|e| e.to_string()).collect())
-            })?;
+            let graph =
+                shadml_parser::resolve_modules(entry_file, root_program, &source_root, reader)
+                    .map_err(|errors| {
+                        BundleError::ModuleResolution(
+                            errors.iter().map(|e| e.to_string()).collect(),
+                        )
+                    })?;
 
-        // 4. Detect name collisions. Flat merging is ambiguous when duplicate
-        // names exist, so fail rather than picking a declaration by order.
-        let collisions = detect_name_collisions(&graph);
-        if !collisions.is_empty() {
-            return Err(BundleError::NameCollisions(collisions));
-        }
-
-        let files: Vec<PathBuf> = graph.modules.iter().map(|m| m.path.clone()).collect();
-        let modules = graph
-            .modules
-            .iter()
-            .map(|module| CompiledModule {
-                name: module.name.clone(),
-                path: module.path.clone(),
-                dependencies: module
-                    .imports
-                    .iter()
-                    .map(|import| import.module_path.clone())
-                    .collect(),
-            })
-            .collect::<Vec<_>>();
-        let root_module_path = graph
-            .modules
-            .last()
-            .map(|module| split_module_path(&module.name))
-            .unwrap_or_else(|| logical_module_path(entry_file, source_roots, None));
-
-        let origin_map = build_origin_map(&graph);
-        let module_path_map: HashMap<String, Vec<String>> = graph
-            .modules
-            .iter()
-            .map(|m| (m.name.clone(), split_module_path(&m.name)))
-            .collect();
-
-        let merged = shadml_parser::merge_modules(&graph);
-        (merged, files, modules, root_module_path, origin_map, module_path_map)
-    } else {
-        let module_name = logical_module_name(entry_file, source_roots, Some(&root_program));
-        let mut origin_map = HashMap::new();
-        for decl in &root_program.decls {
-            if let Some(name) = decl_name(decl) {
-                origin_map.insert(name, module_name.clone());
+            // 4. Detect name collisions. Flat merging is ambiguous when duplicate
+            // names exist, so fail rather than picking a declaration by order.
+            let collisions = detect_name_collisions(&graph);
+            if !collisions.is_empty() {
+                return Err(BundleError::NameCollisions(collisions));
             }
-        }
-        let module_path_map: HashMap<String, Vec<String>> =
-            std::iter::once((module_name.clone(), split_module_path(&module_name))).collect();
-        (
-            root_program,
-            vec![entry_file.to_path_buf()],
-            vec![CompiledModule {
-                name: module_name.clone(),
-                path: entry_file.to_path_buf(),
-                dependencies: Vec::new(),
-            }],
-            split_module_path(&module_name),
-            origin_map,
-            module_path_map,
-        )
-    };
+
+            let files: Vec<PathBuf> = graph.modules.iter().map(|m| m.path.clone()).collect();
+            let modules = graph
+                .modules
+                .iter()
+                .map(|module| CompiledModule {
+                    name: module.name.clone(),
+                    path: module.path.clone(),
+                    dependencies: module
+                        .imports
+                        .iter()
+                        .map(|import| import.module_path.clone())
+                        .collect(),
+                })
+                .collect::<Vec<_>>();
+            let root_module_path = graph
+                .modules
+                .last()
+                .map(|module| split_module_path(&module.name))
+                .unwrap_or_else(|| logical_module_path(entry_file, source_roots, None));
+
+            let origin_map = build_origin_map(&graph);
+            let module_path_map: HashMap<String, Vec<String>> = graph
+                .modules
+                .iter()
+                .map(|m| (m.name.clone(), split_module_path(&m.name)))
+                .collect();
+
+            let merged = shadml_parser::merge_modules(&graph);
+            (
+                merged,
+                files,
+                modules,
+                root_module_path,
+                origin_map,
+                module_path_map,
+            )
+        } else {
+            let module_name = logical_module_name(entry_file, source_roots, Some(&root_program));
+            let mut origin_map = HashMap::new();
+            for decl in &root_program.decls {
+                if let Some(name) = decl_name(decl) {
+                    origin_map.insert(name, module_name.clone());
+                }
+            }
+            let module_path_map: HashMap<String, Vec<String>> =
+                std::iter::once((module_name.clone(), split_module_path(&module_name))).collect();
+            (
+                root_program,
+                vec![entry_file.to_path_buf()],
+                vec![CompiledModule {
+                    name: module_name.clone(),
+                    path: entry_file.to_path_buf(),
+                    dependencies: Vec::new(),
+                }],
+                split_module_path(&module_name),
+                origin_map,
+                module_path_map,
+            )
+        };
 
     // 5. Prepend prelude
     let mut program = merged;
@@ -655,14 +659,21 @@ fn bundle_single_entry(
             .entry_points
             .iter()
             .map(|ep| {
-                let render_block = mir.render_blocks.iter().find(|rb| {
-                    rb.vertex_entry == ep.name || rb.fragment_entry == ep.name
-                });
+                let render_block = mir
+                    .render_blocks
+                    .iter()
+                    .find(|rb| rb.vertex_entry == ep.name || rb.fragment_entry == ep.name);
                 let (bind_groups, push_constants) = if let Some(rb) = render_block {
                     let rb_globals = render_block_globals(&mir, rb);
-                    (bind_groups_from_globals(&rb_globals, &module_path_map), push_constants_from_globals(&rb_globals, &mir.structs))
+                    (
+                        bind_groups_from_globals(&rb_globals, &module_path_map),
+                        push_constants_from_globals(&rb_globals, &mir.structs),
+                    )
                 } else {
-                    (bind_groups_from_globals(&mir.globals, &module_path_map), push_constants_from_globals(&mir.globals, &mir.structs))
+                    (
+                        bind_groups_from_globals(&mir.globals, &module_path_map),
+                        push_constants_from_globals(&mir.globals, &mir.structs),
+                    )
                 };
                 CompiledEntry {
                     rust_mod_path: root_module_path.clone(),
@@ -713,7 +724,7 @@ fn render_block_globals<'a>(
 
     if rb_entry_points.is_empty() {
         // No entry points: include only explicitly-declared bindings
-        let declared: HashSet<&str> = rb.binding_names.iter().map(|s| *s).collect();
+        let declared: HashSet<&str> = rb.binding_names.iter().copied().collect();
         return mir
             .globals
             .iter()
@@ -792,16 +803,24 @@ fn generate_split_outputs<'a>(
             output_base_name(source_file, source_roots),
             ep.name
         );
-        let render_block = mir.render_blocks.iter().find(|rb| {
-            rb.vertex_entry == ep.name || rb.fragment_entry == ep.name
-        });
+        let render_block = mir
+            .render_blocks
+            .iter()
+            .find(|rb| rb.vertex_entry == ep.name || rb.fragment_entry == ep.name);
         let (bind_groups, push_constants) = if let Some(rb) = render_block {
             let rb_globals = render_block_globals(mir, rb);
-            (bind_groups_from_globals(&rb_globals, module_path_map), push_constants_from_globals(&rb_globals, &mir.structs))
+            (
+                bind_groups_from_globals(&rb_globals, module_path_map),
+                push_constants_from_globals(&rb_globals, &mir.structs),
+            )
         } else {
-            (bind_groups_from_globals(&trimmed.globals, module_path_map), push_constants_from_globals(&trimmed.globals, &trimmed.structs))
+            (
+                bind_groups_from_globals(&trimmed.globals, module_path_map),
+                push_constants_from_globals(&trimmed.globals, &trimmed.structs),
+            )
         };
-        let exported_types = exported_types_from_structs(&trimmed.structs, rust_mod_path, module_path_map);
+        let exported_types =
+            exported_types_from_structs(&trimmed.structs, rust_mod_path, module_path_map);
 
         entries.push(BundleEntry {
             name: name.clone(),
@@ -1015,11 +1034,7 @@ fn module_decl_name(program: &Program) -> Option<String> {
 }
 
 fn derive_module_name(path: &Path, source_roots: &[PathBuf]) -> String {
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        path.to_path_buf()
-    };
+    let path = path.to_path_buf();
 
     for root in source_roots {
         if let Ok(relative) = path.strip_prefix(root) {
@@ -1089,7 +1104,9 @@ fn output_base_name(path: &Path, source_roots: &[PathBuf]) -> String {
 /// Build a map from declaration name to origin module name by scanning the
 /// module graph. Only tracks names relevant to bindgen: data types,
 /// type aliases, bitfields, bindings, and constants.
-fn build_origin_map(graph: &shadml_parser::module_resolver::ModuleGraph) -> HashMap<String, String> {
+fn build_origin_map(
+    graph: &shadml_parser::module_resolver::ModuleGraph,
+) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for module in &graph.modules {
         for decl in &module.program.decls {

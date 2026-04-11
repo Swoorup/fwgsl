@@ -1,5 +1,5 @@
-use std::sync::OnceLock;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::parser::{Parser, Program};
 
@@ -26,6 +26,8 @@ pub fn prelude_source() -> &'static str {
 }
 
 pub fn prelude_path() -> PathBuf {
-    std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prelude/prelude.shadml"))
-        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prelude/prelude.shadml"))
+    std::fs::canonicalize(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prelude/prelude.shadml"),
+    )
+    .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prelude/prelude.shadml"))
 }

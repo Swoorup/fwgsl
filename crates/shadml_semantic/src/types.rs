@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 
-use shadml_diagnostics::{Diagnostic, Label};
-use shadml_parser::parser::*;
-use shadml_span::Span;
-use shadml_typechecker::*;
-use crate::helpers::*;
 use super::*;
+use shadml_diagnostics::{Diagnostic, Label};
+use shadml_span::Span;
 
 impl SemanticAnalyzer {
     pub(crate) fn convert_syntax_type(&mut self, ty: &Type) -> Scheme {
@@ -14,19 +11,21 @@ impl SemanticAnalyzer {
         Scheme::poly(scope_vars(&scope), ty)
     }
 
-    pub(crate) fn convert_syntax_type_sig(&mut self, constraints: &[TypeConstraint], ty: &Type) -> Scheme {
+    pub(crate) fn convert_syntax_type_sig(
+        &mut self,
+        constraints: &[TypeConstraint],
+        ty: &Type,
+    ) -> Scheme {
         let mut scope = HashMap::new();
         let predicates = constraints
             .iter()
-            .map(|constraint| {
-                Predicate {
-                    trait_name: constraint.trait_name.clone(),
-                    tys: constraint
-                        .tys
-                        .iter()
-                        .map(|ty| self.convert_syntax_type_with_scope(ty, &mut scope))
-                        .collect(),
-                }
+            .map(|constraint| Predicate {
+                trait_name: constraint.trait_name.clone(),
+                tys: constraint
+                    .tys
+                    .iter()
+                    .map(|ty| self.convert_syntax_type_with_scope(ty, &mut scope))
+                    .collect(),
             })
             .collect();
 
@@ -83,13 +82,11 @@ impl SemanticAnalyzer {
                 }
                 Ty::Con(name.clone())
             }
-            Type::Var(name, _) => {
-                Ty::Var(
-                    *scope
-                        .entry(name.clone())
-                        .or_insert_with(|| fresh_var_id(&mut self.engine)),
-                )
-            }
+            Type::Var(name, _) => Ty::Var(
+                *scope
+                    .entry(name.clone())
+                    .or_insert_with(|| fresh_var_id(&mut self.engine)),
+            ),
             Type::Proj(_base, name, span) => {
                 // Collect all constraint contexts that have this associated type name
                 let mut matches: Vec<(String, Vec<Ty>)> = Vec::new();
@@ -104,11 +101,19 @@ impl SemanticAnalyzer {
                     0 => {
                         // No constraint context has this associated type.
                         // Try global trait search as fallback.
-                        let base_ty = self.convert_syntax_type_with_scope_assoc(_base, scope, constraint_contexts);
+                        let base_ty = self.convert_syntax_type_with_scope_assoc(
+                            _base,
+                            scope,
+                            constraint_contexts,
+                        );
                         if let Some((trait_name, trait_params)) =
                             self.find_assoc_type_context(&base_ty, name)
                         {
-                            Ty::AssocProj { trait_params, name: name.clone(), trait_name }
+                            Ty::AssocProj {
+                                trait_params,
+                                name: name.clone(),
+                                trait_name,
+                            }
                         } else {
                             self.engine.diagnostics.push(
                                 Diagnostic::error(format!(
@@ -126,7 +131,8 @@ impl SemanticAnalyzer {
                         trait_name: matches[0].0.clone(),
                     },
                     _ => {
-                        let trait_names: Vec<&str> = matches.iter().map(|(tn, _)| tn.as_str()).collect();
+                        let trait_names: Vec<&str> =
+                            matches.iter().map(|(tn, _)| tn.as_str()).collect();
                         self.engine.diagnostics.push(
                             Diagnostic::error(format!(
                                 "ambiguous associated type `.{name}` — found in traits: {}",
@@ -150,7 +156,9 @@ impl SemanticAnalyzer {
                 let a = self.convert_syntax_type_with_scope_assoc(a, scope, constraint_contexts);
                 Ty::app(f, a)
             }
-            Type::Paren(inner, _) => self.convert_syntax_type_with_scope_assoc(inner, scope, constraint_contexts),
+            Type::Paren(inner, _) => {
+                self.convert_syntax_type_with_scope_assoc(inner, scope, constraint_contexts)
+            }
             Type::Tuple(elems, _) => {
                 if elems.is_empty() {
                     Ty::unit()
@@ -158,7 +166,13 @@ impl SemanticAnalyzer {
                     Ty::Tuple(
                         elems
                             .iter()
-                            .map(|e| self.convert_syntax_type_with_scope_assoc(e, scope, constraint_contexts))
+                            .map(|e| {
+                                self.convert_syntax_type_with_scope_assoc(
+                                    e,
+                                    scope,
+                                    constraint_contexts,
+                                )
+                            })
                             .collect(),
                     )
                 }
@@ -191,10 +205,8 @@ impl SemanticAnalyzer {
     }
 
     fn is_known_type_constructor(&self, name: &str) -> bool {
-        matches!(
-            name,
-            ty_name::UNIT | ty_name::UNIFORM | ty_name::STORAGE
-        ) || self.data_types.contains_key(name)
+        matches!(name, ty_name::UNIT | ty_name::UNIFORM | ty_name::STORAGE)
+            || self.data_types.contains_key(name)
             || self.builtin_types.contains_key(name)
             || self.bitfield_field_names.contains_key(name)
             || self.type_aliases.contains_key(name)
@@ -209,11 +221,7 @@ impl SemanticAnalyzer {
     /// Find a trait that has an associated type with the given name, and
     /// return the trait name and parameter types. Used when Type::Proj
     /// is encountered outside a trait body (e.g., in type signatures).
-    fn find_assoc_type_context(
-        &self,
-        base_ty: &Ty,
-        assoc_name: &str,
-    ) -> Option<(String, Vec<Ty>)> {
+    fn find_assoc_type_context(&self, base_ty: &Ty, assoc_name: &str) -> Option<(String, Vec<Ty>)> {
         for (trait_name, trait_info) in &self.traits {
             if trait_info.associated_types.iter().any(|n| n == assoc_name) {
                 // Found a trait with this associated type name.
@@ -282,5 +290,4 @@ impl SemanticAnalyzer {
         let substituted = ty.apply_subst(&self.engine.subst);
         resolve_assoc_projections_with_impls(&substituted, &self.impls, &self.builtin_impls)
     }
-
 }

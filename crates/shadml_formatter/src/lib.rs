@@ -343,10 +343,11 @@ impl<'a> FormatEngine<'a> {
         // No space between two adjacent `>` tokens that form `>>` (shift right).
         // The lexer emits two separate `Greater` tokens; we detect adjacency
         // via source byte offsets.
-        if kind == SyntaxKind::Greater && prev == Some(SyntaxKind::Greater) {
-            if self.are_prev_and_current_adjacent(next) {
-                return;
-            }
+        if kind == SyntaxKind::Greater
+            && prev == Some(SyntaxKind::Greater)
+            && self.are_prev_and_current_adjacent(next)
+        {
+            return;
         }
 
         // Type parameter angle brackets: no space around `<`, `>`, or after `,`
@@ -402,7 +403,10 @@ impl<'a> FormatEngine<'a> {
             if k.is_trivia() {
                 continue;
             }
-            if matches!(k, SyntaxKind::Ident | SyntaxKind::UpperIdent | SyntaxKind::KwBuiltin) {
+            if matches!(
+                k,
+                SyntaxKind::Ident | SyntaxKind::UpperIdent | SyntaxKind::KwBuiltin
+            ) {
                 // Now check if the token before this ident is `@`
                 for j in (0..i).rev() {
                     let k2 = self.tokens[j].kind;
@@ -488,13 +492,13 @@ impl<'a> FormatEngine<'a> {
             self.output[line_start..]
                 .bytes()
                 .next()
-                .map_or(false, |b| b == b' ' || b == b'\t')
+                .is_some_and(|b| b == b' ' || b == b'\t')
         } else {
             // No newline yet — check from start
             self.output
                 .bytes()
                 .next()
-                .map_or(false, |b| b == b' ' || b == b'\t')
+                .is_some_and(|b| b == b' ' || b == b'\t')
         }
     }
 
@@ -934,7 +938,7 @@ fn split_binding_at_name(rest: &str) -> Option<(&str, &str, &str)> {
 
     // Find where the name ends (at whitespace or `:`)
     let name_end = trimmed_after_kw
-        .find(|c: char| c == ' ' || c == ':' || c == '\t')
+        .find([' ', ':', '\t'])
         .unwrap_or(trimmed_after_kw.len());
     let name = &trimmed_after_kw[..name_end];
 

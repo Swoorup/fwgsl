@@ -1,6 +1,5 @@
 use super::*;
 
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -161,10 +160,10 @@ pub enum ParsedInt {
 
 pub fn parse_int_literal_typed(text: &str) -> ParsedInt {
     // Strip optional suffix
-    let (digits, is_unsigned) = if text.ends_with('u') {
-        (&text[..text.len() - 1], true)
-    } else if text.ends_with('i') {
-        (&text[..text.len() - 1], false)
+    let (digits, is_unsigned) = if let Some(stripped) = text.strip_suffix('u') {
+        (stripped, true)
+    } else if let Some(stripped) = text.strip_suffix('i') {
+        (stripped, false)
     } else {
         (text, false)
     };
@@ -239,4 +238,3 @@ pub fn unescape_char(s: &str) -> char {
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
-

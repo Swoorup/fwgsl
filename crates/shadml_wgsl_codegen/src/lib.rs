@@ -229,7 +229,7 @@ impl WgslEmitter {
     fn emit_const(&mut self, c: &MirConst) {
         self.write(&format!(
             "const {}: {} = ",
-            sanitize_identifier(&c.name),
+            sanitize_identifier(c.name),
             self.format_type(&c.ty)
         ));
         self.emit_expr(&c.value);
@@ -242,7 +242,7 @@ impl WgslEmitter {
     // -----------------------------------------------------------------------
 
     fn emit_struct(&mut self, s: &MirStruct) {
-        self.write(&format!("struct {} {{", sanitize_identifier(&s.name)));
+        self.write(&format!("struct {} {{", sanitize_identifier(s.name)));
         self.newline();
         self.indent += 1;
         for field in &s.fields {
@@ -250,7 +250,7 @@ impl WgslEmitter {
             // Emit field attributes (e.g. @location(0), @builtin(position))
             for attr in &field.attributes {
                 self.write("@");
-                self.write(&attr.name);
+                self.write(attr.name);
                 if !attr.args.is_empty() {
                     self.write("(");
                     self.write(&attr.args.join(", "));
@@ -260,7 +260,7 @@ impl WgslEmitter {
             }
             self.write(&format!(
                 "{}: {},",
-                sanitize_identifier(&field.name),
+                sanitize_identifier(field.name),
                 self.format_type(&field.ty)
             ));
             self.newline();
@@ -288,7 +288,7 @@ impl WgslEmitter {
                     g.group,
                     g.binding,
                     addr_space,
-                    sanitize_identifier(&g.name),
+                    sanitize_identifier(g.name),
                     self.format_type(&g.ty),
                 ));
                 self.newline();
@@ -296,7 +296,7 @@ impl WgslEmitter {
             AddressSpace::Immediate => {
                 self.write(&format!(
                     "var<immediate> {}: {};",
-                    sanitize_identifier(&g.name),
+                    sanitize_identifier(g.name),
                     self.format_type(&g.ty),
                 ));
                 self.newline();
@@ -306,7 +306,7 @@ impl WgslEmitter {
                     "@group({}) @binding({}) var {}: {};",
                     g.group,
                     g.binding,
-                    sanitize_identifier(&g.name),
+                    sanitize_identifier(g.name),
                     self.format_type(&g.ty),
                 ));
                 self.newline();
@@ -319,14 +319,14 @@ impl WgslEmitter {
     // -----------------------------------------------------------------------
 
     fn emit_function(&mut self, f: &MirFunction) {
-        self.write(&format!("fn {}(", sanitize_identifier(&f.name)));
+        self.write(&format!("fn {}(", sanitize_identifier(f.name)));
         for (i, param) in f.params.iter().enumerate() {
             if i > 0 {
                 self.write(", ");
             }
             self.write(&format!(
                 "{}: {}",
-                sanitize_identifier(&param.name),
+                sanitize_identifier(param.name),
                 self.format_type(&param.ty)
             ));
         }
@@ -377,7 +377,7 @@ impl WgslEmitter {
         }
         self.newline();
 
-        self.write(&format!("fn {}(", sanitize_identifier(&ep.name)));
+        self.write(&format!("fn {}(", sanitize_identifier(ep.name)));
 
         let mut first = true;
 
@@ -389,7 +389,7 @@ impl WgslEmitter {
             first = false;
             self.write(&format!(
                 "{}: {}",
-                sanitize_identifier(&param.name),
+                sanitize_identifier(param.name),
                 self.format_type(&param.ty)
             ));
         }
@@ -863,7 +863,9 @@ mod tests {
                         attributes: vec![],
                     },
                 ],
-            origin_module: None,
+                origin_module: None,
+                adt_variants: None,
+                bitfield_fields: None,
             }],
             globals: vec![],
             functions: vec![],
@@ -893,7 +895,9 @@ mod tests {
                         args: vec![arena.alloc_str("global_invocation_id")],
                     }],
                 }],
-            origin_module: None,
+                origin_module: None,
+                adt_variants: None,
+                bitfield_fields: None,
             }],
             globals: vec![],
             functions: vec![],
@@ -1235,7 +1239,9 @@ mod tests {
                         attributes: vec![],
                     },
                 ],
-            origin_module: None,
+                origin_module: None,
+                adt_variants: None,
+                bitfield_fields: None,
             }],
             globals: vec![],
             functions: vec![MirFunction {
@@ -1421,7 +1427,9 @@ mod tests {
                     ty: MirType::Array(arena.alloc(MirType::F32), 16),
                     attributes: vec![],
                 }],
-            origin_module: None,
+                origin_module: None,
+                adt_variants: None,
+                bitfield_fields: None,
             }],
             globals: vec![],
             functions: vec![],
@@ -1478,7 +1486,9 @@ mod tests {
                         attributes: vec![],
                     },
                 ],
-            origin_module: None,
+                origin_module: None,
+                adt_variants: None,
+                bitfield_fields: None,
             }],
             globals: vec![],
             functions: vec![MirFunction {
@@ -1622,7 +1632,9 @@ mod tests {
                         ],
                     },
                 ],
-            origin_module: None,
+                origin_module: None,
+                adt_variants: None,
+                bitfield_fields: None,
             }],
             globals: vec![],
             functions: vec![],

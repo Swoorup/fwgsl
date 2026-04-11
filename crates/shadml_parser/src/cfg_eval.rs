@@ -94,17 +94,16 @@ fn expand_decls(
                     result.extend(expand_decls(else_decls, features, referenced));
                 }
             }
-            Decl::ImportDecl { ref condition, .. } => {
-                if let Some(ref pred) = condition {
+            Decl::ImportDecl { ref condition, .. } => match condition {
+                Some(pred) => {
                     collect_referenced_features(pred, referenced);
                     if features.evaluate(pred) {
                         result.push(decl);
                     }
                     // else: conditional import with false predicate — drop it
-                } else {
-                    result.push(decl);
                 }
-            }
+                None => result.push(decl),
+            },
             _ => {
                 result.push(decl);
             }

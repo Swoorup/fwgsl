@@ -1,10 +1,6 @@
-
-use shadml_diagnostics::{Diagnostic, Label};
-use shadml_parser::parser::*;
-use shadml_span::Span;
-use shadml_typechecker::*;
-use crate::helpers::*;
 use super::*;
+use shadml_diagnostics::{Diagnostic, Label};
+use shadml_span::Span;
 
 impl SemanticAnalyzer {
     pub(crate) fn register_data_type(
@@ -107,14 +103,18 @@ impl SemanticAnalyzer {
         is_render_block: bool,
     ) {
         if !is_render_block {
-            let is_vertex_or_fragment =
-                attributes.iter().any(|a| a.name == "vertex" || a.name == "fragment");
+            let is_vertex_or_fragment = attributes
+                .iter()
+                .any(|a| a.name == "vertex" || a.name == "fragment");
             if is_vertex_or_fragment {
                 self.engine.diagnostics.push(
                     Diagnostic::error(
                         "@vertex and @fragment entry points must be inside a render block",
                     )
-                    .with_label(Label::primary(span, "consider wrapping in a `render` block")),
+                    .with_label(Label::primary(
+                        span,
+                        "consider wrapping in a `render` block",
+                    )),
                 );
             }
         }
@@ -214,7 +214,10 @@ impl SemanticAnalyzer {
                         "missing trait constraint `{}`",
                         format_predicate(&predicate)
                     ))
-                    .with_label(Label::primary(span, "trait use requires a declared constraint"))
+                    .with_label(Label::primary(
+                        span,
+                        "trait use requires a declared constraint",
+                    ))
                     .with_help(format!(
                         "add a type signature like `{} : {} => ...`",
                         name,
@@ -228,9 +231,9 @@ impl SemanticAnalyzer {
             // Re-resolve after predicate improvement may have updated the substitution
             fun_ty = self.apply_subst_resolve(&fun_ty);
             // Add inferred type
-            let scheme = self
-                .engine
-                .generalize_with_constraints(&self.env, &fun_ty, &inferred_constraints);
+            let scheme =
+                self.engine
+                    .generalize_with_constraints(&self.env, &fun_ty, &inferred_constraints);
             if has_explicit_signature {
                 self.env.insert(name.to_string(), scheme);
                 return;
@@ -245,7 +248,11 @@ impl SemanticAnalyzer {
                         span,
                         "constrained top-level binding needs a type signature",
                     ))
-                    .with_help(format!("write `{} : {} => ...`", name, format_constraints(&scheme.constraints))),
+                    .with_help(format!(
+                        "write `{} : {} => ...`",
+                        name,
+                        format_constraints(&scheme.constraints)
+                    )),
                 );
             }
             self.env.insert(name.to_string(), scheme);
@@ -323,7 +330,10 @@ impl SemanticAnalyzer {
                     "missing trait constraint `{}`",
                     format_predicate(&predicate)
                 ))
-                .with_label(Label::primary(span, "trait use requires a declared constraint"))
+                .with_label(Label::primary(
+                    span,
+                    "trait use requires a declared constraint",
+                ))
                 .with_help("add the corresponding constraint to the method signature"),
             );
         }

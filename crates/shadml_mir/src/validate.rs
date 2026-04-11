@@ -318,8 +318,8 @@ mod tests {
     use shadml_allocator::Allocator;
 
     use crate::{
-        AddressSpace, MirConst, MirEntryPoint, MirExpr, MirFunction, MirGlobal, MirLit,
-        MirProgram, MirRenderBlock, MirStmt, MirType, ShaderStage,
+        AddressSpace, MirConst, MirEntryPoint, MirExpr, MirFunction, MirGlobal, MirLit, MirProgram,
+        MirRenderBlock, MirStmt, MirType, ShaderStage,
     };
 
     use super::validate_program;
@@ -413,8 +413,11 @@ mod tests {
             }],
         };
 
-        let errors = validate_program(&program).expect_err("validator should reject unknown vertex entry");
-        assert!(errors.iter().any(|e| e.contains("unknown vertex entry point 'missing_vertex'")));
+        let errors =
+            validate_program(&program).expect_err("validator should reject unknown vertex entry");
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("unknown vertex entry point 'missing_vertex'")));
     }
 
     #[test]
@@ -422,14 +425,12 @@ mod tests {
         let program = MirProgram {
             structs: vec![],
             globals: vec![MirGlobal {
-
                 name: "real_binding",
                 address_space: AddressSpace::Uniform,
                 ty: MirType::F32,
                 group: 0,
                 binding: 0,
                 origin_module: None,
-
             }],
             functions: vec![],
             constants: vec![],
@@ -442,8 +443,11 @@ mod tests {
             }],
         };
 
-        let errors = validate_program(&program).expect_err("validator should reject unknown binding");
-        assert!(errors.iter().any(|e| e.contains("unknown binding 'missing_binding'")));
+        let errors =
+            validate_program(&program).expect_err("validator should reject unknown binding");
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("unknown binding 'missing_binding'")));
     }
 
     #[test]
@@ -451,14 +455,12 @@ mod tests {
         let program = MirProgram {
             structs: vec![],
             globals: vec![MirGlobal {
-
                 name: "my_binding",
                 address_space: AddressSpace::Uniform,
                 ty: MirType::F32,
                 group: 0,
                 binding: 0,
                 origin_module: None,
-
             }],
             functions: vec![],
             constants: vec![],
@@ -488,14 +490,12 @@ mod tests {
         let program = MirProgram {
             structs: vec![],
             globals: vec![MirGlobal {
-
                 name: "my_uniform",
                 address_space: AddressSpace::Uniform,
                 ty: MirType::F32,
                 group: 0,
                 binding: 0,
                 origin_module: None,
-
             }],
             functions: vec![],
             constants: vec![],
@@ -529,7 +529,8 @@ mod tests {
             }],
         };
 
-        validate_program(&program).expect("render block with vertex + fragment should pass validation");
+        validate_program(&program)
+            .expect("render block with vertex + fragment should pass validation");
     }
 
     #[test]
@@ -548,7 +549,10 @@ mod tests {
             }],
         };
 
-        let errors = validate_program(&program).expect_err("validator should reject unknown fragment entry");
-        assert!(errors.iter().any(|e| e.contains("unknown fragment entry point 'missing_fragment'")));
+        let errors =
+            validate_program(&program).expect_err("validator should reject unknown fragment entry");
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("unknown fragment entry point 'missing_fragment'")));
     }
 }

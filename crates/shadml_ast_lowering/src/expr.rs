@@ -12,6 +12,20 @@ use crate::monomorphize::*;
 impl AstLowering {
     /// Lower an expression, returning the HIR expression and its inferred type.
     pub(crate) fn lower_expr(&mut self, expr: &Expr, env: &mut TypeEnv) -> (HirExpr, Ty) {
+        self.lower_expr_with_hint(expr, env, None)
+    }
+
+    /// Lower an expression with an optional expected-type hint.
+    ///
+    /// For lambdas, the expected type is peeled to provide concrete parameter
+    /// types, avoiding the fresh-variable problem that causes unresolved trait
+    /// constraints in higher-order functions (foldRange, map, etc.).
+    pub(crate) fn lower_expr_with_hint(
+        &mut self,
+        expr: &Expr,
+        env: &mut TypeEnv,
+        expected_ty: Option<&Ty>,
+    ) -> (HirExpr, Ty) {
         match expr {
             Expr::Lit(lit, span) => {
                 let (hir_lit, ty) = self.lower_lit(lit);
@@ -117,31 +131,10 @@ impl AstLowering {
                         }
                     } else {
                         // Empty lambda params — shouldn't happen, fall through to normal App
-                        let (hir_func, func_ty) = self.lower_expr(func, env);
-                        let (hir_arg, arg_ty) = self.lower_expr(arg, env);
-                        let ret_ty = self.engine.fresh_var();
-                        let expected = Ty::arrow(arg_ty, ret_ty.clone());
-                        self.engine.unify(&func_ty, &expected, *span);
-                        (
-                            HirExpr::App(
-                                Box::new(hir_func),
-                                Box::new(hir_arg),
-                                ret_ty.clone(),
-                                *span,
-                            ),
-                            ret_ty,
-                        )
+                        self.lower_app_algorithm_m(func, arg, *span, env)
                     }
                 } else {
-                    let (hir_func, func_ty) = self.lower_expr(func, env);
-                    let (hir_arg, arg_ty) = self.lower_expr(arg, env);
-                    let ret_ty = self.engine.fresh_var();
-                    let expected = Ty::arrow(arg_ty.clone(), ret_ty.clone());
-                    self.engine.unify(&func_ty, &expected, *span);
-                    (
-                        HirExpr::App(Box::new(hir_func), Box::new(hir_arg), ret_ty.clone(), *span),
-                        ret_ty,
-                    )
+                    self.lower_app_algorithm_m(func, arg, *span, env)
                 }
             }
 
@@ -209,12 +202,21 @@ impl AstLowering {
             Expr::Lambda(pats, body, _span) => {
                 let mut local_env = env.clone();
                 let mut param_types = Vec::new();
+                // Walk the expected function type, peeling off arrows to get
+                // concrete parameter types for lambdas passed to known HOFs.
+                let mut expected_cursor = expected_ty;
                 for pat in pats {
-                    let ty = self.engine.fresh_var();
-                    self.bind_pattern(pat, &ty, &mut local_env);
-                    param_types.push(ty);
+                    let param_ty = if let Some(Ty::Arrow(from, to)) = expected_cursor {
+                        expected_cursor = Some(to.as_ref());
+                        from.apply_subst(&self.engine.subst)
+                    } else {
+                        self.engine.fresh_var()
+                    };
+                    self.bind_pattern(pat, &param_ty, &mut local_env);
+                    param_types.push(param_ty);
                 }
-                let (hir_body, body_ty) = self.lower_expr(body, &mut local_env);
+                let (hir_body, body_ty) =
+                    self.lower_expr_with_hint(body, &mut local_env, expected_cursor);
                 let mut result_ty = body_ty;
                 for pt in param_types.into_iter().rev() {
                     result_ty = Ty::arrow(pt, result_ty);
@@ -245,7 +247,11 @@ impl AstLowering {
                     hir_binds.push((bind.name.clone(), hir_expr));
                     // Resolve AssocProj in the substitution after each binding so
                     // that subsequent expressions can use the resolved types.
-                    shadml_semantic::resolve_assoc_projections_in_subst(&mut self.engine.subst, &self.impls, &self.builtin_impls);
+                    shadml_semantic::resolve_assoc_projections_in_subst(
+                        &mut self.engine.subst,
+                        &self.impls,
+                        &self.builtin_impls,
+                    );
                 }
                 let (hir_body, body_ty) = self.lower_expr(body, &mut local_env);
                 (
@@ -416,8 +422,11 @@ impl AstLowering {
 
                     // Matrix column access: mat.x -> Vec<rows, scalar>
                     if field.len() == 1 {
-                        if let Some((rows, cols, scalar)) = shadml_typechecker::extract_mat_type(&expr_ty_final) {
-                            let col_index = shadml_semantic::swizzle_index(field.chars().next().unwrap());
+                        if let Some((rows, cols, scalar)) =
+                            shadml_typechecker::extract_mat_type(&expr_ty_final)
+                        {
+                            let col_index =
+                                shadml_semantic::swizzle_index(field.chars().next().unwrap());
                             if col_index < cols as usize {
                                 let result_ty = Ty::app(
                                     Ty::app(Ty::Con(ty_name::VEC.into()), Ty::Nat(rows as u64)),
@@ -515,7 +524,9 @@ impl AstLowering {
                 let base_ty_final = self.finalize_resolve(&base_ty);
 
                 // Matrix column indexing: mat[i] -> Vec<rows, scalar>
-                if let Some((rows, _cols, scalar)) = shadml_typechecker::extract_mat_type(&base_ty_final) {
+                if let Some((rows, _cols, scalar)) =
+                    shadml_typechecker::extract_mat_type(&base_ty_final)
+                {
                     let result_ty = Ty::app(
                         Ty::app(Ty::Con(ty_name::VEC.into()), Ty::Nat(rows as u64)),
                         scalar,
@@ -528,6 +539,33 @@ impl AstLowering {
                             *span,
                         ),
                         result_ty,
+                    );
+                }
+
+                // Vector element indexing: vec[i] -> scalar
+                if let Some((_, elem_ty)) = extract_vec_type(&base_ty_final) {
+                    return (
+                        HirExpr::Index(
+                            Box::new(hir_base),
+                            Box::new(hir_index),
+                            elem_ty.clone(),
+                            *span,
+                        ),
+                        elem_ty,
+                    );
+                }
+
+                // Array/tensor element indexing
+                if let Some((_, elem_ty)) = shadml_typechecker::extract_tensor_type(&base_ty_final)
+                {
+                    return (
+                        HirExpr::Index(
+                            Box::new(hir_base),
+                            Box::new(hir_index),
+                            elem_ty.clone(),
+                            *span,
+                        ),
+                        elem_ty,
                     );
                 }
 
@@ -826,6 +864,35 @@ impl AstLowering {
         }
     }
 
+    /// Algorithm M application lowering: infer func first, extract expected
+    /// arg type, then lower arg with that hint. This propagates concrete
+    /// parameter types into lambdas passed to higher-order functions.
+    fn lower_app_algorithm_m(
+        &mut self,
+        func: &Expr,
+        arg: &Expr,
+        span: Span,
+        env: &mut TypeEnv,
+    ) -> (HirExpr, Ty) {
+        let (hir_func, func_ty) = self.lower_expr(func, env);
+        let fresh_arg_ty = self.engine.fresh_var();
+        let fresh_ret_ty = self.engine.fresh_var();
+        let expected = Ty::arrow(fresh_arg_ty.clone(), fresh_ret_ty.clone());
+        self.engine.unify(&func_ty, &expected, span);
+
+        let arg_hint = fresh_arg_ty.apply_subst(&self.engine.subst);
+        let (hir_arg, arg_ty) = self.lower_expr_with_hint(arg, env, Some(&arg_hint));
+        self.engine.unify(&arg_ty, &fresh_arg_ty, span);
+        (
+            HirExpr::App(
+                Box::new(hir_func),
+                Box::new(hir_arg),
+                fresh_ret_ty.clone(),
+                span,
+            ),
+            fresh_ret_ty,
+        )
+    }
 
     pub(crate) fn lower_lit(&self, lit: &Lit) -> (HirLit, Ty) {
         match lit {
@@ -1095,7 +1162,10 @@ impl AstLowering {
                 HirExpr::Var(resolved_name, final_ty, span)
             }
             HirExpr::Tuple(items, ty, span) => HirExpr::Tuple(
-                items.into_iter().map(|item| self.finalize_expr(item)).collect(),
+                items
+                    .into_iter()
+                    .map(|item| self.finalize_expr(item))
+                    .collect(),
                 self.finalize_resolve(&ty),
                 span,
             ),
@@ -1293,7 +1363,12 @@ impl AstLowering {
                             && inst.tys.len() == 2
                             && inst.tys[0] == *lhs_ty
                             && inst.tys[1] == *rhs_ty
-                            && output_name.map_or(false, |name| inst.associated_type_bindings.get(name).map(|t| t == result_ty).unwrap_or(false))
+                            && output_name.is_some_and(|name| {
+                                inst.associated_type_bindings
+                                    .get(name)
+                                    .map(|t| t == result_ty)
+                                    .unwrap_or(false)
+                            })
                         {
                             if let Some(mangled) = inst.methods.get(logical_op) {
                                 return Some(mangled.clone());
@@ -1305,7 +1380,12 @@ impl AstLowering {
                             && inst.tys.len() == 2
                             && inst.tys[0] == *lhs_ty
                             && inst.tys[1] == *rhs_ty
-                            && output_name.map_or(false, |name| inst.associated_type_bindings.get(name).map(|t| t == result_ty).unwrap_or(false))
+                            && output_name.is_some_and(|name| {
+                                inst.associated_type_bindings
+                                    .get(name)
+                                    .map(|t| t == result_ty)
+                                    .unwrap_or(false)
+                            })
                         {
                             if let Some(lowering) = inst.methods.get(logical_op) {
                                 return match lowering {
@@ -1356,7 +1436,12 @@ impl AstLowering {
         None
     }
 
-    pub(crate) fn finalize_builtin_extern_call(&self, expr: HirExpr, result_ty: Ty, span: Span) -> HirExpr {
+    pub(crate) fn finalize_builtin_extern_call(
+        &self,
+        expr: HirExpr,
+        result_ty: Ty,
+        span: Span,
+    ) -> HirExpr {
         let (head, args) = collect_hir_app_args(&expr);
         let HirExpr::Var(name, _, _) = head else {
             return expr;
@@ -1384,7 +1469,12 @@ impl AstLowering {
 
     /// Resolve a trait or standalone impl method name to a concrete mangled name,
     /// if the resolved type is concrete and a matching impl exists.
-    pub(crate) fn resolve_trait_method_or_diag(&mut self, name: &str, ty: &Ty, span: Span) -> String {
+    pub(crate) fn resolve_trait_method_or_diag(
+        &mut self,
+        name: &str,
+        ty: &Ty,
+        span: Span,
+    ) -> String {
         // Check trait methods
         for trait_info in self.traits.values() {
             for (method_name, _) in &trait_info.methods {
@@ -1449,5 +1539,4 @@ impl AstLowering {
         }
         name.to_string()
     }
-
 }

@@ -21,15 +21,13 @@ impl AstLowering {
         let mut scope = HashMap::new();
         let predicates = constraints
             .iter()
-            .map(|constraint| {
-                Predicate {
-                    trait_name: constraint.trait_name.clone(),
-                    tys: constraint
-                        .tys
-                        .iter()
-                        .map(|ty| self.convert_syntax_type_with_scope(ty, &mut scope))
-                        .collect(),
-                }
+            .map(|constraint| Predicate {
+                trait_name: constraint.trait_name.clone(),
+                tys: constraint
+                    .tys
+                    .iter()
+                    .map(|ty| self.convert_syntax_type_with_scope(ty, &mut scope))
+                    .collect(),
             })
             .collect();
 
@@ -38,7 +36,9 @@ impl AstLowering {
         let traits_with_assoc: Vec<(String, bool)> = constraints
             .iter()
             .map(|constraint| {
-                let has_assoc = self.traits.get(&constraint.trait_name)
+                let has_assoc = self
+                    .traits
+                    .get(&constraint.trait_name)
                     .map(|info| !info.associated_types.is_empty())
                     .unwrap_or(false);
                 (constraint.trait_name.clone(), has_assoc)
@@ -64,9 +64,7 @@ impl AstLowering {
         let ty = if constraint_traits.is_empty() {
             self.convert_syntax_type_with_scope(ty, &mut scope)
         } else {
-            self.convert_syntax_type_with_scope_assoc(
-                ty, &mut scope, &constraint_traits,
-            )
+            self.convert_syntax_type_with_scope_assoc(ty, &mut scope, &constraint_traits)
         };
         Scheme::poly_with_constraints(predicates, scope_vars(&scope), ty)
     }
@@ -167,7 +165,9 @@ impl AstLowering {
                 let a = self.convert_syntax_type_with_scope_assoc(a, scope, constraint_traits);
                 Ty::app(f, a)
             }
-            Type::Paren(inner, _) => self.convert_syntax_type_with_scope_assoc(inner, scope, constraint_traits),
+            Type::Paren(inner, _) => {
+                self.convert_syntax_type_with_scope_assoc(inner, scope, constraint_traits)
+            }
             Type::Tuple(elems, _) => {
                 if elems.is_empty() {
                     Ty::unit()
@@ -175,7 +175,13 @@ impl AstLowering {
                     Ty::Tuple(
                         elems
                             .iter()
-                            .map(|e| self.convert_syntax_type_with_scope_assoc(e, scope, constraint_traits))
+                            .map(|e| {
+                                self.convert_syntax_type_with_scope_assoc(
+                                    e,
+                                    scope,
+                                    constraint_traits,
+                                )
+                            })
                             .collect(),
                     )
                 }
@@ -232,5 +238,4 @@ impl AstLowering {
         };
         normalize_type_aliases(&ty)
     }
-
 }

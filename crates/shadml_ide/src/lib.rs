@@ -1,6 +1,8 @@
 mod catalog;
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub use catalog::{
     all_completion_specs, completion_item_from_spec, lookup_completion_spec, spec_matches_context,
@@ -11,29 +13,29 @@ use lsp_types::{
     HoverContents, Location, MarkupContent, MarkupKind, Position, Range, Url,
 };
 use shadml_parser::lexer::Token;
-use shadml_parser::parser::{Attribute, ConFields, Decl, DoStmt, Expr, ImportKind, Pat, Program, Type};
+use shadml_parser::parser::{
+    Attribute, ConFields, Decl, DoStmt, Expr, ImportKind, Pat, Program, Type,
+};
 use shadml_parser::{lex, Parser};
 use shadml_semantic::SemanticAnalyzer;
 use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
-use shadml_typechecker::{
-    format_scheme_surface, format_ty_surface_inferred, InferEngine, Scheme,
-};
+use shadml_typechecker::{format_scheme_surface, format_ty_surface_inferred, InferEngine, Scheme};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Namespace {
+pub enum Namespace {
     Value,
     Type,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum OccurrenceRole {
+pub enum OccurrenceRole {
     Definition,
     Reference,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum SymbolKind {
+pub enum SymbolKind {
     Function,
     EntryPoint,
     Binding,
@@ -42,6 +44,7 @@ enum SymbolKind {
     PatternBinding,
     Module,
     Import,
+    Unresolved,
     BuiltinType,
     DataType,
     TypeAlias,
@@ -52,17 +55,17 @@ enum SymbolKind {
 }
 
 #[derive(Clone, Debug)]
-struct Symbol {
-    id: usize,
-    name: String,
-    namespace: Namespace,
-    kind: SymbolKind,
-    primary_span: Span,
-    definition_spans: Vec<Span>,
-    scope_span: Span,
-    scope_depth: usize,
-    visible_from: u32,
-    container: Option<String>,
+pub struct Symbol {
+    pub id: usize,
+    pub name: String,
+    pub namespace: Namespace,
+    pub kind: SymbolKind,
+    pub primary_span: Span,
+    pub definition_spans: Vec<Span>,
+    pub scope_span: Span,
+    pub scope_depth: usize,
+    pub visible_from: u32,
+    pub container: Option<String>,
 }
 
 struct NewSymbol {
@@ -77,39 +80,43 @@ struct NewSymbol {
 }
 
 #[derive(Clone, Debug)]
-struct Occurrence {
-    symbol_id: usize,
-    span: Span,
-    role: OccurrenceRole,
+pub struct Occurrence {
+    pub symbol_id: usize,
+    pub span: Span,
+    pub role: OccurrenceRole,
 }
 
-#[derive(Default)]
-struct DocumentIndex {
-    symbols: Vec<Symbol>,
-    occurrences: Vec<Occurrence>,
+#[derive(Default, Clone)]
+pub struct DocumentIndex {
+    pub symbols: Vec<Symbol>,
+    pub occurrences: Vec<Occurrence>,
 }
 
-struct DocumentState<'a> {
-    source: &'a str,
-    analyzer: SemanticAnalyzer,
-    index: DocumentIndex,
-    symbol_types: HashMap<Span, String>,
-    explicit_signatures: HashMap<String, String>,
+/// Parsed and analyzed document state, ready for IDE queries.
+#[derive(Clone)]
+pub struct DocumentState {
+    pub source: Arc<str>,
+    pub analyzer: SemanticAnalyzer,
+    pub index: DocumentIndex,
+    pub symbol_types: HashMap<Span, String>,
+    pub explicit_signatures: HashMap<String, String>,
     /// Doc comments extracted from declarations, keyed by symbol name.
-    doc_comments: HashMap<String, String>,
+    pub doc_comments: HashMap<String, String>,
     /// Record field types, keyed by field name (for hover display).
-    field_types: HashMap<String, String>,
+    pub field_types: HashMap<String, String>,
 }
 
-struct IdeState<'a> {
-    source: &'a str,
-    analyzer: SemanticAnalyzer,
-    index: DocumentIndex,
-    symbol_types: HashMap<Span, String>,
-    explicit_signatures: HashMap<String, String>,
-    doc_comments: HashMap<String, String>,
-    field_types: HashMap<String, String>,
-    prelude: Option<DocumentState<'static>>,
+/// Full IDE state for a document, including optional prelude state.
+#[derive(Clone)]
+pub struct IdeState {
+    pub source: Arc<str>,
+    pub analyzer: SemanticAnalyzer,
+    pub index: DocumentIndex,
+    pub symbol_types: HashMap<Span, String>,
+    pub explicit_signatures: HashMap<String, String>,
+    pub doc_comments: HashMap<String, String>,
+    pub field_types: HashMap<String, String>,
+    pub prelude: Option<DocumentState>,
 }
 
 #[derive(Clone)]
@@ -208,6 +215,8 @@ struct IndexBuilder<'a> {
     impl_method_symbols: HashMap<String, Vec<usize>>,
     /// Record field name → symbol ID, for resolving field access and field init.
     field_symbols: HashMap<String, usize>,
+    /// Unresolved name → symbol ID, for hover on imported/unresolved references.
+    unresolved_symbols: HashMap<String, usize>,
 }
 
 impl<'a> IndexBuilder<'a> {
@@ -220,6 +229,7 @@ impl<'a> IndexBuilder<'a> {
             top_level_types: HashMap::new(),
             impl_method_symbols: HashMap::new(),
             field_symbols: HashMap::new(),
+            unresolved_symbols: HashMap::new(),
         }
     }
 
@@ -712,7 +722,9 @@ impl<'a> IndexBuilder<'a> {
 
                 // Walk constraints: trait name + type arguments
                 for constraint in constraints {
-                    if let Some(symbol_id) = self.top_level_types.get(&constraint.trait_name).copied() {
+                    if let Some(symbol_id) =
+                        self.top_level_types.get(&constraint.trait_name).copied()
+                    {
                         self.index.push_occurrence(
                             symbol_id,
                             constraint.span,
@@ -869,7 +881,9 @@ impl<'a> IndexBuilder<'a> {
                 self.walk_expr(value, frames);
             }
             Decl::TraitDecl {
-                methods, associated_types, ..
+                methods,
+                associated_types,
+                ..
             } => {
                 for at in associated_types {
                     if let Some(at_id) = self.top_level_types.get(&at.name).copied() {
@@ -901,7 +915,9 @@ impl<'a> IndexBuilder<'a> {
                 }
             }
             Decl::BuiltinImplDecl {
-                tys, associated_types, ..
+                tys,
+                associated_types,
+                ..
             } => {
                 for ty in tys {
                     self.walk_type(ty, frames);
@@ -914,7 +930,12 @@ impl<'a> IndexBuilder<'a> {
                 self.walk_type(ty, frames);
             }
             Decl::ModuleDecl { .. } | Decl::ImportDecl { .. } => {}
-            Decl::RenderBlock { bindings, entries, span, .. } => {
+            Decl::RenderBlock {
+                bindings,
+                entries,
+                span,
+                ..
+            } => {
                 for rb_decl in bindings.iter().chain(entries.iter()) {
                     self.walk_decl(rb_decl, frames);
                 }
@@ -980,6 +1001,27 @@ impl<'a> IndexBuilder<'a> {
                 if let Some(symbol_id) = self.resolve_value(name, frames) {
                     self.index
                         .push_occurrence(symbol_id, *span, OccurrenceRole::Reference);
+                } else {
+                    // Unresolved reference (typically imported) — create a placeholder
+                    // symbol so hover still shows the identifier.
+                    let symbol_id =
+                        *self
+                            .unresolved_symbols
+                            .entry(name.clone())
+                            .or_insert_with(|| {
+                                self.index.push_symbol(NewSymbol {
+                                    name: name.clone(),
+                                    namespace: Namespace::Value,
+                                    kind: SymbolKind::Unresolved,
+                                    span: *span,
+                                    scope_span: *span,
+                                    scope_depth: 0,
+                                    visible_from: span.start,
+                                    container: None,
+                                })
+                            });
+                    self.index
+                        .push_occurrence(symbol_id, *span, OccurrenceRole::Reference);
                 }
             }
             Expr::App(left, right, _) => {
@@ -1014,7 +1056,9 @@ impl<'a> IndexBuilder<'a> {
                         visible_from: span.start,
                         container: frames[depth].container.clone(),
                     });
-                    frames[depth].value_defs.insert(bind.name.clone(), symbol_id);
+                    frames[depth]
+                        .value_defs
+                        .insert(bind.name.clone(), symbol_id);
                 }
                 for bind in bindings {
                     self.walk_expr(&bind.expr, frames);
@@ -1116,7 +1160,9 @@ impl<'a> IndexBuilder<'a> {
                                 visible_from: bind.span.start,
                                 container: frames[depth].container.clone(),
                             });
-                            frames[depth].value_defs.insert(bind.name.clone(), symbol_id);
+                            frames[depth]
+                                .value_defs
+                                .insert(bind.name.clone(), symbol_id);
                         }
                         DoStmt::Expr(value, _) => self.walk_expr(value, frames),
                     }
@@ -1202,11 +1248,12 @@ impl<'a> IndexBuilder<'a> {
                     let symbol = &self.index.symbols[symbol_id];
                     if symbol.kind == SymbolKind::AssociatedType {
                         // Compute the span of just the name token (after the dot)
-                        if let Some(name_span) =
-                            self.first_name_span(name, *span)
-                        {
-                            self.index
-                                .push_occurrence(symbol_id, name_span, OccurrenceRole::Reference);
+                        if let Some(name_span) = self.first_name_span(name, *span) {
+                            self.index.push_occurrence(
+                                symbol_id,
+                                name_span,
+                                OccurrenceRole::Reference,
+                            );
                         }
                     }
                 }
@@ -1384,11 +1431,16 @@ pub fn build_completions_with_prelude_flag(
     pos: Position,
     is_compiler_prelude: bool,
 ) -> Vec<CompletionItem> {
-    let prefix = completion_prefix(source, pos);
-    let context = completion_context(source, pos, &prefix);
-    let is_member_context = is_member_completion_context(source, pos, &prefix);
-    let offset = position_to_offset(source, pos).unwrap_or(source.len()) as u32;
     let state = build_ide_state(source, is_compiler_prelude);
+    completions(&state, pos)
+}
+
+/// Compute completion items for the token at `pos` using a pre-built `IdeState`.
+pub fn completions(state: &IdeState, pos: Position) -> Vec<CompletionItem> {
+    let prefix = completion_prefix(&state.source, pos);
+    let context = completion_context(&state.source, pos, &prefix);
+    let is_member_context = is_member_completion_context(&state.source, pos, &prefix);
+    let offset = position_to_offset(&state.source, pos).unwrap_or(state.source.len()) as u32;
 
     let mut items = Vec::new();
     let mut seen = HashSet::new();
@@ -1406,7 +1458,7 @@ pub fn build_completions_with_prelude_flag(
             SyntaxKind::Ident
         };
         if context != CompletionContext::Attribute
-            && prelude_symbol(&state, spec.label, token_kind).is_some()
+            && prelude_symbol(state, spec.label, token_kind).is_some()
         {
             continue;
         }
@@ -1433,16 +1485,16 @@ pub fn build_completions_with_prelude_flag(
         }
     }
 
-    for symbol in prelude_completion_symbols(&state, context)
+    for symbol in prelude_completion_symbols(state, context)
         .filter(|symbol| matches_prefix(&symbol.name, &prefix))
     {
         if seen.contains(&symbol.name) {
             continue;
         }
         let kind = completion_kind_for_symbol(symbol);
-        let documentation = prelude_symbol_markdown(&state, symbol)
+        let documentation = prelude_symbol_markdown(state, symbol)
             .unwrap_or_else(|| generic_builtin_markdown_text(&symbol.name, ""));
-        let detail = prelude_symbol_detail(&state, symbol).unwrap_or_else(|| "builtin".to_owned());
+        let detail = prelude_symbol_detail(state, symbol).unwrap_or_else(|| "builtin".to_owned());
         items.push(CompletionItem {
             label: symbol.name.clone(),
             kind: Some(kind),
@@ -1506,8 +1558,8 @@ pub fn build_completions_with_prelude_flag(
 
     for symbol in chosen.into_values() {
         let kind = completion_kind_for_symbol(symbol);
-        let documentation = symbol_markdown(&state, symbol);
-        let detail = symbol_detail(&state, symbol);
+        let documentation = symbol_markdown(state, symbol);
+        let detail = symbol_detail(state, symbol);
         items.retain(|item| item.label != symbol.name);
         items.push(CompletionItem {
             label: symbol.name.clone(),
@@ -1545,40 +1597,47 @@ pub fn build_hover_with_prelude_flag(
     pos: Position,
     is_compiler_prelude: bool,
 ) -> Option<Hover> {
-    let offset = position_to_offset(source, pos)? as u32;
-    let tokens = lex(source);
+    let state = build_ide_state(source, is_compiler_prelude);
+    hover(&state, pos)
+}
+
+/// Compute hover information for the token at `pos` using a pre-built `IdeState`.
+pub fn hover(state: &IdeState, pos: Position) -> Option<Hover> {
+    let offset = position_to_offset(&state.source, pos)? as u32;
+    let tokens = lex(&state.source);
     let (tok_index, tok) = tokens
         .iter()
         .enumerate()
         .find(|(_, token)| token.span.start <= offset && offset < token.span.end)?;
-    let range = span_to_range(source, tok.span);
-    let state = build_ide_state(source, is_compiler_prelude);
+    let range = span_to_range(&state.source, tok.span);
 
     match tok.kind {
         SyntaxKind::Ident | SyntaxKind::UpperIdent => {
-            let name = tok.text(source);
+            let name = tok.text(&state.source);
 
             if previous_non_trivia_token(&tokens, tok_index)
                 .is_some_and(|prev| prev.kind == SyntaxKind::At)
             {
                 if let Some(spec) = lookup_completion_spec(name, CompletionContext::Attribute) {
-                    return Some(spec_hover(&state, spec, range, Some(name)));
+                    return Some(spec_hover(state, spec, range, Some(name)));
                 }
             }
 
             if let Some(occurrence) = state.index.symbol_at_offset(offset) {
                 let symbol = &state.index.symbols[occurrence.symbol_id];
-                return Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: symbol_markdown(&state, symbol),
-                    }),
-                    range: Some(range),
-                });
+                if symbol.kind != SymbolKind::Unresolved {
+                    return Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: symbol_markdown(state, symbol),
+                        }),
+                        range: Some(range),
+                    });
+                }
             }
 
-            if let Some(symbol) = prelude_symbol(&state, name, tok.kind) {
-                if let Some(markdown) = prelude_symbol_markdown(&state, symbol) {
+            if let Some(symbol) = prelude_symbol(state, name, tok.kind) {
+                if let Some(markdown) = prelude_symbol_markdown(state, symbol) {
                     return Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
                             kind: MarkupKind::Markdown,
@@ -1590,10 +1649,10 @@ pub fn build_hover_with_prelude_flag(
             }
 
             if let Some(spec) = lookup_non_attribute_spec(name) {
-                return Some(spec_hover(&state, spec, range, Some(name)));
+                return Some(spec_hover(state, spec, range, Some(name)));
             }
 
-            if let Some(markdown) = generic_builtin_markdown(&state, name) {
+            if let Some(markdown) = generic_builtin_markdown(state, name) {
                 return Some(Hover {
                     contents: HoverContents::Markup(MarkupContent {
                         kind: MarkupKind::Markdown,
@@ -1603,11 +1662,31 @@ pub fn build_hover_with_prelude_flag(
                 });
             }
 
-            None
+            // Imported or otherwise unresolved symbol that the merged-program
+            // analyzer knows about (e.g. `getFrameSize` imported from another
+            // module).
+            if let Some(scheme) = state.analyzer.env.lookup(name) {
+                let signature = format_scheme(&state.analyzer.engine, scheme);
+                return Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: format!("```shadml\n{} : {}\n```", name, signature),
+                    }),
+                    range: Some(range),
+                });
+            }
+
+            Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("`{}`", name),
+                }),
+                range: Some(range),
+            })
         }
         kind if kind.is_keyword() => {
-            let keyword = tok.text(source);
-            lookup_non_attribute_spec(keyword).map(|spec| spec_hover(&state, spec, range, None))
+            let keyword = tok.text(&state.source);
+            lookup_non_attribute_spec(keyword).map(|spec| spec_hover(state, spec, range, None))
         }
         SyntaxKind::At => Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -1623,7 +1702,7 @@ pub fn build_hover_with_prelude_flag(
                 .get(&tok.span)
                 .map(|ty| format_ty(&state.analyzer.engine, ty))
                 .unwrap_or_else(|| "unknown".to_owned());
-            let lit = tok.text(source);
+            let lit = tok.text(&state.source);
             let label = match kind {
                 SyntaxKind::IntLiteral => "integer literal",
                 SyntaxKind::FloatLiteral => "float literal",
@@ -1657,55 +1736,67 @@ pub fn build_goto_definition_with_prelude_flag(
     pos: Position,
     is_compiler_prelude: bool,
 ) -> Option<GotoDefinitionResponse> {
-    let offset = position_to_offset(source, pos)? as u32;
-    let tokens = lex(source);
     let state = build_ide_state(source, is_compiler_prelude);
+    goto_definition(&state, uri, pos)
+}
+
+/// Compute goto-definition for the token at `pos` using a pre-built `IdeState`.
+pub fn goto_definition(
+    state: &IdeState,
+    uri: &Url,
+    pos: Position,
+) -> Option<GotoDefinitionResponse> {
+    let offset = position_to_offset(&state.source, pos)? as u32;
+    let tokens = lex(&state.source);
     if let Some(occurrence) = state.index.symbol_at_offset(offset) {
         let symbol = &state.index.symbols[occurrence.symbol_id];
-        if occurrence.role == OccurrenceRole::Definition && symbol.kind == SymbolKind::PatternBinding
-        {
-            if let Some(field_occurrence) = state.index.occurrences.iter().find(|candidate| {
-                candidate.span == occurrence.span
-                    && candidate.role == OccurrenceRole::Reference
-                    && state.index.symbols[candidate.symbol_id].kind == SymbolKind::RecordField
-            }) {
-                let field_symbol = &state.index.symbols[field_occurrence.symbol_id];
-                let locations = field_symbol
-                    .definition_spans
-                    .iter()
-                    .copied()
-                    .map(|span| Location {
-                        uri: uri.clone(),
-                        range: span_to_range(source, span),
-                    })
-                    .collect::<Vec<_>>();
-                return match locations.as_slice() {
-                    [] => None,
-                    [single] => Some(GotoDefinitionResponse::Scalar(single.clone())),
-                    _ => Some(GotoDefinitionResponse::Array(locations)),
-                };
+        if symbol.kind != SymbolKind::Unresolved {
+            if occurrence.role == OccurrenceRole::Definition
+                && symbol.kind == SymbolKind::PatternBinding
+            {
+                if let Some(field_occurrence) = state.index.occurrences.iter().find(|candidate| {
+                    candidate.span == occurrence.span
+                        && candidate.role == OccurrenceRole::Reference
+                        && state.index.symbols[candidate.symbol_id].kind == SymbolKind::RecordField
+                }) {
+                    let field_symbol = &state.index.symbols[field_occurrence.symbol_id];
+                    let locations = field_symbol
+                        .definition_spans
+                        .iter()
+                        .copied()
+                        .map(|span| Location {
+                            uri: uri.clone(),
+                            range: span_to_range(&state.source, span),
+                        })
+                        .collect::<Vec<_>>();
+                    return match locations.as_slice() {
+                        [] => None,
+                        [single] => Some(GotoDefinitionResponse::Scalar(single.clone())),
+                        _ => Some(GotoDefinitionResponse::Array(locations)),
+                    };
+                }
             }
-        }
-        let mut definition_spans = symbol.definition_spans.clone();
-        definition_spans.sort_by(|left, right| {
-            left.start
-                .cmp(&right.start)
-                .then_with(|| left.end.cmp(&right.end))
-        });
-        definition_spans.dedup();
-        let locations = definition_spans
-            .into_iter()
-            .map(|span| Location {
-                uri: uri.clone(),
-                range: span_to_range(source, span),
-            })
-            .collect::<Vec<_>>();
+            let mut definition_spans = symbol.definition_spans.clone();
+            definition_spans.sort_by(|left, right| {
+                left.start
+                    .cmp(&right.start)
+                    .then_with(|| left.end.cmp(&right.end))
+            });
+            definition_spans.dedup();
+            let locations = definition_spans
+                .into_iter()
+                .map(|span| Location {
+                    uri: uri.clone(),
+                    range: span_to_range(&state.source, span),
+                })
+                .collect::<Vec<_>>();
 
-        return match locations.as_slice() {
-            [] => None,
-            [single] => Some(GotoDefinitionResponse::Scalar(single.clone())),
-            _ => Some(GotoDefinitionResponse::Array(locations)),
-        };
+            return match locations.as_slice() {
+                [] => None,
+                [single] => Some(GotoDefinitionResponse::Scalar(single.clone())),
+                _ => Some(GotoDefinitionResponse::Array(locations)),
+            };
+        }
     }
 
     let token = tokens.iter().find(|token| {
@@ -1713,7 +1804,7 @@ pub fn build_goto_definition_with_prelude_flag(
             && token.span.start <= offset
             && offset < token.span.end
     })?;
-    let symbol = prelude_symbol(&state, token.text(source), token.kind)?;
+    let symbol = prelude_symbol(state, token.text(&state.source), token.kind)?;
     let prelude_source = shadml_parser::prelude_source();
     let prelude_uri = {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1746,6 +1837,11 @@ pub fn build_goto_definition_with_prelude_flag(
 /// on imported names.
 pub fn find_definition_ranges(source: &str, name: &str) -> Vec<Range> {
     let state = build_ide_state(source, false);
+    find_definition_ranges_with_state(&state, name)
+}
+
+/// Find definition ranges using a pre-built `IdeState`.
+pub fn find_definition_ranges_with_state(state: &IdeState, name: &str) -> Vec<Range> {
     let symbol = match state.index.symbols.iter().find(|s| s.name == name) {
         Some(s) => s,
         None => return Vec::new(),
@@ -1754,7 +1850,7 @@ pub fn find_definition_ranges(source: &str, name: &str) -> Vec<Range> {
         .definition_spans
         .iter()
         .copied()
-        .map(|span| span_to_range(source, span))
+        .map(|span| span_to_range(&state.source, span))
         .collect();
     ranges.sort_by(|a, b| {
         a.start
@@ -1782,8 +1878,18 @@ pub fn build_references_with_prelude_flag(
     include_declaration: bool,
     is_compiler_prelude: bool,
 ) -> Option<Vec<Location>> {
-    let offset = position_to_offset(source, pos)? as u32;
     let state = build_ide_state(source, is_compiler_prelude);
+    references(&state, uri, pos, include_declaration)
+}
+
+/// Compute references for the token at `pos` using a pre-built `IdeState`.
+pub fn references(
+    state: &IdeState,
+    uri: &Url,
+    pos: Position,
+    include_declaration: bool,
+) -> Option<Vec<Location>> {
+    let offset = position_to_offset(&state.source, pos)? as u32;
     let occurrence = state.index.symbol_at_offset(offset)?;
     let mut locations = state
         .index
@@ -1793,7 +1899,7 @@ pub fn build_references_with_prelude_flag(
         .filter(|candidate| include_declaration || candidate.role != OccurrenceRole::Definition)
         .map(|candidate| Location {
             uri: uri.clone(),
-            range: span_to_range(source, candidate.span),
+            range: span_to_range(&state.source, candidate.span),
         })
         .collect::<Vec<_>>();
 
@@ -1813,11 +1919,41 @@ pub fn build_references_with_prelude_flag(
     }
 }
 
-fn build_ide_state(source: &str, is_compiler_prelude: bool) -> IdeState<'_> {
+/// Build an `IdeState` from source text, optionally resolving imports.
+///
+/// When `file_path` is provided and the source contains imports, this
+/// resolves imported modules from `search_paths`, merges them, and runs
+/// semantic analysis on the combined program. This gives accurate types
+/// for imported symbols in hover, goto-definition, and completion.
+///
+/// Returns `(state, errors)` where `errors` contains any module-resolution
+/// diagnostics (e.g. missing imports).
+pub fn build_ide_state_with_imports(
+    source: &str,
+    file_path: Option<&Path>,
+    search_paths: &[PathBuf],
+    is_compiler_prelude: bool,
+) -> (IdeState, Vec<String>) {
     let mut parser = Parser::new(source);
-    let user_program = parser.parse_program();
+    let original_program = parser.parse_program();
+    let mut user_program = original_program.clone();
+    let mut errors = Vec::new();
 
-    // Prepend prelude declarations for type environment (semantic analysis only)
+    if let Some(path) = file_path {
+        if has_imports(&user_program) {
+            let reader = shadml_parser::FsReader;
+            match shadml_parser::resolve_modules(path, user_program.clone(), search_paths, &reader)
+            {
+                Ok(graph) => {
+                    user_program = shadml_parser::merge_modules(&graph);
+                }
+                Err(errs) => {
+                    errors.extend(errs.iter().map(|e| e.to_string()));
+                }
+            }
+        }
+    }
+
     let full_program = if is_compiler_prelude || source == shadml_parser::prelude_source() {
         user_program.clone()
     } else {
@@ -1826,46 +1962,83 @@ fn build_ide_state(source: &str, is_compiler_prelude: bool) -> IdeState<'_> {
         combined.extend(user_program.decls.iter().cloned());
         Program { decls: combined }
     };
-    let document = build_document_state(source, &user_program, &full_program);
+    // Index only the user's own declarations so spans point to the
+    // correct source file. The semantic analyzer still sees the merged
+    // program (imports + prelude) for accurate type information.
+    let source_arc: Arc<str> = Arc::from(source);
+    let document = build_document_state(source_arc.clone(), &original_program, &full_program);
     let prelude = if is_compiler_prelude || source == shadml_parser::prelude_source() {
         None
     } else {
         let prelude_program = shadml_parser::prelude_program();
         Some(build_document_state(
-            shadml_parser::prelude_source(),
+            Arc::from(shadml_parser::prelude_source()),
             prelude_program,
             prelude_program,
         ))
     };
 
-    IdeState {
-        source: document.source,
-        analyzer: document.analyzer,
-        index: document.index,
-        symbol_types: document.symbol_types,
-        explicit_signatures: document.explicit_signatures,
-        doc_comments: document.doc_comments,
-        field_types: document.field_types,
-        prelude,
-    }
+    (
+        IdeState {
+            source: document.source,
+            analyzer: document.analyzer,
+            index: document.index,
+            symbol_types: document.symbol_types,
+            explicit_signatures: document.explicit_signatures,
+            doc_comments: document.doc_comments,
+            field_types: document.field_types,
+            prelude,
+        },
+        errors,
+    )
 }
 
-fn build_document_state<'a>(
-    source: &'a str,
+/// Convenience wrapper: build an `IdeState` without import resolution.
+pub fn build_ide_state(source: &str, is_compiler_prelude: bool) -> IdeState {
+    let (state, _) = build_ide_state_with_imports(source, None, &[], is_compiler_prelude);
+    state
+}
+
+fn has_imports(program: &Program) -> bool {
+    program.decls.iter().any(|d| match d {
+        Decl::ImportDecl { .. } => true,
+        Decl::CfgDecl {
+            then_decls,
+            else_decls,
+            ..
+        } => has_imports_in(then_decls) || has_imports_in(else_decls),
+        _ => false,
+    })
+}
+
+fn has_imports_in(decls: &[Decl]) -> bool {
+    decls.iter().any(|d| match d {
+        Decl::ImportDecl { .. } => true,
+        Decl::CfgDecl {
+            then_decls,
+            else_decls,
+            ..
+        } => has_imports_in(then_decls) || has_imports_in(else_decls),
+        _ => false,
+    })
+}
+
+fn build_document_state(
+    source: Arc<str>,
     user_program: &Program,
     full_program: &Program,
-) -> DocumentState<'a> {
+) -> DocumentState {
     let mut analyzer = SemanticAnalyzer::new();
     analyzer.analyze(full_program);
 
     DocumentState {
-        source,
-        index: IndexBuilder::new(source).build(user_program),
+        index: IndexBuilder::new(&source).build(user_program),
         symbol_types: collect_symbol_types(user_program, &analyzer),
-        explicit_signatures: extract_explicit_signatures(user_program, source),
+        explicit_signatures: extract_explicit_signatures(user_program, &source),
         doc_comments: extract_doc_comments(user_program),
-        field_types: extract_field_types(user_program, source),
+        field_types: extract_field_types(user_program, &source),
         analyzer,
+        source,
     }
 }
 
@@ -2109,19 +2282,19 @@ fn is_word_completion(label: &str) -> bool {
 fn completion_kind_for_symbol(symbol: &Symbol) -> CompletionItemKind {
     match symbol.kind {
         SymbolKind::Function | SymbolKind::EntryPoint => CompletionItemKind::FUNCTION,
-        SymbolKind::Binding | SymbolKind::Parameter | SymbolKind::LocalBinding | SymbolKind::PatternBinding => {
-            CompletionItemKind::VARIABLE
-        }
+        SymbolKind::Binding
+        | SymbolKind::Parameter
+        | SymbolKind::LocalBinding
+        | SymbolKind::PatternBinding => CompletionItemKind::VARIABLE,
         SymbolKind::Constructor => CompletionItemKind::CONSTRUCTOR,
         SymbolKind::Module | SymbolKind::Import => CompletionItemKind::MODULE,
         SymbolKind::BuiltinType
         | SymbolKind::DataType
         | SymbolKind::TypeAlias
         | SymbolKind::AssociatedType
-        | SymbolKind::TypeParameter => {
-            CompletionItemKind::TYPE_PARAMETER
-        }
+        | SymbolKind::TypeParameter => CompletionItemKind::TYPE_PARAMETER,
         SymbolKind::RecordField => CompletionItemKind::FIELD,
+        SymbolKind::Unresolved => CompletionItemKind::VARIABLE,
     }
 }
 
@@ -2154,7 +2327,7 @@ fn generic_builtin_completion_item(
     }
 }
 
-fn generic_builtin_markdown(state: &IdeState<'_>, label: &str) -> Option<String> {
+fn generic_builtin_markdown(state: &IdeState, label: &str) -> Option<String> {
     state.analyzer.env.lookup(label).map(|scheme| {
         generic_builtin_markdown_text(label, &format_scheme(&state.analyzer.engine, scheme))
     })
@@ -2168,7 +2341,7 @@ fn generic_builtin_markdown_text(label: &str, signature: &str) -> String {
 }
 
 fn prelude_symbol<'a>(
-    state: &'a IdeState<'_>,
+    state: &'a IdeState,
     name: &str,
     token_kind: SyntaxKind,
 ) -> Option<&'a Symbol> {
@@ -2199,47 +2372,60 @@ fn prelude_symbol<'a>(
     matches.first().copied()
 }
 
-fn prelude_completion_symbols<'a>(
-    state: &'a IdeState<'_>,
+fn prelude_completion_symbols(
+    state: &IdeState,
     context: CompletionContext,
-) -> impl Iterator<Item = &'a Symbol> {
+) -> impl Iterator<Item = &Symbol> {
     state
         .prelude
         .iter()
         .flat_map(move |prelude| prelude.index.visible_symbols(0, context))
 }
 
-fn prelude_symbol_markdown(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
+fn prelude_symbol_markdown(state: &IdeState, symbol: &Symbol) -> Option<String> {
     let prelude = state.prelude.as_ref()?;
     Some(document_symbol_markdown(prelude, symbol))
 }
 
-fn prelude_symbol_detail(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
+fn prelude_symbol_detail(state: &IdeState, symbol: &Symbol) -> Option<String> {
     let prelude = state.prelude.as_ref()?;
     Some(document_symbol_detail(prelude, symbol))
 }
 
-fn document_symbol_detail(state: &DocumentState<'_>, symbol: &Symbol) -> String {
+fn document_symbol_detail(state: &DocumentState, symbol: &Symbol) -> String {
     match symbol.kind {
         SymbolKind::Function => state
             .analyzer
             .env
             .lookup(&symbol.name)
-            .map(|scheme| format!("binding : {}", format_scheme(&state.analyzer.engine, scheme)))
+            .map(|scheme| {
+                format!(
+                    "binding : {}",
+                    format_scheme(&state.analyzer.engine, scheme)
+                )
+            })
             .unwrap_or_else(|| "binding".to_owned()),
         SymbolKind::EntryPoint => state
             .analyzer
             .env
             .lookup(&symbol.name)
             .map(|scheme| {
-                format!("entry point : {}", format_scheme(&state.analyzer.engine, scheme))
+                format!(
+                    "entry point : {}",
+                    format_scheme(&state.analyzer.engine, scheme)
+                )
             })
             .unwrap_or_else(|| "entry point".to_owned()),
         SymbolKind::Binding => state
             .analyzer
             .env
             .lookup(&symbol.name)
-            .map(|scheme| format!("binding : {}", format_scheme(&state.analyzer.engine, scheme)))
+            .map(|scheme| {
+                format!(
+                    "binding : {}",
+                    format_scheme(&state.analyzer.engine, scheme)
+                )
+            })
             .unwrap_or_else(|| "binding".to_owned()),
         SymbolKind::Module => "module".to_owned(),
         SymbolKind::Import => "import".to_owned(),
@@ -2279,10 +2465,14 @@ fn document_symbol_detail(state: &DocumentState<'_>, symbol: &Symbol) -> String 
         SymbolKind::AssociatedType => "associated type".to_owned(),
         SymbolKind::TypeParameter => "type parameter".to_owned(),
         SymbolKind::RecordField => "record field".to_owned(),
+        SymbolKind::Unresolved => symbol.container.as_ref().map_or_else(
+            || "unresolved reference".to_owned(),
+            |c| format!("unresolved reference (from {})", c),
+        ),
     }
 }
 
-fn document_symbol_markdown(state: &DocumentState<'_>, symbol: &Symbol) -> String {
+fn document_symbol_markdown(state: &DocumentState, symbol: &Symbol) -> String {
     let mut sections = Vec::new();
 
     if let Some(signature) = document_symbol_signature(state, symbol) {
@@ -2314,7 +2504,7 @@ fn document_symbol_markdown(state: &DocumentState<'_>, symbol: &Symbol) -> Strin
     sections.join("\n\n")
 }
 
-fn document_symbol_signature(state: &DocumentState<'_>, symbol: &Symbol) -> Option<String> {
+fn document_symbol_signature(state: &DocumentState, symbol: &Symbol) -> Option<String> {
     match symbol.kind {
         SymbolKind::BuiltinType
         | SymbolKind::DataType
@@ -2339,7 +2529,7 @@ fn document_symbol_signature(state: &DocumentState<'_>, symbol: &Symbol) -> Opti
     }
 }
 
-fn document_symbol_summary(state: &DocumentState<'_>, symbol: &Symbol) -> String {
+fn document_symbol_summary(state: &DocumentState, symbol: &Symbol) -> String {
     match symbol.kind {
         SymbolKind::Function => "Top-level binding from this document.".to_owned(),
         SymbolKind::EntryPoint => "Shader entry point from this document.".to_owned(),
@@ -2396,11 +2586,15 @@ fn document_symbol_summary(state: &DocumentState<'_>, symbol: &Symbol) -> String
             Some(container) => format!("Field of `{}`.", container),
             None => "Record field.".to_owned(),
         },
+        SymbolKind::Unresolved => symbol.container.as_ref().map_or_else(
+            || "Unresolved reference — no type information available.".to_owned(),
+            |c| format!("Unresolved reference from `{}`.", c),
+        ),
     }
 }
 
-fn document_declaration_excerpt(state: &DocumentState<'_>, symbol: &Symbol) -> Option<String> {
-    let line_index = compute_line_starts(state.source)
+fn document_declaration_excerpt(state: &DocumentState, symbol: &Symbol) -> Option<String> {
+    let line_index = compute_line_starts(&state.source)
         .binary_search(&symbol.primary_span.start)
         .unwrap_or_else(|index| index.saturating_sub(1));
     state
@@ -2411,7 +2605,7 @@ fn document_declaration_excerpt(state: &DocumentState<'_>, symbol: &Symbol) -> O
         .filter(|line| !line.is_empty())
 }
 
-fn symbol_detail(state: &IdeState<'_>, symbol: &Symbol) -> String {
+fn symbol_detail(state: &IdeState, symbol: &Symbol) -> String {
     match symbol.kind {
         SymbolKind::Function => state
             .analyzer
@@ -2439,7 +2633,12 @@ fn symbol_detail(state: &IdeState<'_>, symbol: &Symbol) -> String {
             .analyzer
             .env
             .lookup(&symbol.name)
-            .map(|scheme| format!("binding : {}", format_scheme(&state.analyzer.engine, scheme)))
+            .map(|scheme| {
+                format!(
+                    "binding : {}",
+                    format_scheme(&state.analyzer.engine, scheme)
+                )
+            })
             .unwrap_or_else(|| "binding".to_owned()),
         SymbolKind::Module => "module".to_owned(),
         SymbolKind::Import => "import".to_owned(),
@@ -2474,10 +2673,14 @@ fn symbol_detail(state: &IdeState<'_>, symbol: &Symbol) -> String {
         SymbolKind::AssociatedType => "associated type".to_owned(),
         SymbolKind::TypeParameter => "type parameter".to_owned(),
         SymbolKind::RecordField => "record field".to_owned(),
+        SymbolKind::Unresolved => symbol.container.as_ref().map_or_else(
+            || "unresolved reference".to_owned(),
+            |c| format!("unresolved reference (from {})", c),
+        ),
     }
 }
 
-fn symbol_markdown(state: &IdeState<'_>, symbol: &Symbol) -> String {
+fn symbol_markdown(state: &IdeState, symbol: &Symbol) -> String {
     let mut sections = Vec::new();
 
     if let Some(signature) = symbol_signature(state, symbol) {
@@ -2509,7 +2712,7 @@ fn symbol_markdown(state: &IdeState<'_>, symbol: &Symbol) -> String {
     sections.join("\n\n")
 }
 
-fn symbol_signature(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
+fn symbol_signature(state: &IdeState, symbol: &Symbol) -> Option<String> {
     match symbol.kind {
         SymbolKind::BuiltinType
         | SymbolKind::DataType
@@ -2534,7 +2737,7 @@ fn symbol_signature(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
     }
 }
 
-fn symbol_summary(state: &IdeState<'_>, symbol: &Symbol) -> String {
+fn symbol_summary(state: &IdeState, symbol: &Symbol) -> String {
     match symbol.kind {
         SymbolKind::Function => "Top-level binding from this document.".to_owned(),
         SymbolKind::EntryPoint => "Shader entry point from this document.".to_owned(),
@@ -2591,11 +2794,15 @@ fn symbol_summary(state: &IdeState<'_>, symbol: &Symbol) -> String {
             Some(container) => format!("Field of `{}`.", container),
             None => "Record field.".to_owned(),
         },
+        SymbolKind::Unresolved => symbol.container.as_ref().map_or_else(
+            || "Unresolved reference — no type information available.".to_owned(),
+            |c| format!("Unresolved reference from `{}`.", c),
+        ),
     }
 }
 
-fn declaration_excerpt(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
-    let line_index = compute_line_starts(state.source)
+fn declaration_excerpt(state: &IdeState, symbol: &Symbol) -> Option<String> {
+    let line_index = compute_line_starts(&state.source)
         .binary_search(&symbol.primary_span.start)
         .unwrap_or_else(|index| index.saturating_sub(1));
     state
@@ -2619,7 +2826,7 @@ fn lookup_non_attribute_spec(label: &str) -> Option<&'static CompletionSpec> {
 }
 
 fn spec_hover(
-    state: &IdeState<'_>,
+    state: &IdeState,
     spec: &CompletionSpec,
     range: Range,
     symbol_name: Option<&str>,
@@ -2669,54 +2876,54 @@ fn format_ty(engine: &InferEngine, ty: &shadml_typechecker::Ty) -> String {
     format_ty_surface_inferred(ty, Some(&engine.subst))
 }
 
-fn collect_symbol_types(
-    program: &Program,
-    analyzer: &SemanticAnalyzer,
-) -> HashMap<Span, String> {
+fn format_ty_resolved(analyzer: &SemanticAnalyzer, ty: &shadml_typechecker::Ty) -> String {
+    let resolved = shadml_semantic::resolve_assoc_projections_with_impls(
+        ty,
+        &analyzer.impls,
+        &analyzer.builtin_impls,
+    );
+    format_ty(&analyzer.engine, &resolved)
+}
+
+fn collect_symbol_types(program: &Program, analyzer: &SemanticAnalyzer) -> HashMap<Span, String> {
     let mut types = analyzer
         .local_binding_schemes
         .iter()
-        .map(|(span, scheme)| (*span, format_scheme(&analyzer.engine, scheme)))
+        .map(|(span, scheme)| {
+            let resolved_ty = shadml_semantic::resolve_assoc_projections_with_impls(
+                &scheme.ty,
+                &analyzer.impls,
+                &analyzer.builtin_impls,
+            );
+            let resolved_scheme = shadml_typechecker::Scheme {
+                vars: scheme.vars.clone(),
+                ty: resolved_ty,
+                constraints: scheme.constraints.clone(),
+            };
+            (*span, format_scheme(&analyzer.engine, &resolved_scheme))
+        })
         .collect::<HashMap<_, _>>();
     let all_decls = Decl::flatten_cfg_decls(&program.decls);
     let mut impl_infos = analyzer.impls.iter();
     for decl in &all_decls {
         match decl {
             Decl::FunDecl {
-                name,
-                params,
-                span,
-                ..
+                name, params, span, ..
             } => {
-                if let Some(scheme) = analyzer.env.lookup(name) {
-                    let mut cursor = analyzer.engine.finalize(&scheme.ty);
-                    for pat in params {
-                        if let shadml_typechecker::Ty::Arrow(from, to) = cursor {
-                            collect_pattern_types(pat, from.as_ref(), analyzer, &mut types);
-                            cursor = (*to).clone();
-                        } else {
-                            let _ = span;
-                            break;
-                        }
-                    }
-                }
+                collect_entry_param_types(name, params, *span, analyzer, &mut types);
             }
             Decl::EntryPoint {
-                name,
-                params,
-                span,
-                ..
+                name, params, span, ..
             } => {
-                if let Some(scheme) = analyzer.env.lookup(name) {
-                    let mut cursor = analyzer.engine.finalize(&scheme.ty);
-                    for pat in params {
-                        if let shadml_typechecker::Ty::Arrow(from, to) = cursor {
-                            collect_pattern_types(pat, from.as_ref(), analyzer, &mut types);
-                            cursor = (*to).clone();
-                        } else {
-                            let _ = span;
-                            break;
-                        }
+                collect_entry_param_types(name, params, *span, analyzer, &mut types);
+            }
+            Decl::RenderBlock { entries, .. } => {
+                for entry in entries {
+                    if let Decl::EntryPoint {
+                        name, params, span, ..
+                    } = entry
+                    {
+                        collect_entry_param_types(name, params, *span, analyzer, &mut types);
                     }
                 }
             }
@@ -2728,7 +2935,7 @@ fn collect_symbol_types(
                     let Some(mangled) = impl_info.methods.get(&method.name) else {
                         continue;
                     };
-                    if let Some(scheme) = analyzer.env.lookup(&mangled) {
+                    if let Some(scheme) = analyzer.env.lookup(mangled) {
                         let mut cursor = analyzer.engine.finalize(&scheme.ty);
                         for pat in &method.params {
                             if let shadml_typechecker::Ty::Arrow(from, to) = cursor {
@@ -2748,6 +2955,27 @@ fn collect_symbol_types(
     types
 }
 
+fn collect_entry_param_types(
+    name: &str,
+    params: &[Pat],
+    span: Span,
+    analyzer: &SemanticAnalyzer,
+    types: &mut HashMap<Span, String>,
+) {
+    if let Some(scheme) = analyzer.env.lookup(name) {
+        let mut cursor = analyzer.engine.finalize(&scheme.ty);
+        for pat in params {
+            if let shadml_typechecker::Ty::Arrow(from, to) = cursor {
+                collect_pattern_types(pat, from.as_ref(), analyzer, types);
+                cursor = (*to).clone();
+            } else {
+                let _ = span;
+                break;
+            }
+        }
+    }
+}
+
 fn collect_pattern_types(
     pattern: &Pat,
     ty: &shadml_typechecker::Ty,
@@ -2756,7 +2984,7 @@ fn collect_pattern_types(
 ) {
     match pattern {
         Pat::Var(_, span) => {
-            types.insert(*span, format_ty(&analyzer.engine, ty));
+            types.insert(*span, format_ty_resolved(analyzer, ty));
         }
         Pat::Paren(inner, _) => collect_pattern_types(inner, ty, analyzer, types),
         Pat::Tuple(items, _) => {
@@ -3296,5 +3524,152 @@ step dt dx p =
         } else {
             panic!("expected Markup hover contents");
         }
+    }
+
+    /// Hover on render-block entry-point parameters should show their type.
+    #[test]
+    fn hover_on_render_block_entry_point_parameter() {
+        let source = r#"render test
+  @vertex
+  vsMain : F32 -> F32
+  vsMain input = input
+"#;
+        // Hover on "input" in parameter position (line 3, col 7)
+        let hover = build_hover(source, Position::new(3, 7));
+        assert!(
+            hover.is_some(),
+            "hover should return a result for parameter"
+        );
+        if let Some(Hover {
+            contents: HoverContents::Markup(markup),
+            ..
+        }) = hover
+        {
+            assert!(
+                markup.value.contains("F32"),
+                "hover on render-block parameter should show F32 type, got: {}",
+                markup.value
+            );
+        } else {
+            panic!("expected Markup hover contents");
+        }
+    }
+
+    /// Hover on unresolved imported names should at least show the identifier.
+    #[test]
+    fn hover_on_unresolved_imported_name_shows_fallback() {
+        let source = "main = importedName";
+        // Position (0, 10) lands inside "importedName" (starts at char 7)
+        let hover = build_hover(source, Position::new(0, 10));
+        assert!(
+            hover.is_some(),
+            "hover should return a result even for unresolved imports"
+        );
+        if let Some(Hover {
+            contents: HoverContents::Markup(markup),
+            ..
+        }) = hover
+        {
+            assert!(
+                markup.value.contains("importedName"),
+                "hover should contain the identifier name, got: {}",
+                markup.value
+            );
+        } else {
+            panic!("expected Markup hover contents");
+        }
+    }
+
+    /// Hover on an imported symbol should show its type from the merged
+    /// program, not a spurious local line excerpt.
+    #[test]
+    fn hover_on_imported_symbol_shows_type_from_analyzer() {
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("parent")
+            .parent()
+            .expect("workspace root")
+            .to_path_buf();
+        let sdf_scene_path =
+            workspace_root.join("examples/rust-bindgen-demo/shaders/SdfScene.shadml");
+        let search_root = sdf_scene_path.parent().expect("shaders dir").to_path_buf();
+        let sdf_scene_source = std::fs::read_to_string(&sdf_scene_path).expect("read SdfScene");
+
+        let (state, _errors) = build_ide_state_with_imports(
+            &sdf_scene_source,
+            Some(&sdf_scene_path),
+            &[search_root],
+            false,
+        );
+
+        // Hover on "getFrameSize" at line 230: "let aspect = getFrameSize.x / getFrameSize.y"
+        let pos = nth_position(&sdf_scene_source, "getFrameSize", 0);
+        let hover = hover(&state, pos).expect("hover should return a result");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert!(
+            markup.value.contains("Vec<2, F32>"),
+            "hover on imported getFrameSize should show Vec<2, F32>, got: {}",
+            markup.value
+        );
+        assert!(
+            !markup.value.contains("Triangle"),
+            "hover should NOT contain spurious local text like Triangle, got: {}",
+            markup.value
+        );
+    }
+
+    /// Goto-definition on an imported symbol should not return local ranges
+    /// (the local index only contains the user's own declarations).
+    #[test]
+    fn goto_definition_on_imported_symbol_returns_none_locally() {
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("parent")
+            .parent()
+            .expect("workspace root")
+            .to_path_buf();
+        let sdf_scene_path =
+            workspace_root.join("examples/rust-bindgen-demo/shaders/SdfScene.shadml");
+        let search_root = sdf_scene_path.parent().expect("shaders dir").to_path_buf();
+        let sdf_scene_source = std::fs::read_to_string(&sdf_scene_path).expect("read SdfScene");
+
+        let (state, _errors) = build_ide_state_with_imports(
+            &sdf_scene_source,
+            Some(&sdf_scene_path),
+            &[search_root],
+            false,
+        );
+
+        let uri = Url::parse("file:///test.shadml").unwrap();
+        let pos = nth_position(&sdf_scene_source, "getFrameSize", 0);
+        let result = goto_definition(&state, &uri, pos);
+        assert!(
+            result.is_none(),
+            "local goto-definition for imported symbol should return None, got: {:?}",
+            result
+        );
+    }
+
+    /// Cross-file goto-definition should find the symbol in the imported module.
+    #[test]
+    fn cross_file_goto_definition_finds_imported_symbol() {
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("parent")
+            .parent()
+            .expect("workspace root")
+            .to_path_buf();
+        let global_bindings_path =
+            workspace_root.join("examples/rust-bindgen-demo/shaders/GlobalBindings.shadml");
+        let global_bindings_source =
+            std::fs::read_to_string(&global_bindings_path).expect("read GlobalBindings");
+
+        let ranges = find_definition_ranges(&global_bindings_source, "getFrameSize");
+        assert!(
+            !ranges.is_empty(),
+            "getFrameSize should be found in GlobalBindings, got no ranges"
+        );
     }
 }
