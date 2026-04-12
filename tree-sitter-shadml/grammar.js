@@ -22,9 +22,13 @@ module.exports = grammar({
     [$.import_declaration],
     [$.constructor_expression, $.record_expression],
     [$.cfg_declaration],
-    [$._simple_type, $._type_app_arg],
     [$.function_declaration],
     [$.type_signature],
+    [$.attribute],
+    [$.function_type, $.type_application],
+    [$.type_constraint, $.type_constructor],
+    [$.type_constraint, $._simple_type],
+    [$.type_constraint, $.type_application],
   ],
 
   rules: {
@@ -89,7 +93,7 @@ module.exports = grammar({
       )),
 
     record_fields: ($) =>
-      seq("{", commaSep1($.record_field), optional(","), "}"),
+      seq("{", commaSep1Trailing($.record_field), "}"),
 
     record_field: ($) =>
       seq(
@@ -112,7 +116,7 @@ module.exports = grammar({
     extern_declaration: ($) =>
       prec.right(seq(
         "extern",
-        field("name", choice($.identifier, seq("(", /[+\-*/%=<>!&^|~]+/, ")"))),
+        field("name", choice($.identifier, $.operator_name)),
         ":",
         field("type", $._type),
         optional($._layout_end),
@@ -126,7 +130,8 @@ module.exports = grammar({
     binding_declaration: ($) =>
       prec.right(seq(
         "@", "group", "(", $.expression, ")",
-        repeat1($.binding_entry),
+        sepBy1($._layout_semicolon, $.binding_entry),
+        optional(choice($._layout_semicolon, $._layout_end)),
       )),
 
     binding_entry: ($) =>
@@ -209,6 +214,7 @@ module.exports = grammar({
         optional(seq(":", $._type)),
         "=",
         $.expression,
+        optional(choice($._layout_semicolon, $._layout_end)),
       ),
 
     // -- Conditional compilation (when/cfg) ----------------------------------
@@ -240,21 +246,21 @@ module.exports = grammar({
 
     type_signature: ($) =>
       seq(
-        field("name", $.identifier),
+        field("name", choice($.identifier, $.operator_name)),
         ":",
         field("type", $._type),
-        optional($._layout_end),
+        optional(choice($._layout_semicolon, $._layout_end)),
       ),
 
     function_declaration: ($) =>
       seq(
         repeat($.attribute),
-        field("name", $.identifier),
+        field("name", choice($.identifier, $.operator_name)),
         repeat($.pattern),
         "=",
         field("body", $.expression),
         optional($.where_clause),
-        optional($._layout_end),
+        optional(choice($._layout_semicolon, $._layout_end)),
       ),
 
     where_clause: ($) =>
@@ -282,9 +288,19 @@ module.exports = grammar({
 
     _type: ($) =>
       choice(
+        $.constrained_type,
         $.function_type,
         $.forall_type,
         $._simple_type,
+      ),
+
+    constrained_type: ($) =>
+      prec.right(1, seq($.type_constraint, "=>", $._type)),
+
+    type_constraint: ($) =>
+      choice(
+        seq($.upper_identifier, repeat1($.type_variable)),
+        seq("(", commaSep1(seq($.upper_identifier, repeat1($.type_variable))), ")"),
       ),
 
     function_type: ($) =>
@@ -315,23 +331,17 @@ module.exports = grammar({
         // Angle-bracket syntax: Vec<2, F32>
         seq($.upper_identifier, "<", commaSep1($._type), ">"),
         // Haskell-style space-separated: Box I32, Tensor 2 F32
-        // First arg must be a non-identifier type to avoid consuming the next
-        // declaration's name (e.g., `I32\nsampleCount` misread as `I32 sampleCount`).
-        prec.left(2, seq(
-          $.upper_identifier,
-          $._type_app_arg,
-          repeat($._simple_type),
+        prec.left(3, seq(
+          choice($.type_constructor, $.type_application),
+          choice(
+            $.type_constructor,
+            $.type_variable,
+            $.type_literal,
+            $.tuple_type,
+            $.unit_type,
+            $.parenthesized_type,
+          ),
         )),
-      ),
-
-    // A type argument that is clearly a type (not an ambiguous identifier).
-    _type_app_arg: ($) =>
-      choice(
-        $.type_constructor,
-        $.type_literal,
-        $.tuple_type,
-        $.unit_type,
-        $.parenthesized_type,
       ),
 
     tuple_type: ($) =>
@@ -340,11 +350,7 @@ module.exports = grammar({
     unit_type: ($) => seq("(", ")"),
 
     parenthesized_type: ($) =>
-      seq("(", choice(
-        // Haskell-style type application inside parens: (Box I32), (Tensor 2 F32)
-        seq($.upper_identifier, repeat1($._simple_type)),
-        $._type,
-      ), ")"),
+      seq("(", $._type, ")"),
 
     // -- Patterns ------------------------------------------------------------
 
@@ -352,6 +358,7 @@ module.exports = grammar({
       choice(
         $.identifier_pattern,
         $.constructor_pattern,
+        $.record_pattern,
         $.wildcard_pattern,
         $.literal_pattern,
         $.tuple_pattern,
@@ -364,6 +371,16 @@ module.exports = grammar({
 
     constructor_pattern: ($) =>
       prec.right(seq($.upper_identifier, repeat($.pattern))),
+
+    record_pattern: ($) =>
+      seq($.upper_identifier, "{", commaSepTrailing($.record_field_pattern), "}"),
+
+    record_field_pattern: ($) =>
+      choice(
+        seq(field("name", $.identifier), "=", field("pattern", $.pattern)),
+        field("name", $.identifier),
+        "..",
+      ),
 
     tuple_pattern: ($) =>
       seq("(", $.pattern, ",", commaSep1($.pattern), ")"),
@@ -473,7 +490,7 @@ module.exports = grammar({
       ),
 
     unary_expression: ($) =>
-      prec(10, seq("~", $._atomic_expression)),
+      prec(10, seq(field("operator", "~"), $._atomic_expression)),
 
     // Negative number literal: -42, -3.14 (not -x, which is binary subtraction)
     negative_literal: ($) =>
@@ -504,6 +521,7 @@ module.exports = grammar({
         $.tuple_expression,
         $.unit_expression,
         $.parenthesized_expression,
+        $.negation_expression,
         $.builtin_identifier,
       ),
 
@@ -520,10 +538,10 @@ module.exports = grammar({
       seq("[", commaSep($.expression), "]"),
 
     record_expression: ($) =>
-      seq($.upper_identifier, "{", commaSep1($.field_init), "}"),
+      seq($.upper_identifier, "{", commaSep1Trailing($.field_init), "}"),
 
     record_update: ($) =>
-      seq($._simple_expression, "{", commaSep1($.field_init), "}"),
+      seq($._simple_expression, "{", commaSep1Trailing($.field_init), "}"),
 
     field_init: ($) =>
       seq(field("name", $.identifier), "=", field("value", $.expression)),
@@ -540,10 +558,17 @@ module.exports = grammar({
         $.expression,
       ), ")"),
 
+    // Prefix negation: -(expr). The token "-(" is matched as a single
+    // immediate token so that binary subtraction (a - b) is never ambiguous.
+    negation_expression: ($) =>
+      seq(token(prec(1, "-(")), $.expression, ")"),
+
     // -- Identifiers and literals -------------------------------------------
 
     identifier: ($) => /[a-z_][a-zA-Z0-9_']*/,
     upper_identifier: ($) => /[A-Z][A-Za-z0-9_]*/,
+    operator_name: ($) => seq("(", $.operator_symbol, ")"),
+    operator_symbol: ($) => /[+\-*/%=<>!&^|~]+/,
     builtin_identifier: ($) => /\$[a-zA-Z_][a-zA-Z0-9_]*/,
 
     _literal: ($) =>
@@ -614,4 +639,20 @@ function commaSep1(rule) {
  */
 function sepBy1(sep, rule) {
   return seq(rule, repeat(seq(optional(sep), rule)));
+}
+
+/**
+ * Comma-separated list (1 or more) with optional trailing comma.
+ * @param {RuleOrLiteral} rule
+ */
+function commaSep1Trailing(rule) {
+  return seq(rule, repeat(seq(",", rule)), optional(","));
+}
+
+/**
+ * Comma-separated list (0 or more) with optional trailing comma.
+ * @param {RuleOrLiteral} rule
+ */
+function commaSepTrailing(rule) {
+  return optional(commaSep1Trailing(rule));
 }

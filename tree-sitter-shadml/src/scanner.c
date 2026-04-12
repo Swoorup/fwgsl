@@ -9,6 +9,7 @@
 
 #include "tree_sitter/parser.h"
 #include <stdbool.h>
+#include <string.h>
 
 enum TokenType {
   LAYOUT_END,
@@ -27,9 +28,48 @@ static bool is_ident_start(int32_t c) {
   return (c >= 'a' && c <= 'z') || c == '_';
 }
 
+static bool is_upper_ident_start(int32_t c) {
+  return c >= 'A' && c <= 'Z';
+}
+
 static bool is_ident_continue(int32_t c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
          (c >= '0' && c <= '9') || c == '_' || c == '\'';
+}
+
+static bool is_operator_char(int32_t c) {
+  switch (c) {
+  case '+':
+  case '-':
+  case '*':
+  case '/':
+  case '%':
+  case '=':
+  case '<':
+  case '>':
+  case '!':
+  case '&':
+  case '^':
+  case '|':
+  case '~':
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool is_decl_keyword(const char *ident, unsigned len) {
+  return (len == 4 && strncmp(ident, "data", 4) == 0) ||
+         (len == 5 && strncmp(ident, "alias", 5) == 0) ||
+         (len == 6 && strncmp(ident, "extern", 6) == 0) ||
+         (len == 5 && strncmp(ident, "trait", 5) == 0) ||
+         (len == 4 && strncmp(ident, "impl", 4) == 0) ||
+         (len == 8 && strncmp(ident, "bitfield", 8) == 0) ||
+         (len == 5 && strncmp(ident, "const", 5) == 0) ||
+         (len == 4 && strncmp(ident, "when", 4) == 0) ||
+         (len == 6 && strncmp(ident, "import", 6) == 0) ||
+         (len == 6 && strncmp(ident, "module", 6) == 0) ||
+         (len == 4 && strncmp(ident, "else", 4) == 0);
 }
 
 bool tree_sitter_shadml_external_scanner_scan(void *payload, TSLexer *lexer,
@@ -60,51 +100,80 @@ bool tree_sitter_shadml_external_scanner_scan(void *payload, TSLexer *lexer,
     return true;
   }
 
-  // LAYOUT_SEMICOLON: lookahead to check if this line starts a new binding.
-  // A binding starts with a lowercase identifier eventually followed by '='
-  // (which isn't '==') on the same line.
-  if (want_semi && !at_eof && next_col > 0 && is_ident_start(lexer->lookahead)) {
+  // LAYOUT_SEMICOLON: lookahead to check if this line starts a new declaration
+  // or binding inside an indented layout block.
+  if (want_semi && !at_eof && next_col > 0) {
     // Mark the end of the token HERE (zero-width, after whitespace).
     // All further advances are just lookahead — they won't be part of the token.
     lexer->mark_end(lexer);
 
-    // Skip the identifier.
-    while (is_ident_continue(lexer->lookahead)) {
-      lexer->advance(lexer, false);
+    if (lexer->lookahead == '@') {
+      lexer->result_symbol = LAYOUT_SEMICOLON;
+      return true;
     }
 
-    // Now scan forward on the same line for '=' (not '==').
+    if (lexer->lookahead == '(') {
+      lexer->advance(lexer, false);
+      bool saw_operator = false;
+      while (is_operator_char(lexer->lookahead)) {
+        saw_operator = true;
+        lexer->advance(lexer, false);
+      }
+      if (!saw_operator || lexer->lookahead != ')') {
+        return false;
+      }
+      lexer->advance(lexer, false);
+    } else if (is_ident_start(lexer->lookahead) ||
+               is_upper_ident_start(lexer->lookahead)) {
+      char ident[32];
+      unsigned ident_len = 0;
+      while (is_ident_continue(lexer->lookahead)) {
+        if (ident_len + 1 < sizeof(ident)) {
+          ident[ident_len++] = (char)lexer->lookahead;
+        }
+        lexer->advance(lexer, false);
+      }
+      ident[ident_len] = '\0';
+
+      if (is_decl_keyword(ident, ident_len)) {
+        lexer->result_symbol = LAYOUT_SEMICOLON;
+        return true;
+      }
+    } else {
+      return false;
+    }
+
+    // Scan forward on the same line for ':' or a bare '=' at depth 0.
     int depth = 0;
     for (int i = 0; i < 200; i++) {
       int32_t c = lexer->lookahead;
       if (c == '\n' || c == '\r' || c == 0) break;
 
+      if (c == ':' && depth == 0) {
+        lexer->result_symbol = LAYOUT_SEMICOLON;
+        return true;
+      }
+
       if (c == '=' && depth == 0) {
         lexer->advance(lexer, false);
         if (lexer->lookahead != '=') {
-          // Found a bare '=' — this is a new binding.
           lexer->result_symbol = LAYOUT_SEMICOLON;
           return true;
         }
-        // It was '==', which is a comparison, not a binding.
         break;
       }
 
-      // Track parentheses depth to skip '=' inside parens.
       if (c == '(') depth++;
       if (c == ')') {
         if (depth > 0) depth--;
-        else break;  // unbalanced — not a binding
+        else break;
       }
 
-      // Stop on tokens that indicate this isn't a binding pattern.
       if (c == '-') {
-        // Could be '->' which means type signature or lambda, not binding.
         lexer->advance(lexer, false);
-        if (lexer->lookahead == '>') break;
+        if (lexer->lookahead == '>') continue;
         continue;
       }
-      if (c == ':') break;  // type annotation — it's a type_signature, not binding
 
       lexer->advance(lexer, false);
     }
