@@ -78,6 +78,12 @@ pub enum Ty {
     Nat(u64),
     /// Error type (produced during error recovery).
     Error,
+    /// Associated type projection: `a.Output` where a is bound by a trait constraint.
+    AssocProj {
+        trait_params: Vec<Ty>,
+        name: String,
+        trait_name: String,
+    },
 }
 
 impl Ty {
@@ -114,6 +120,34 @@ impl Ty {
             Ty::Arrow(a, b) => a.contains_var(var) || b.contains_var(var),
             Ty::Tuple(elems) => elems.iter().any(|e| e.contains_var(var)),
             Ty::Forall(_, body) => body.contains_var(var),
+            Ty::AssocProj { trait_params, .. } => trait_params.iter().any(|t| t.contains_var(var)),
+        }
+    }
+
+    /// Check if a type variable only appears within `AssocProj.trait_params`
+    /// positions in this type, not in any structural position. This is used
+    /// by the occurs check: `a = a.Output` is a valid associated type
+    /// constraint, not an infinite type, whereas `a = a -> I32` is a true
+    /// infinite type.
+    pub fn var_only_in_assoc_proj_params(&self, var: TyVarId) -> bool {
+        self.contains_var(var) && !self.contains_var_structural(var)
+    }
+
+    /// Check if a type variable appears in a structural (non-AssocProj-params)
+    /// position within this type. Variables in `AssocProj.trait_params` are
+    /// NOT considered structural — they're type-level function inputs.
+    fn contains_var_structural(&self, var: TyVarId) -> bool {
+        match self {
+            Ty::Var(v) => *v == var,
+            Ty::Con(_) | Ty::Nat(_) | Ty::Error => false,
+            Ty::App(f, a) => f.contains_var_structural(var) || a.contains_var_structural(var),
+            Ty::Arrow(a, b) => a.contains_var_structural(var) || b.contains_var_structural(var),
+            Ty::Tuple(elems) => elems.iter().any(|e| e.contains_var_structural(var)),
+            Ty::Forall(_, body) => body.contains_var_structural(var),
+            // Variables in AssocProj trait_params are type-level function
+            // inputs, not structural containment. They don't count as
+            // structural occurrences.
+            Ty::AssocProj { .. } => false,
         }
     }
 
@@ -141,6 +175,11 @@ impl Ty {
             ),
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| e.apply_subst(subst)).collect()),
             Ty::Forall(vars, body) => Ty::Forall(vars.clone(), Box::new(body.apply_subst(subst))),
+            Ty::AssocProj { trait_params, name, trait_name } => Ty::AssocProj {
+                trait_params: trait_params.iter().map(|t| t.apply_subst(subst)).collect(),
+                name: name.clone(),
+                trait_name: trait_name.clone(),
+            },
         }
     }
 
@@ -173,6 +212,15 @@ impl Ty {
                 vs
             }
             Ty::Forall(_, body) => body.free_vars(),
+            Ty::AssocProj { trait_params, .. } => {
+                let mut vs = Vec::new();
+                for t in trait_params {
+                    vs.extend(t.free_vars());
+                }
+                vs.sort();
+                vs.dedup();
+                vs
+            }
         }
     }
 }
@@ -211,6 +259,11 @@ pub fn normalize_type_aliases(ty: &Ty) -> Ty {
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(normalize_type_aliases).collect()),
         Ty::Forall(vars, body) => Ty::Forall(vars.clone(), Box::new(normalize_type_aliases(body))),
         Ty::Var(_) | Ty::Nat(_) | Ty::Error => ty.clone(),
+        Ty::AssocProj { trait_params, name, trait_name } => Ty::AssocProj {
+            trait_params: trait_params.iter().map(normalize_type_aliases).collect(),
+            name: name.clone(),
+            trait_name: trait_name.clone(),
+        },
     }
 }
 
@@ -270,6 +323,13 @@ impl fmt::Display for Ty {
             }
             Ty::Nat(n) => write!(f, "{}", n),
             Ty::Error => write!(f, "<error>"),
+            Ty::AssocProj { trait_params, name, trait_name } => {
+                let params = trait_params.iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "({}<{}>).{}", trait_name, params, name)
+            }
         }
     }
 }
@@ -291,6 +351,10 @@ impl Substitution {
 
     pub fn lookup(&self, var: TyVarId) -> Option<&Ty> {
         self.map.get(&var)
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = TyVarId> + '_ {
+        self.map.keys().copied()
     }
 
     /// Compose two substitutions: apply self first, then other.
@@ -434,6 +498,13 @@ fn format_ty_surface(ty: &Ty, names: &HashMap<TyVarId, String>, prec: u8) -> Str
         Ty::Con(name) => name.clone(),
         Ty::Nat(n) => n.to_string(),
         Ty::Error => "<error>".into(),
+        Ty::AssocProj { trait_params, name: proj_name, trait_name } => {
+            let params = trait_params.iter()
+                .map(|t| format_ty_surface(t, names, 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({}<{}>).{}", trait_name, params, proj_name)
+        }
         Ty::Tuple(items) => format!(
             "({})",
             items
@@ -626,11 +697,21 @@ impl InferEngine {
             (Ty::Var(v1), Ty::Var(v2)) if v1 == v2 => {}
             (Ty::Var(v), ty) | (ty, Ty::Var(v)) => {
                 if ty.contains_var(*v) {
-                    self.diagnostics.push(
-                        Diagnostic::error(format!("Infinite type: t{} ~ {}", v, ty))
-                            .with_label(Label::primary(span, "occurs here"))
-                            .with_help("introduce a concrete argument or result type to break the self-reference"),
-                    );
+                    // When Var(v) appears only within AssocProj trait_params, this
+                    // is a valid associated type constraint (e.g., `a = a.Output`),
+                    // not an infinite type. The constraint will be resolved later
+                    // through predicate improvement when the trait params become
+                    // concrete. We must NOT add a substitution entry because that
+                    // would cause infinite recursion in apply_subst.
+                    if ty.var_only_in_assoc_proj_params(*v) {
+                        // Valid associated type constraint — skip.
+                    } else {
+                        self.diagnostics.push(
+                            Diagnostic::error(format!("Infinite type: t{} ~ {}", v, ty))
+                                .with_label(Label::primary(span, "occurs here"))
+                                .with_help("introduce a concrete argument or result type to break the self-reference"),
+                        );
+                    }
                 } else {
                     self.subst.insert(*v, ty.clone());
                 }
@@ -649,6 +730,34 @@ impl InferEngine {
                 for (a_e, b_e) in a_elems.iter().zip(b_elems.iter()) {
                     self.unify(a_e, b_e, span);
                 }
+            }
+            (
+                Ty::AssocProj { trait_params: a_params, name: a_name, trait_name: a_trait },
+                Ty::AssocProj { trait_params: b_params, name: b_name, trait_name: b_trait },
+            ) if a_name == b_name && a_trait == b_trait && a_params.len() == b_params.len() => {
+                for (a_p, b_p) in a_params.iter().zip(b_params.iter()) {
+                    self.unify(a_p, b_p, span);
+                }
+            }
+            // AssocProj can unify with any type, regardless of whether its
+            // trait_params are concrete. When params are concrete, the
+            // associated type resolution will later replace the AssocProj
+            // with its concrete value (e.g., F32.Output → F32). When params
+            // contain free type variables, predicate improvement will resolve
+            // those variables first, and then the AssocProj will resolve.
+            //
+            // This allows expressions like:
+            // - `length (uv - mouseN)` where subtraction returns `(Vec2f).Output`
+            // - `cos (scale + 1.0)` where `+` returns `(t.Output)` with `t`
+            //   still free (from e.g. matrix indexing), and `cos` expects F32
+            (Ty::AssocProj { .. }, _)
+            | (_, Ty::AssocProj { .. }) =>
+            {
+                // Accept the unification. The associated type resolution
+                // in the semantic analyzer will replace AssocProj with
+                // its concrete value, and then the type will be correct.
+                // For type variables in the other side, they will be
+                // constrained by the resolved type later.
             }
             _ => {
                 self.diagnostics.push(

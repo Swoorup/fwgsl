@@ -1109,6 +1109,12 @@ fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>,
             }
         }
 
+        HirExpr::Tuple(items, _, _) if items.is_empty() => {
+            // Unit `()` — WGSL has no unit type, so lower to I32(0),
+            // consistent with MirType::Unit::zero_value().
+            Ok(MirExpr::Lit(MirLit::I32(0)))
+        }
+
         HirExpr::Tuple(_, _, _) | HirExpr::TupleIndex(_, _, _, _) => {
             Err("tuple expressions must be eliminated before MIR lowering".into())
         }

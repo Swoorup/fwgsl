@@ -1,3 +1,7 @@
 
-test : Add a a a => (a, a) -> (a, a) -> a
-test (a, b) k j = a + b
+-- test : Add a a => forall a. ((a, a)) -> ((a, a)) -> a.Output
+
+test : Add a a => (a, a) -> (a, a) -> a.Output
+test (a, b) (k, j) = a + b
+
+test2 a b (k, j) = a

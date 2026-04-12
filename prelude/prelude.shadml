@@ -51,32 +51,41 @@ data Pair a b = Pair a b
 -- Concrete builtin operator support is declared below through `builtin impl`
 -- entries. Users can write ordinary `impl` blocks for their own types.
 
-trait Add a b c where
-  (+) : a -> b -> c
+trait Add a b where
+  type Output
+  (+) : a -> b -> Output
 
-trait Sub a b c where
-  (-) : a -> b -> c
+trait Sub a b where
+  type Output
+  (-) : a -> b -> Output
 
-trait Mul a b c where
-  (*) : a -> b -> c
+trait Mul a b where
+  type Output
+  (*) : a -> b -> Output
 
-trait Div a b c where
-  (/) : a -> b -> c
+trait Div a b where
+  type Output
+  (/) : a -> b -> Output
 
-trait Mod a b c where
-  (%) : a -> b -> c
+trait Mod a b where
+  type Output
+  (%) : a -> b -> Output
 
-trait BitAnd a b c where
-  (&) : a -> b -> c
+trait BitAnd a b where
+  type Output
+  (&) : a -> b -> Output
 
-trait BitXor a b c where
-  (^) : a -> b -> c
+trait BitXor a b where
+  type Output
+  (^) : a -> b -> Output
 
-trait Shl a b c where
-  (<<) : a -> b -> c
+trait Shl a b where
+  type Output
+  (<<) : a -> b -> Output
 
-trait Shr a b c where
-  (>>) : a -> b -> c
+trait Shr a b where
+  type Output
+  (>>) : a -> b -> Output
 
 trait BitNot a where
   (~) : a -> a
@@ -111,306 +120,404 @@ extern (||) : Bool -> Bool -> Bool
 extern bor : a -> a -> a
 
 -- | Add two f32 scalars with the native `+` operator.
-builtin impl Add F32 F32 F32 where
+builtin impl Add F32 F32 where
+  type Output = F32
   (+) = native_binop (+)
 
-builtin impl Add I32 I32 I32 where
+builtin impl Add I32 I32 where
+  type Output = I32
   (+) = native_binop (+)
 
-builtin impl Add U32 U32 U32 where
+builtin impl Add U32 U32 where
+  type Output = U32
   (+) = native_binop (+)
 
-builtin impl Add Vec2f Vec2f Vec2f where
+builtin impl Add Vec2f Vec2f where
+  type Output = Vec2f
   (+) = native_binop (+)
 
-builtin impl Add Vec3f Vec3f Vec3f where
+builtin impl Add Vec3f Vec3f where
+  type Output = Vec3f
   (+) = native_binop (+)
 
-builtin impl Add Vec4f Vec4f Vec4f where
+builtin impl Add Vec4f Vec4f where
+  type Output = Vec4f
   (+) = native_binop (+)
 
-builtin impl Add Vec2i Vec2i Vec2i where
+builtin impl Add Vec2i Vec2i where
+  type Output = Vec2i
   (+) = native_binop (+)
 
-builtin impl Add Vec3i Vec3i Vec3i where
+builtin impl Add Vec3i Vec3i where
+  type Output = Vec3i
   (+) = native_binop (+)
 
-builtin impl Add Vec4i Vec4i Vec4i where
+builtin impl Add Vec4i Vec4i where
+  type Output = Vec4i
   (+) = native_binop (+)
 
-builtin impl Add Vec2u Vec2u Vec2u where
+builtin impl Add Vec2u Vec2u where
+  type Output = Vec2u
   (+) = native_binop (+)
 
-builtin impl Add Vec3u Vec3u Vec3u where
+builtin impl Add Vec3u Vec3u where
+  type Output = Vec3u
   (+) = native_binop (+)
 
-builtin impl Add Vec4u Vec4u Vec4u where
+builtin impl Add Vec4u Vec4u where
+  type Output = Vec4u
   (+) = native_binop (+)
 
 -- | Subtract values with the native `-` operator.
-builtin impl Sub F32 F32 F32 where
+builtin impl Sub F32 F32 where
+  type Output = F32
   (-) = native_binop (-)
 
-builtin impl Sub I32 I32 I32 where
+builtin impl Sub I32 I32 where
+  type Output = I32
   (-) = native_binop (-)
 
-builtin impl Sub U32 U32 U32 where
+builtin impl Sub U32 U32 where
+  type Output = U32
   (-) = native_binop (-)
 
-builtin impl Sub Vec2f Vec2f Vec2f where
+builtin impl Sub Vec2f Vec2f where
+  type Output = Vec2f
   (-) = native_binop (-)
 
-builtin impl Sub Vec3f Vec3f Vec3f where
+builtin impl Sub Vec3f Vec3f where
+  type Output = Vec3f
   (-) = native_binop (-)
 
-builtin impl Sub Vec4f Vec4f Vec4f where
+builtin impl Sub Vec4f Vec4f where
+  type Output = Vec4f
   (-) = native_binop (-)
 
-builtin impl Sub Vec2i Vec2i Vec2i where
+builtin impl Sub Vec2i Vec2i where
+  type Output = Vec2i
   (-) = native_binop (-)
 
-builtin impl Sub Vec3i Vec3i Vec3i where
+builtin impl Sub Vec3i Vec3i where
+  type Output = Vec3i
   (-) = native_binop (-)
 
-builtin impl Sub Vec4i Vec4i Vec4i where
+builtin impl Sub Vec4i Vec4i where
+  type Output = Vec4i
   (-) = native_binop (-)
 
-builtin impl Sub Vec2u Vec2u Vec2u where
+builtin impl Sub Vec2u Vec2u where
+  type Output = Vec2u
   (-) = native_binop (-)
 
-builtin impl Sub Vec3u Vec3u Vec3u where
+builtin impl Sub Vec3u Vec3u where
+  type Output = Vec3u
   (-) = native_binop (-)
 
-builtin impl Sub Vec4u Vec4u Vec4u where
+builtin impl Sub Vec4u Vec4u where
+  type Output = Vec4u
   (-) = native_binop (-)
 
 -- | Multiply values with the native `*` operator.
-builtin impl Mul F32 F32 F32 where
+builtin impl Mul F32 F32 where
+  type Output = F32
   (*) = native_binop (*)
 
-builtin impl Mul I32 I32 I32 where
+builtin impl Mul I32 I32 where
+  type Output = I32
   (*) = native_binop (*)
 
-builtin impl Mul U32 U32 U32 where
+builtin impl Mul U32 U32 where
+  type Output = U32
   (*) = native_binop (*)
 
-builtin impl Mul Vec2f Vec2f Vec2f where
+builtin impl Mul Vec2f Vec2f where
+  type Output = Vec2f
   (*) = native_binop (*)
 
-builtin impl Mul Vec3f Vec3f Vec3f where
+builtin impl Mul Vec3f Vec3f where
+  type Output = Vec3f
   (*) = native_binop (*)
 
-builtin impl Mul Vec4f Vec4f Vec4f where
+builtin impl Mul Vec4f Vec4f where
+  type Output = Vec4f
   (*) = native_binop (*)
 
-builtin impl Mul Vec2i Vec2i Vec2i where
+builtin impl Mul Vec2i Vec2i where
+  type Output = Vec2i
   (*) = native_binop (*)
 
-builtin impl Mul Vec3i Vec3i Vec3i where
+builtin impl Mul Vec3i Vec3i where
+  type Output = Vec3i
   (*) = native_binop (*)
 
-builtin impl Mul Vec4i Vec4i Vec4i where
+builtin impl Mul Vec4i Vec4i where
+  type Output = Vec4i
   (*) = native_binop (*)
 
-builtin impl Mul Vec2u Vec2u Vec2u where
+builtin impl Mul Vec2u Vec2u where
+  type Output = Vec2u
   (*) = native_binop (*)
 
-builtin impl Mul Vec3u Vec3u Vec3u where
+builtin impl Mul Vec3u Vec3u where
+  type Output = Vec3u
   (*) = native_binop (*)
 
-builtin impl Mul Vec4u Vec4u Vec4u where
+builtin impl Mul Vec4u Vec4u where
+  type Output = Vec4u
   (*) = native_binop (*)
 
-builtin impl Mul Vec2f F32 Vec2f where
+builtin impl Mul Vec2f F32 where
+  type Output = Vec2f
   (*) = native_binop (*)
 
-builtin impl Mul Vec3f F32 Vec3f where
+builtin impl Mul Vec3f F32 where
+  type Output = Vec3f
   (*) = native_binop (*)
 
-builtin impl Mul Vec4f F32 Vec4f where
+builtin impl Mul Vec4f F32 where
+  type Output = Vec4f
   (*) = native_binop (*)
 
-builtin impl Mul F32 Vec2f Vec2f where
+builtin impl Mul F32 Vec2f where
+  type Output = Vec2f
   (*) = native_binop (*)
 
-builtin impl Mul F32 Vec3f Vec3f where
+builtin impl Mul F32 Vec3f where
+  type Output = Vec3f
   (*) = native_binop (*)
 
-builtin impl Mul F32 Vec4f Vec4f where
+builtin impl Mul F32 Vec4f where
+  type Output = Vec4f
   (*) = native_binop (*)
 
-builtin impl Mul Vec2i I32 Vec2i where
+builtin impl Mul Vec2i I32 where
+  type Output = Vec2i
   (*) = native_binop (*)
 
-builtin impl Mul Vec3i I32 Vec3i where
+builtin impl Mul Vec3i I32 where
+  type Output = Vec3i
   (*) = native_binop (*)
 
-builtin impl Mul Vec4i I32 Vec4i where
+builtin impl Mul Vec4i I32 where
+  type Output = Vec4i
   (*) = native_binop (*)
 
-builtin impl Mul I32 Vec2i Vec2i where
+builtin impl Mul I32 Vec2i where
+  type Output = Vec2i
   (*) = native_binop (*)
 
-builtin impl Mul I32 Vec3i Vec3i where
+builtin impl Mul I32 Vec3i where
+  type Output = Vec3i
   (*) = native_binop (*)
 
-builtin impl Mul I32 Vec4i Vec4i where
+builtin impl Mul I32 Vec4i where
+  type Output = Vec4i
   (*) = native_binop (*)
 
-builtin impl Mul Vec2u U32 Vec2u where
+builtin impl Mul Vec2u U32 where
+  type Output = Vec2u
   (*) = native_binop (*)
 
-builtin impl Mul Vec3u U32 Vec3u where
+builtin impl Mul Vec3u U32 where
+  type Output = Vec3u
   (*) = native_binop (*)
 
-builtin impl Mul Vec4u U32 Vec4u where
+builtin impl Mul Vec4u U32 where
+  type Output = Vec4u
   (*) = native_binop (*)
 
-builtin impl Mul U32 Vec2u Vec2u where
+builtin impl Mul U32 Vec2u where
+  type Output = Vec2u
   (*) = native_binop (*)
 
-builtin impl Mul U32 Vec3u Vec3u where
+builtin impl Mul U32 Vec3u where
+  type Output = Vec3u
   (*) = native_binop (*)
 
-builtin impl Mul U32 Vec4u Vec4u where
+builtin impl Mul U32 Vec4u where
+  type Output = Vec4u
   (*) = native_binop (*)
 
 -- | Divide values with the native `/` operator.
-builtin impl Div F32 F32 F32 where
+builtin impl Div F32 F32 where
+  type Output = F32
   (/) = native_binop (/)
 
-builtin impl Div I32 I32 I32 where
+builtin impl Div I32 I32 where
+  type Output = I32
   (/) = native_binop (/)
 
-builtin impl Div U32 U32 U32 where
+builtin impl Div U32 U32 where
+  type Output = U32
   (/) = native_binop (/)
 
-builtin impl Div Vec2f Vec2f Vec2f where
+builtin impl Div Vec2f Vec2f where
+  type Output = Vec2f
   (/) = native_binop (/)
 
-builtin impl Div Vec3f Vec3f Vec3f where
+builtin impl Div Vec3f Vec3f where
+  type Output = Vec3f
   (/) = native_binop (/)
 
-builtin impl Div Vec4f Vec4f Vec4f where
+builtin impl Div Vec4f Vec4f where
+  type Output = Vec4f
   (/) = native_binop (/)
 
-builtin impl Div Vec2i Vec2i Vec2i where
+builtin impl Div Vec2i Vec2i where
+  type Output = Vec2i
   (/) = native_binop (/)
 
-builtin impl Div Vec3i Vec3i Vec3i where
+builtin impl Div Vec3i Vec3i where
+  type Output = Vec3i
   (/) = native_binop (/)
 
-builtin impl Div Vec4i Vec4i Vec4i where
+builtin impl Div Vec4i Vec4i where
+  type Output = Vec4i
   (/) = native_binop (/)
 
-builtin impl Div Vec2u Vec2u Vec2u where
+builtin impl Div Vec2u Vec2u where
+  type Output = Vec2u
   (/) = native_binop (/)
 
-builtin impl Div Vec3u Vec3u Vec3u where
+builtin impl Div Vec3u Vec3u where
+  type Output = Vec3u
   (/) = native_binop (/)
 
-builtin impl Div Vec4u Vec4u Vec4u where
+builtin impl Div Vec4u Vec4u where
+  type Output = Vec4u
   (/) = native_binop (/)
 
 -- | Integer remainder with the native `%` operator.
-builtin impl Mod I32 I32 I32 where
+builtin impl Mod I32 I32 where
+  type Output = I32
   (%) = native_binop (%)
 
-builtin impl Mod U32 U32 U32 where
+builtin impl Mod U32 U32 where
+  type Output = U32
   (%) = native_binop (%)
 
-builtin impl Mod Vec2i Vec2i Vec2i where
+builtin impl Mod Vec2i Vec2i where
+  type Output = Vec2i
   (%) = native_binop (%)
 
-builtin impl Mod Vec3i Vec3i Vec3i where
+builtin impl Mod Vec3i Vec3i where
+  type Output = Vec3i
   (%) = native_binop (%)
 
-builtin impl Mod Vec4i Vec4i Vec4i where
+builtin impl Mod Vec4i Vec4i where
+  type Output = Vec4i
   (%) = native_binop (%)
 
-builtin impl Mod Vec2u Vec2u Vec2u where
+builtin impl Mod Vec2u Vec2u where
+  type Output = Vec2u
   (%) = native_binop (%)
 
-builtin impl Mod Vec3u Vec3u Vec3u where
+builtin impl Mod Vec3u Vec3u where
+  type Output = Vec3u
   (%) = native_binop (%)
 
-builtin impl Mod Vec4u Vec4u Vec4u where
+builtin impl Mod Vec4u Vec4u where
+  type Output = Vec4u
   (%) = native_binop (%)
 
 -- | Bitwise and with the native `&` operator.
-builtin impl BitAnd I32 I32 I32 where
+builtin impl BitAnd I32 I32 where
+  type Output = I32
   (&) = native_binop (&)
 
-builtin impl BitAnd U32 U32 U32 where
+builtin impl BitAnd U32 U32 where
+  type Output = U32
   (&) = native_binop (&)
 
-builtin impl BitAnd Vec2i Vec2i Vec2i where
+builtin impl BitAnd Vec2i Vec2i where
+  type Output = Vec2i
   (&) = native_binop (&)
 
-builtin impl BitAnd Vec3i Vec3i Vec3i where
+builtin impl BitAnd Vec3i Vec3i where
+  type Output = Vec3i
   (&) = native_binop (&)
 
-builtin impl BitAnd Vec4i Vec4i Vec4i where
+builtin impl BitAnd Vec4i Vec4i where
+  type Output = Vec4i
   (&) = native_binop (&)
 
-builtin impl BitAnd Vec2u Vec2u Vec2u where
+builtin impl BitAnd Vec2u Vec2u where
+  type Output = Vec2u
   (&) = native_binop (&)
 
-builtin impl BitAnd Vec3u Vec3u Vec3u where
+builtin impl BitAnd Vec3u Vec3u where
+  type Output = Vec3u
   (&) = native_binop (&)
 
-builtin impl BitAnd Vec4u Vec4u Vec4u where
+builtin impl BitAnd Vec4u Vec4u where
+  type Output = Vec4u
   (&) = native_binop (&)
 
 -- | Bitwise xor with the native `^` operator.
-builtin impl BitXor I32 I32 I32 where
+builtin impl BitXor I32 I32 where
+  type Output = I32
   (^) = native_binop (^)
 
-builtin impl BitXor U32 U32 U32 where
+builtin impl BitXor U32 U32 where
+  type Output = U32
   (^) = native_binop (^)
 
-builtin impl BitXor Vec2i Vec2i Vec2i where
+builtin impl BitXor Vec2i Vec2i where
+  type Output = Vec2i
   (^) = native_binop (^)
 
-builtin impl BitXor Vec3i Vec3i Vec3i where
+builtin impl BitXor Vec3i Vec3i where
+  type Output = Vec3i
   (^) = native_binop (^)
 
-builtin impl BitXor Vec4i Vec4i Vec4i where
+builtin impl BitXor Vec4i Vec4i where
+  type Output = Vec4i
   (^) = native_binop (^)
 
-builtin impl BitXor Vec2u Vec2u Vec2u where
+builtin impl BitXor Vec2u Vec2u where
+  type Output = Vec2u
   (^) = native_binop (^)
 
-builtin impl BitXor Vec3u Vec3u Vec3u where
+builtin impl BitXor Vec3u Vec3u where
+  type Output = Vec3u
   (^) = native_binop (^)
 
-builtin impl BitXor Vec4u Vec4u Vec4u where
+builtin impl BitXor Vec4u Vec4u where
+  type Output = Vec4u
   (^) = native_binop (^)
 
 -- | Shift-left with the native `<<` operator.
-builtin impl Shl I32 I32 I32 where
+builtin impl Shl I32 I32 where
+  type Output = I32
   (<<) = native_binop (<<)
 
-builtin impl Shl I32 U32 I32 where
+builtin impl Shl I32 U32 where
+  type Output = I32
   (<<) = native_binop (<<)
 
-builtin impl Shl U32 I32 U32 where
+builtin impl Shl U32 I32 where
+  type Output = U32
   (<<) = native_binop (<<)
 
-builtin impl Shl U32 U32 U32 where
+builtin impl Shl U32 U32 where
+  type Output = U32
   (<<) = native_binop (<<)
 
 -- | Shift-right with the native `>>` operator.
-builtin impl Shr I32 I32 I32 where
+builtin impl Shr I32 I32 where
+  type Output = I32
   (>>) = native_binop (>>)
 
-builtin impl Shr I32 U32 I32 where
+builtin impl Shr I32 U32 where
+  type Output = I32
   (>>) = native_binop (>>)
 
-builtin impl Shr U32 I32 U32 where
+builtin impl Shr U32 I32 where
+  type Output = U32
   (>>) = native_binop (>>)
 
-builtin impl Shr U32 U32 U32 where
+builtin impl Shr U32 U32 where
+  type Output = U32
   (>>) = native_binop (>>)
 
 -- | Unary numeric negation with the native `-` operator.

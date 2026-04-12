@@ -197,6 +197,7 @@ pub enum Decl {
         name: String,
         /// Type variables the trait is parameterised over.
         vars: Vec<String>,
+        associated_types: Vec<AssociatedTypeDecl>,
         methods: Vec<TraitMethod>,
         span: Span,
         comments: Vec<String>,
@@ -209,6 +210,7 @@ pub enum Decl {
         trait_name: Option<String>,
         /// The concrete types this impl is for. Standalone impls contain one type.
         tys: Vec<Type>,
+        associated_types: Vec<AssociatedTypeDef>,
         methods: Vec<ImplMethod>,
         span: Span,
         comments: Vec<String>,
@@ -233,6 +235,7 @@ pub enum Decl {
     BuiltinImplDecl {
         trait_name: String,
         tys: Vec<Type>,
+        associated_types: Vec<AssociatedTypeDef>,
         methods: Vec<BuiltinImplMethod>,
         span: Span,
         comments: Vec<String>,
@@ -306,6 +309,21 @@ pub enum BindingAddressSpace {
     StorageRead,
     /// `storage(read_write)` — storage buffer (read-write)
     StorageReadWrite,
+}
+
+/// An associated type declaration inside a `trait` body: `type Output`
+#[derive(Debug, Clone)]
+pub struct AssociatedTypeDecl {
+    pub name: String,
+    pub span: Span,
+}
+
+/// An associated type definition inside an `impl` or `builtin impl` body: `type Output = F32`
+#[derive(Debug, Clone)]
+pub struct AssociatedTypeDef {
+    pub name: String,
+    pub ty: Type,
+    pub span: Span,
 }
 
 /// A method signature inside a `trait` declaration.
@@ -487,6 +505,8 @@ pub enum Type {
     Paren(Box<Type>, Span),
     Tuple(Vec<Type>, Span),
     Unit(Span),
+    /// Type projection: `a.Output` (associated type access)
+    Proj(Box<Type>, String, Span),
 }
 
 #[derive(Debug, Clone)]
@@ -539,7 +559,8 @@ impl Type {
             | Type::Arrow(_, _, s)
             | Type::Paren(_, s)
             | Type::Tuple(_, s)
-            | Type::Unit(s) => *s,
+            | Type::Unit(s)
+            | Type::Proj(_, _, s) => *s,
         }
     }
 }
@@ -666,6 +687,25 @@ impl Parser {
             }
             let kind = self.tokens[i].kind;
             if !kind.is_trivia() {
+                return kind;
+            }
+            i += 1;
+        }
+    }
+
+    /// Peek at the first non-trivia, non-layout token *after* the current token.
+    fn peek_after_current(&self) -> SyntaxKind {
+        let mut i = self.pos + 1;
+        loop {
+            if i >= self.tokens.len() {
+                return SyntaxKind::Eof;
+            }
+            let kind = self.tokens[i].kind;
+            if !kind.is_trivia()
+                && kind != SyntaxKind::LayoutSemicolon
+                && kind != SyntaxKind::LayoutBraceOpen
+                && kind != SyntaxKind::LayoutBraceClose
+            {
                 return kind;
             }
             i += 1;
@@ -2090,6 +2130,7 @@ impl Parser {
         self.eat(SyntaxKind::LayoutBraceOpen);
         self.skip_trivia();
 
+        let mut associated_types = Vec::new();
         let mut methods = Vec::new();
         while !self.at_layout_end() && !self.at_end() && self.consume_fuel() {
             self.eat_layout_semi();
@@ -2097,6 +2138,12 @@ impl Parser {
             if self.at_layout_end() || self.at_end() {
                 break;
             }
+
+            if let Some(assoc_def) = self.try_parse_assoc_type_def() {
+                associated_types.push(assoc_def);
+                continue;
+            }
+
             let mstart = self.current_span().start;
             let method_name = self.parse_method_name();
             self.skip_trivia();
@@ -2118,6 +2165,7 @@ impl Parser {
         Decl::BuiltinImplDecl {
             trait_name,
             tys,
+            associated_types,
             methods,
             span,
             comments: vec![],
@@ -2393,7 +2441,8 @@ impl Parser {
         self.expect(SyntaxKind::KwWhere);
         self.skip_trivia();
 
-        // Parse method signatures — they follow layout rules (one per line)
+        // Parse associated type declarations and method signatures
+        let mut associated_types = Vec::new();
         let mut methods = Vec::new();
         // Consume optional layout open brace
         self.eat(SyntaxKind::LayoutBraceOpen);
@@ -2404,6 +2453,11 @@ impl Parser {
             self.skip_trivia();
             if self.at_layout_end() || self.at_end() {
                 break;
+            }
+
+            if let Some(assoc_decl) = self.try_parse_assoc_type_decl() {
+                associated_types.push(assoc_decl);
+                continue;
             }
 
             let mstart = self.current_span().start;
@@ -2427,6 +2481,7 @@ impl Parser {
         Decl::TraitDecl {
             name,
             vars,
+            associated_types,
             methods,
             span,
             comments: vec![],
@@ -2471,7 +2526,8 @@ impl Parser {
         self.expect(SyntaxKind::KwWhere);
         self.skip_trivia();
 
-        // Parse method implementations
+        // Parse associated type definitions and method implementations
+        let mut associated_types = Vec::new();
         let mut methods = Vec::new();
         let mut method_sigs = HashMap::new();
         self.eat(SyntaxKind::LayoutBraceOpen);
@@ -2482,6 +2538,11 @@ impl Parser {
             self.skip_trivia();
             if self.at_layout_end() || self.at_end() {
                 break;
+            }
+
+            if let Some(assoc_def) = self.try_parse_assoc_type_def() {
+                associated_types.push(assoc_def);
+                continue;
             }
 
             let mstart = self.current_span().start;
@@ -2540,6 +2601,7 @@ impl Parser {
         Decl::ImplDecl {
             trait_name,
             tys,
+            associated_types,
             methods,
             span,
             comments: vec![],
@@ -3724,11 +3786,66 @@ impl Parser {
         ty
     }
 
+    /// Try to parse `type UpperIdent = Type` (associated type definition).
+    /// Returns `Some(AssociatedTypeDef)` if the current position matches,
+    /// `None` otherwise (without consuming tokens).
+    fn try_parse_assoc_type_def(&mut self) -> Option<AssociatedTypeDef> {
+        if self.at(SyntaxKind::Ident)
+            && self.text_of(&self.current_token()) == "type"
+            && self.peek_after_current() == SyntaxKind::UpperIdent
+        {
+            let type_start = self.current_span().start;
+            self.bump(); // consume "type"
+            self.skip_trivia();
+            let name_tok = self.expect(SyntaxKind::UpperIdent);
+            let assoc_name = self.text_of(&name_tok).to_owned();
+            self.skip_trivia();
+            self.expect(SyntaxKind::Equals);
+            self.skip_trivia();
+            let ty = self.parse_type();
+            let assoc_span = self.span_from(type_start);
+            self.skip_trivia();
+            self.eat_layout_semi();
+            Some(AssociatedTypeDef {
+                name: assoc_name,
+                ty,
+                span: assoc_span,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Try to parse `type UpperIdent` (associated type declaration in a trait).
+    /// Returns `Some(AssociatedTypeDecl)` if the current position matches,
+    /// `None` otherwise (without consuming tokens).
+    fn try_parse_assoc_type_decl(&mut self) -> Option<AssociatedTypeDecl> {
+        if self.at(SyntaxKind::Ident)
+            && self.text_of(&self.current_token()) == "type"
+            && self.peek_after_current() == SyntaxKind::UpperIdent
+        {
+            let type_start = self.current_span().start;
+            self.bump(); // consume "type"
+            self.skip_trivia();
+            let name_tok = self.expect(SyntaxKind::UpperIdent);
+            let assoc_name = self.text_of(&name_tok).to_owned();
+            let assoc_span = self.span_from(type_start);
+            self.skip_trivia();
+            self.eat_layout_semi();
+            Some(AssociatedTypeDecl {
+                name: assoc_name,
+                span: assoc_span,
+            })
+        } else {
+            None
+        }
+    }
+
     fn parse_type_atom(&mut self) -> Type {
         self.skip_trivia();
         let start = self.current_span().start;
 
-        match self.peek() {
+        let base = match self.peek() {
             SyntaxKind::UpperIdent => {
                 let tok = self.bump();
                 let name = self.text_of(&tok).to_owned();
@@ -3786,7 +3903,28 @@ impl Parser {
                 self.bump();
                 Type::Con("<error>".to_owned(), span)
             }
+        };
+
+        // Parse type projections: `a.Output`
+        self.parse_type_projections(base)
+    }
+
+    /// Parse chained type projections like `a.Output.SubType`
+    fn parse_type_projections(&mut self, mut base: Type) -> Type {
+        loop {
+            self.skip_trivia();
+            if self.at(SyntaxKind::Dot) {
+                self.bump(); // consume `.`
+                self.skip_trivia();
+                let name_tok = self.expect(SyntaxKind::UpperIdent);
+                let name = self.text_of(&name_tok).to_owned();
+                let span = base.span().merge(name_tok.span);
+                base = Type::Proj(Box::new(base), name, span);
+            } else {
+                break;
+            }
         }
+        base
     }
 
     fn parse_angle_type_args(&mut self, mut base: Type) -> Type {
@@ -3818,7 +3956,8 @@ impl Parser {
             | Type::Arrow(_, _, span)
             | Type::Paren(_, span)
             | Type::Tuple(_, span)
-            | Type::Unit(span) => {
+            | Type::Unit(span)
+            | Type::Proj(_, _, span) => {
                 *span = span.merge(end.span);
             }
         }

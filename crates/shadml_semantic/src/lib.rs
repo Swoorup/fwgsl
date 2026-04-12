@@ -18,6 +18,8 @@ pub struct TraitInfo {
     /// The type variables the trait is parameterised over.
     pub vars: Vec<String>,
     pub var_ids: Vec<TyVarId>,
+    /// Associated type names declared by the trait (e.g., ["Output"]).
+    pub associated_types: Vec<String>,
     /// Method signatures: method_name → type (with trait vars as free type variables).
     pub methods: Vec<(String, Ty)>,
 }
@@ -29,6 +31,8 @@ pub struct ImplInfo {
     pub trait_name: Option<String>,
     /// The concrete types this impl is for. Standalone impls contain one type.
     pub tys: Vec<Ty>,
+    /// Associated type bindings: "Output" -> F32, etc.
+    pub associated_type_bindings: HashMap<String, Ty>,
     /// Method implementations: method_name → mangled function name.
     pub methods: HashMap<String, String>,
 }
@@ -44,6 +48,8 @@ pub struct BuiltinExternInfo {
 pub struct BuiltinImplInfo {
     pub trait_name: String,
     pub tys: Vec<Ty>,
+    /// Associated type bindings: "Output" -> F32, etc.
+    pub associated_type_bindings: HashMap<String, Ty>,
     pub methods: HashMap<String, BuiltinLowering>,
 }
 
@@ -80,6 +86,24 @@ pub struct DataTypeInfo {
     pub name: String,
     pub type_params: Vec<String>,
     pub constructors: Vec<String>,
+}
+
+/// Context for resolving associated type names during type conversion.
+struct AssocTypeContext {
+    trait_name: String,
+    trait_var_ids: Vec<TyVarId>,
+    assoc_type_names: Vec<String>,
+}
+
+impl AssocTypeContext {
+    /// Build an `AssocProj` type using this context's trait parameters.
+    fn to_assoc_proj(&self, name: String) -> Ty {
+        Ty::AssocProj {
+            trait_params: self.trait_var_ids.iter().map(|&id| Ty::Var(id)).collect(),
+            name,
+            trait_name: self.trait_name.clone(),
+        }
+    }
 }
 
 impl SemanticAnalyzer {
@@ -175,6 +199,35 @@ impl SemanticAnalyzer {
             }
         }
 
+        // Pass 1e: pre-collect trait names and associated type names
+        // (needed by Pass 2 to convert Type::Proj in type signatures)
+        for decl in &all_decls {
+            if let Decl::TraitDecl {
+                name,
+                vars,
+                associated_types,
+                ..
+            } = decl
+            {
+                let var_ids: Vec<TyVarId> = vars
+                    .iter()
+                    .map(|_| fresh_var_id(&mut self.engine))
+                    .collect();
+                let assoc_type_names: Vec<String> =
+                    associated_types.iter().map(|at| at.name.clone()).collect();
+                self.traits.insert(
+                    name.clone(),
+                    TraitInfo {
+                        name: name.clone(),
+                        vars: vars.clone(),
+                        var_ids,
+                        associated_types: assoc_type_names,
+                        methods: vec![],
+                    },
+                );
+            }
+        }
+
         // Pass 2: collect type signatures
         for decl in &all_decls {
             if let Decl::TypeSig {
@@ -223,13 +276,28 @@ impl SemanticAnalyzer {
         // Pass 2b: collect trait declarations
         for decl in &all_decls {
             if let Decl::TraitDecl {
-                name, vars, methods, ..
+                name,
+                vars,
+                associated_types,
+                methods,
+                ..
             } = decl
             {
                 let var_ids: Vec<TyVarId> = vars
                     .iter()
                     .map(|_| fresh_var_id(&mut self.engine))
                     .collect();
+                let assoc_type_names: Vec<String> =
+                    associated_types.iter().map(|at| at.name.clone()).collect();
+                let assoc_ctx = if !assoc_type_names.is_empty() {
+                    Some(AssocTypeContext {
+                        trait_name: name.clone(),
+                        trait_var_ids: var_ids.clone(),
+                        assoc_type_names,
+                    })
+                } else {
+                    None
+                };
                 let mut trait_methods = Vec::new();
                 for m in methods {
                     let canonical_name = canonical_trait_method_name(name, &m.name);
@@ -238,7 +306,11 @@ impl SemanticAnalyzer {
                         .cloned()
                         .zip(var_ids.iter().copied())
                         .collect();
-                    let method_ty = self.convert_syntax_type_with_scope(&m.ty, &mut scope);
+                    let method_ty = self.convert_syntax_type_with_scope_assoc(
+                        &m.ty,
+                        &mut scope,
+                        assoc_ctx.as_ref(),
+                    );
                     let scheme = Scheme::poly_with_constraints(
                         vec![Predicate {
                             trait_name: name.clone(),
@@ -258,6 +330,10 @@ impl SemanticAnalyzer {
                         name: name.clone(),
                         vars: vars.clone(),
                         var_ids,
+                        associated_types: associated_types
+                            .iter()
+                            .map(|at| at.name.clone())
+                            .collect(),
                         methods: trait_methods,
                     },
                 );
@@ -269,6 +345,7 @@ impl SemanticAnalyzer {
             if let Decl::ImplDecl {
                 trait_name,
                 tys,
+                associated_types,
                 methods,
                 span,
                 ..
@@ -283,6 +360,16 @@ impl SemanticAnalyzer {
                     .map(format_type_suffix)
                     .collect::<Vec<_>>()
                     .join("__");
+                // Collect associated type bindings from AST
+                let assoc_type_bindings: HashMap<String, Ty> = associated_types
+                    .iter()
+                    .map(|at| {
+                        (
+                            at.name.clone(),
+                            normalize_type_aliases(&self.convert_syntax_type(&at.ty).ty),
+                        )
+                    })
+                    .collect();
                 let mut impl_methods = HashMap::new();
                 for m in methods {
                     let logical_name = trait_name
@@ -299,6 +386,8 @@ impl SemanticAnalyzer {
                                 if tmethod_name == logical_name {
                                     let concrete_ty =
                                         replace_trait_vars(&tmethod_ty, &trait_info.var_ids, &impl_tys);
+                                    let concrete_ty =
+                                        resolve_assoc_projections(&concrete_ty, &assoc_type_bindings);
                                     if let Some(method_ty) = &m.ty {
                                         let declared_scheme = self.convert_syntax_type(method_ty);
                                         let declared_ty = self.engine.instantiate(&declared_scheme);
@@ -378,6 +467,29 @@ impl SemanticAnalyzer {
                                 .with_help("implement all required trait methods"),
                             );
                         }
+
+                        // Validate that all trait associated types have bindings.
+                        let missing_assoc_types: Vec<&str> = trait_info
+                            .associated_types
+                            .iter()
+                            .filter(|name| !assoc_type_bindings.contains_key(name.as_str()))
+                            .map(String::as_str)
+                            .collect();
+                        if !missing_assoc_types.is_empty() {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "Incomplete implementation of trait '{}' for type '{}': missing associated type(s): {}",
+                                    tname,
+                                    format_impl_head(&impl_tys),
+                                    missing_assoc_types.join(", ")
+                                ))
+                                .with_label(Label::primary(*span, "missing associated type definition"))
+                                .with_help(format!(
+                                    "add `type {} = ...` to the impl block",
+                                    missing_assoc_types.join(", type ")
+                                )),
+                            );
+                        }
                     }
 
                     if self.impls.iter().any(|existing| {
@@ -398,12 +510,14 @@ impl SemanticAnalyzer {
                 self.impls.push(ImplInfo {
                     trait_name: trait_name.clone(),
                     tys: impl_tys,
+                    associated_type_bindings: assoc_type_bindings,
                     methods: impl_methods,
                 });
             }
             if let Decl::BuiltinImplDecl {
                 trait_name,
                 tys,
+                associated_types,
                 methods,
                 span,
                 ..
@@ -411,7 +525,17 @@ impl SemanticAnalyzer {
             {
                 let impl_tys: Vec<Ty> = tys
                     .iter()
-                    .map(|ty| self.convert_syntax_type(ty).ty)
+                    .map(|ty| normalize_type_aliases(&self.convert_syntax_type(ty).ty))
+                    .collect();
+                // Collect associated type bindings from AST
+                let assoc_type_bindings: HashMap<String, Ty> = associated_types
+                    .iter()
+                    .map(|at| {
+                        (
+                            at.name.clone(),
+                            normalize_type_aliases(&self.convert_syntax_type(&at.ty).ty),
+                        )
+                    })
                     .collect();
                 if impl_tys.iter().any(|ty| !ty.free_vars().is_empty()) {
                     self.engine.diagnostics.push(
@@ -449,6 +573,28 @@ impl SemanticAnalyzer {
                             );
                         }
                     }
+                    // Validate that all trait associated types have bindings.
+                    let missing_assoc_types: Vec<&str> = trait_info
+                        .associated_types
+                        .iter()
+                        .filter(|name| !assoc_type_bindings.contains_key(name.as_str()))
+                        .map(String::as_str)
+                        .collect();
+                    if !missing_assoc_types.is_empty() {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "Incomplete builtin implementation of trait '{}' for type '{}': missing associated type(s): {}",
+                                trait_name,
+                                format_impl_head(&impl_tys),
+                                missing_assoc_types.join(", ")
+                            ))
+                            .with_label(Label::primary(*span, "missing associated type definition"))
+                            .with_help(format!(
+                                "add `type {} = ...` to the builtin impl block",
+                                missing_assoc_types.join(", type ")
+                            )),
+                        );
+                    }
                 }
                 if self.builtin_impls.iter().any(|existing| {
                     existing.trait_name == *trait_name && existing.tys == impl_tys
@@ -470,6 +616,7 @@ impl SemanticAnalyzer {
                 self.builtin_impls.push(BuiltinImplInfo {
                     trait_name: trait_name.clone(),
                     tys: impl_tys,
+                    associated_type_bindings: assoc_type_bindings,
                     methods: method_map,
                 });
             }
@@ -652,7 +799,46 @@ impl SemanticAnalyzer {
                 }
             })
             .collect();
-        let ty = self.convert_syntax_type_with_scope(ty, &mut scope);
+
+        // Build AssocTypeContext from the constraints so that Type::Proj
+        // in the type body (e.g., `a.Output` in `Add a b => a -> b -> a.Output`)
+        // can be properly converted with all trait parameters.
+        let constraint_contexts: Vec<AssocTypeContext> = constraints
+            .iter()
+            .filter_map(|constraint| {
+                let trait_info = self.traits.get(&constraint.trait_name)?;
+                let trait_var_ids: Vec<TyVarId> = constraint
+                    .tys
+                    .iter()
+                    .map(|ty| {
+                        // Each constraint type should be a Var referring to a scope variable
+                        if let Type::Var(name, _) = ty {
+                            scope.get(name).copied().unwrap_or_else(|| fresh_var_id(&mut self.engine))
+                        } else {
+                            fresh_var_id(&mut self.engine)
+                        }
+                    })
+                    .collect();
+                if trait_info.associated_types.is_empty() {
+                    None
+                } else {
+                    Some(AssocTypeContext {
+                        trait_name: constraint.trait_name.clone(),
+                        trait_var_ids,
+                        assoc_type_names: trait_info.associated_types.clone(),
+                    })
+                }
+            })
+            .collect();
+        let ty = if constraint_contexts.is_empty() {
+            self.convert_syntax_type_with_scope(ty, &mut scope)
+        } else {
+            // Use the first constraint with associated types as the context.
+            // For Type::Proj, we'll also search all contexts in the conversion.
+            self.convert_syntax_type_with_scope_assoc(
+                ty, &mut scope, constraint_contexts.first(),
+            )
+        };
         Scheme::poly_with_constraints(predicates, scope_vars(&scope), ty)
     }
 
@@ -661,8 +847,23 @@ impl SemanticAnalyzer {
         ty: &Type,
         scope: &mut HashMap<String, TyVarId>,
     ) -> Ty {
+        self.convert_syntax_type_with_scope_assoc(ty, scope, None)
+    }
+
+    fn convert_syntax_type_with_scope_assoc(
+        &mut self,
+        ty: &Type,
+        scope: &mut HashMap<String, TyVarId>,
+        assoc_ctx: Option<&AssocTypeContext>,
+    ) -> Ty {
         let ty = match ty {
             Type::Con(name, span) => {
+                // If this name matches an associated type, produce AssocProj
+                if let Some(ctx) = assoc_ctx {
+                    if ctx.assoc_type_names.iter().any(|n| n == name) {
+                        return ctx.to_assoc_proj(name.clone());
+                    }
+                }
                 if let Some(expanded) = self.type_aliases.get(name).cloned() {
                     return expanded;
                 }
@@ -678,23 +879,61 @@ impl SemanticAnalyzer {
                 }
                 Ty::Con(name.clone())
             }
-            Type::Var(name, _) => Ty::Var(
-                *scope
-                    .entry(name.clone())
-                    .or_insert_with(|| fresh_var_id(&mut self.engine)),
-            ),
+            Type::Var(name, _) => {
+                // If this name matches an associated type, produce AssocProj
+                if let Some(ctx) = assoc_ctx {
+                    if ctx.assoc_type_names.iter().any(|n| n == name) {
+                        return ctx.to_assoc_proj(name.clone());
+                    }
+                }
+                Ty::Var(
+                    *scope
+                        .entry(name.clone())
+                        .or_insert_with(|| fresh_var_id(&mut self.engine)),
+                )
+            }
+            Type::Proj(base, name, _) => {
+                let base_ty = self.convert_syntax_type_with_scope_assoc(base, scope, assoc_ctx);
+                if let Some(ctx) = assoc_ctx {
+                    // Use ALL trait parameters from the context, not just the base.
+                    // `a.Output` in `Add a b => ...` means AssocProj with
+                    // trait_params = [a, b], not just [a].
+                    ctx.to_assoc_proj(name.clone())
+                } else {
+                    // Fallback: try to find the trait by looking up which trait
+                    // has `base_ty` as a parameter and has an associated type `name`.
+                    if let Some((trait_name, trait_params)) =
+                        self.find_assoc_type_context(&base_ty, name)
+                    {
+                        Ty::AssocProj {
+                            trait_params,
+                            name: name.clone(),
+                            trait_name,
+                        }
+                    } else {
+                        // Cannot determine which trait this associated type
+                        // belongs to. The AssocProj will remain unresolved
+                        // and likely produce a type error during inference.
+                        Ty::AssocProj {
+                            trait_params: vec![base_ty],
+                            name: name.clone(),
+                            trait_name: String::new(),
+                        }
+                    }
+                }
+            }
             Type::Nat(n, _) => Ty::Nat(*n),
             Type::Arrow(a, b, _) => {
-                let a = self.convert_syntax_type_with_scope(a, scope);
-                let b = self.convert_syntax_type_with_scope(b, scope);
+                let a = self.convert_syntax_type_with_scope_assoc(a, scope, assoc_ctx);
+                let b = self.convert_syntax_type_with_scope_assoc(b, scope, assoc_ctx);
                 Ty::arrow(a, b)
             }
             Type::App(f, a, _) => {
-                let f = self.convert_syntax_type_with_scope(f, scope);
-                let a = self.convert_syntax_type_with_scope(a, scope);
+                let f = self.convert_syntax_type_with_scope_assoc(f, scope, assoc_ctx);
+                let a = self.convert_syntax_type_with_scope_assoc(a, scope, assoc_ctx);
                 Ty::app(f, a)
             }
-            Type::Paren(inner, _) => self.convert_syntax_type_with_scope(inner, scope),
+            Type::Paren(inner, _) => self.convert_syntax_type_with_scope_assoc(inner, scope, assoc_ctx),
             Type::Tuple(elems, _) => {
                 if elems.is_empty() {
                     Ty::unit()
@@ -702,7 +941,7 @@ impl SemanticAnalyzer {
                     Ty::Tuple(
                         elems
                             .iter()
-                            .map(|e| self.convert_syntax_type_with_scope(e, scope))
+                            .map(|e| self.convert_syntax_type_with_scope_assoc(e, scope, assoc_ctx))
                             .collect(),
                     )
                 }
@@ -720,6 +959,31 @@ impl SemanticAnalyzer {
             || self.builtin_types.contains_key(name)
             || self.bitfield_field_names.contains_key(name)
             || self.type_aliases.contains_key(name)
+    }
+
+    /// Find a trait that has an associated type with the given name, and
+    /// return the trait name and parameter types. Used when Type::Proj
+    /// is encountered outside a trait body (e.g., in type signatures).
+    fn find_assoc_type_context(
+        &self,
+        base_ty: &Ty,
+        assoc_name: &str,
+    ) -> Option<(String, Vec<Ty>)> {
+        for (trait_name, trait_info) in &self.traits {
+            if trait_info.associated_types.iter().any(|n| n == assoc_name) {
+                // Found a trait with this associated type name.
+                // Build the trait_params: the first param is base_ty,
+                // and the rest are filled with base_ty as a
+                // placeholder. The type checker will constrain these
+                // through unification during inference.
+                let mut trait_params = vec![base_ty.clone()];
+                for _ in 1..trait_info.vars.len() {
+                    trait_params.push(base_ty.clone());
+                }
+                return Some((trait_name.clone(), trait_params));
+            }
+        }
+        None
     }
 
     fn standalone_impl_method_scheme(&mut self, impl_ty: &Ty, arity: usize) -> Scheme {
@@ -821,12 +1085,23 @@ impl SemanticAnalyzer {
         for param_ty in param_types.into_iter().rev() {
             fun_ty = Ty::arrow(param_ty, fun_ty);
         }
+        // Resolve associated type projections (e.g., `a.Output` → `F32`)
+        fun_ty = self.apply_subst_resolve(&fun_ty);
 
         // If there's a declared type, unify with it
         if let Some(qualified) = declared.take() {
-            self.engine.unify(&fun_ty, &qualified.ty, span);
+            // Resolve inferred predicates before unifying with the declared
+            // type. This ensures type variables constrained by trait
+            // predicates (e.g., the type of an indexed expression used with
+            // an arithmetic operator) are unified with concrete types first.
+            // Without this, AssocProj types with free type variables in their
+            // trait_params cannot unify with the declared return type.
             let inferred_constraints =
                 self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
+            // Re-resolve after predicate improvement may have unified type
+            // variables with concrete types.
+            fun_ty = self.apply_subst_resolve(&fun_ty);
+            self.engine.unify(&fun_ty, &qualified.ty, span);
             for predicate in inferred_constraints {
                 self.engine.diagnostics.push(
                     Diagnostic::error(format!(
@@ -844,6 +1119,8 @@ impl SemanticAnalyzer {
         } else {
             let inferred_constraints =
                 self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
+            // Re-resolve after predicate improvement may have updated the substitution
+            fun_ty = self.apply_subst_resolve(&fun_ty);
             // Add inferred type
             let scheme = self
                 .engine
@@ -928,9 +1205,12 @@ impl SemanticAnalyzer {
             fun_ty = Ty::arrow(param_ty, fun_ty);
         }
 
-        self.engine.unify(&fun_ty, &declared.ty, span);
+        // Resolve inferred predicates before unifying with the declared type,
+        // same as in check_function.
         let inferred_constraints =
             self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
+        fun_ty = self.apply_subst_resolve(&fun_ty);
+        self.engine.unify(&fun_ty, &declared.ty, span);
         for predicate in inferred_constraints {
             self.engine.diagnostics.push(
                 Diagnostic::error(format!(
@@ -949,70 +1229,21 @@ impl SemanticAnalyzer {
         active_constraints: &[Predicate],
         span: Span,
     ) -> Vec<Predicate> {
-        let mut pending: Vec<Predicate> = self.inferred_predicates.drain(start..).collect();
-        loop {
-            let mut changed = false;
-            for predicate in &mut pending {
-                let current = predicate.apply_subst(&self.engine.subst);
-                self.try_improve_predicate(&current, span);
-                let improved = current.apply_subst(&self.engine.subst);
-                changed |= improved != current;
-                *predicate = improved;
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        let mut retained = Vec::new();
-        for predicate in pending
-            .into_iter()
-            .map(|predicate| predicate.apply_subst(&self.engine.subst))
-        {
-            if retained.iter().any(|existing| existing == &predicate) {
-                continue;
-            }
-            if active_constraints.iter().any(|active| {
-                active.apply_subst(&self.engine.subst) == predicate
-            }) {
-                continue;
-            }
-            if predicate.tys.iter().all(|ty| ty.free_vars().is_empty()) {
-                if self.has_impl_for_predicate(&predicate) {
-                    continue;
-                }
-                self.engine.diagnostics.push(
-                    Diagnostic::error(format!(
-                        "type `{}` does not implement trait `{}`",
-                        format_impl_head(&predicate.tys),
-                        predicate.trait_name
-                    ))
-                    .with_label(Label::primary(span, "missing trait implementation"))
-                    .with_help(format!(
-                        "define `impl {} {} where ...`",
-                        predicate.trait_name,
-                        format_impl_head(&predicate.tys)
-                    )),
-                );
-                continue;
-            }
-            retained.push(predicate);
-        }
-        retained
-    }
-
-    fn has_impl_for_predicate(&self, predicate: &Predicate) -> bool {
-        predicate_has_impl(predicate, &self.impls, &self.builtin_impls)
-    }
-
-    fn try_improve_predicate(&mut self, predicate: &Predicate, span: Span) {
-        try_improve_predicate_with_impls(
+        let pending: Vec<Predicate> = self.inferred_predicates.drain(start..).collect();
+        resolve_predicates_fixpoint(
             &mut self.engine,
-            predicate,
-            span,
             &self.impls,
             &self.builtin_impls,
-        );
+            pending,
+            active_constraints,
+            span,
+        )
+    }
+
+    /// Apply substitution and resolve any AssocProj nodes in a type.
+    fn apply_subst_resolve(&self, ty: &Ty) -> Ty {
+        let substituted = ty.apply_subst(&self.engine.subst);
+        resolve_assoc_projections_with_impls(&substituted, &self.impls, &self.builtin_impls)
     }
 
     fn bind_pattern(&mut self, pat: &Pat, ty: &Ty, env: &mut TypeEnv) {
@@ -1208,6 +1439,28 @@ impl SemanticAnalyzer {
                     &Ty::arrow(lhs_ty, Ty::arrow(rhs_ty, ret_ty.clone())),
                     *span,
                 );
+                // Eagerly resolve associated type projections in the return type.
+                // When an operator like `(+)` returns `a.Output`, the substitution
+                // maps ret_ty to an AssocProj. If the trait params are already
+                // concrete (e.g., after unifying lhs and rhs), we can resolve
+                // the projection immediately.
+                //
+                // We must update the substitution directly rather than calling
+                // unify, because if subst[ret_ty_var] is already AssocProj,
+                // unify would normalize ret_ty to AssocProj and the permissive
+                // AssocProj-vs-concrete case would accept it without updating
+                // the substitution.
+                let ret_substituted = ret_ty.apply_subst(&self.engine.subst);
+                let ret_resolved = resolve_assoc_projections_with_impls(&ret_substituted, &self.impls, &self.builtin_impls);
+                if ret_resolved != ret_substituted {
+                    // The AssocProj resolved to a concrete type. Update the
+                    // substitution entry for ret_ty directly.
+                    if let Ty::Var(v) = ret_ty {
+                        self.engine.subst.insert(v, ret_resolved);
+                    } else {
+                        self.engine.unify(&ret_ty, &ret_resolved, *span);
+                    }
+                }
                 ret_ty
             }
 
@@ -1238,12 +1491,18 @@ impl SemanticAnalyzer {
                             active_constraints,
                             bind.expr.span(),
                         );
+                    // Apply substitution and resolve AssocProj after predicate resolution
+                    let ty = self.apply_subst_resolve(&ty);
                     let scheme = self
                         .engine
                         .generalize_with_constraints(&local_env, &ty, &inferred_constraints);
                     self.local_binding_schemes
                         .insert(bind.name_span, scheme.clone());
                     local_env.insert(bind.name.clone(), scheme);
+                    // After resolving predicates and AssocProj for this binding,
+                    // resolve AssocProj in the substitution so that subsequent
+                    // expressions can use the resolved types.
+                    resolve_assoc_projections_in_subst(&mut self.engine.subst, &self.impls, &self.builtin_impls);
                 }
                 self.infer_expr(body, &mut local_env, active_constraints)
             }
@@ -1703,7 +1962,7 @@ fn format_constraints(predicates: &[Predicate]) -> String {
         .join(", ")
 }
 
-fn format_impl_head(tys: &[Ty]) -> String {
+pub fn format_impl_head(tys: &[Ty]) -> String {
     tys.iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -1748,77 +2007,82 @@ pub fn builtin_head_for_predicate(predicate: &Predicate) -> Option<Vec<Ty>> {
     }
 
     match (predicate.trait_name.as_str(), predicate.tys.as_slice()) {
-        ("Add", [a, b, c])
-        | ("Sub", [a, b, c])
-        | ("Div", [a, b, c])
-        | ("Mod", [a, b, c])
-        | ("BitAnd", [a, b, c])
-        | ("BitXor", [a, b, c]) => {
+        ("Add", [a, b])
+        | ("Sub", [a, b])
+        | ("Div", [a, b])
+        | ("Mod", [a, b])
+        | ("BitAnd", [a, b])
+        | ("BitXor", [a, b]) => {
             for candidate in [Ty::f32(), Ty::i32(), Ty::u32()] {
-                if same_or_var(a, &candidate) && same_or_var(b, &candidate) && same_or_var(c, &candidate) {
-                    return Some(vec![candidate.clone(), candidate.clone(), candidate]);
+                if same_or_var(a, &candidate) && same_or_var(b, &candidate) {
+                    return Some(vec![candidate.clone(), candidate]);
                 }
             }
-            if same_or_var(a, b) && same_or_var(b, c) {
+            if same_or_var(a, b) {
                 if let Some(vec_ty) = a
                     .free_vars()
                     .is_empty()
                     .then(|| normalize_type_aliases(a))
                     .or_else(|| b.free_vars().is_empty().then(|| normalize_type_aliases(b)))
-                    .or_else(|| c.free_vars().is_empty().then(|| normalize_type_aliases(c)))
                 {
                     if extract_vec_type(&vec_ty).is_some() || extract_mat_type(&vec_ty).is_some() {
-                        return Some(vec![vec_ty.clone(), vec_ty.clone(), vec_ty]);
+                        return Some(vec![vec_ty.clone(), vec_ty]);
                     }
                 }
             }
             None
         }
-        ("Mul", [a, b, c]) => {
+        ("Mul", [a, b]) => {
             for candidate in [Ty::f32(), Ty::i32(), Ty::u32()] {
-                if same_or_var(a, &candidate) && same_or_var(b, &candidate) && same_or_var(c, &candidate) {
-                    return Some(vec![candidate.clone(), candidate.clone(), candidate]);
+                if same_or_var(a, &candidate) && same_or_var(b, &candidate) {
+                    return Some(vec![candidate.clone(), candidate]);
                 }
             }
-            if let Some(lhs) = first_concrete(&[a, b, c]) {
-                if same_or_var(&lhs, b) && same_or_var(&lhs, c) && (extract_vec_type(&lhs).is_some() || extract_mat_type(&lhs).is_some()) {
-                    return Some(vec![lhs.clone(), lhs.clone(), lhs]);
+            if let Some(lhs) = first_concrete(&[a, b]) {
+                if same_or_var(&lhs, a) && same_or_var(&lhs, b) && (extract_vec_type(&lhs).is_some() || extract_mat_type(&lhs).is_some()) {
+                    return Some(vec![lhs.clone(), lhs]);
                 }
             }
+            // Vec * Scalar -> Vec
             if let Some((_, elem)) = extract_vec_type(a) {
-                if scalar_numeric_name(b) == scalar_numeric_name(&elem) && same_or_var(a, c) {
-                    return Some(vec![normalize_type_aliases(a), elem.clone(), normalize_type_aliases(c)]);
+                if scalar_numeric_name(b) == scalar_numeric_name(&elem) {
+                    return Some(vec![normalize_type_aliases(a), elem.clone()]);
                 }
             }
+            // Scalar * Vec -> Vec
             if let Some((_, elem)) = extract_vec_type(b) {
-                if scalar_numeric_name(a) == scalar_numeric_name(&elem) && same_or_var(b, c) {
-                    return Some(vec![elem.clone(), normalize_type_aliases(b), normalize_type_aliases(c)]);
+                if scalar_numeric_name(a) == scalar_numeric_name(&elem) {
+                    return Some(vec![elem.clone(), normalize_type_aliases(b)]);
                 }
             }
+            // Mat * Scalar -> Mat
             if let Some((_, _, elem)) = extract_mat_type(a) {
-                if scalar_numeric_name(b) == scalar_numeric_name(&elem) && same_or_var(a, c) {
-                    return Some(vec![normalize_type_aliases(a), elem.clone(), normalize_type_aliases(c)]);
+                if scalar_numeric_name(b) == scalar_numeric_name(&elem) {
+                    return Some(vec![normalize_type_aliases(a), elem.clone()]);
                 }
             }
+            // Scalar * Mat -> Mat
             if let Some((_, _, elem)) = extract_mat_type(b) {
-                if scalar_numeric_name(a) == scalar_numeric_name(&elem) && same_or_var(b, c) {
-                    return Some(vec![elem.clone(), normalize_type_aliases(b), normalize_type_aliases(c)]);
+                if scalar_numeric_name(a) == scalar_numeric_name(&elem) {
+                    return Some(vec![elem.clone(), normalize_type_aliases(b)]);
                 }
             }
-            if let (Some((rows, cols, elem_a)), Some((cols_b, elem_b)), Some((rows_c, elem_c))) =
-                (extract_mat_type(a), extract_vec_type(b), extract_vec_type(c))
+            // Mat * Vec -> Vec
+            if let (Some((rows, cols, elem_a)), Some((cols_b, elem_b))) =
+                (extract_mat_type(a), extract_vec_type(b))
             {
-                if cols == cols_b && rows == rows_c && elem_a == elem_b && elem_b == elem_c {
-                    return Some(vec![normalize_type_aliases(a), normalize_type_aliases(b), normalize_type_aliases(c)]);
+                if cols == cols_b && elem_a == elem_b {
+                    // Result type is a vector with rows elements
+                    return Some(vec![normalize_type_aliases(a), vector_ty(rows as u64, elem_a)]);
                 }
             }
             None
         }
-        ("Shl", [a, b, c]) | ("Shr", [a, b, c]) => {
+        ("Shl", [a, b]) | ("Shr", [a, b]) => {
             for lhs in [Ty::i32(), Ty::u32()] {
                 for rhs in [Ty::i32(), Ty::u32()] {
-                    if same_or_var(a, &lhs) && same_or_var(b, &rhs) && same_or_var(c, &lhs) {
-                        return Some(vec![lhs.clone(), rhs.clone(), lhs]);
+                    if same_or_var(a, &lhs) && same_or_var(b, &rhs) {
+                        return Some(vec![lhs.clone(), rhs]);
                     }
                 }
             }
@@ -1863,7 +2127,141 @@ pub fn replace_trait_vars(ty: &Ty, trait_vars: &[TyVarId], replacements: &[Ty]) 
             vars.clone(),
             Box::new(replace_trait_vars(body, trait_vars, replacements)),
         ),
+        Ty::AssocProj { trait_params, name, trait_name } => Ty::AssocProj {
+            trait_params: trait_params.iter().map(|t| replace_trait_vars(t, trait_vars, replacements)).collect(),
+            name: name.clone(),
+            trait_name: trait_name.clone(),
+        },
     }
+}
+
+/// Resolve associated type projections by replacing `AssocProj` nodes
+/// whose trait_params are fully concrete with the corresponding binding.
+/// The `lookup` closure is called to resolve an `AssocProj` when its
+/// trait_params are all concrete. It receives the trait_name, resolved
+/// params, and assoc type name, and returns `Some(concrete_type)` if found.
+fn resolve_assoc_projections_with<F>(ty: &Ty, lookup: &F) -> Ty
+where
+    F: Fn(&str, &[Ty], &str) -> Option<Ty>,
+{
+    match ty {
+        Ty::AssocProj { trait_params, name, trait_name } => {
+            let resolved_params: Vec<Ty> = trait_params
+                .iter()
+                .map(|t| resolve_assoc_projections_with(t, lookup))
+                .collect();
+            if resolved_params.iter().all(|t| t.free_vars().is_empty()) {
+                if let Some(resolved) = lookup(trait_name, &resolved_params, name) {
+                    resolve_assoc_projections_with(&resolved, lookup)
+                } else {
+                    Ty::AssocProj {
+                        trait_params: resolved_params,
+                        name: name.clone(),
+                        trait_name: trait_name.clone(),
+                    }
+                }
+            } else {
+                Ty::AssocProj {
+                    trait_params: resolved_params,
+                    name: name.clone(),
+                    trait_name: trait_name.clone(),
+                }
+            }
+        }
+        Ty::App(f, a) => Ty::App(
+            Box::new(resolve_assoc_projections_with(f, lookup)),
+            Box::new(resolve_assoc_projections_with(a, lookup)),
+        ),
+        Ty::Arrow(a, b) => Ty::Arrow(
+            Box::new(resolve_assoc_projections_with(a, lookup)),
+            Box::new(resolve_assoc_projections_with(b, lookup)),
+        ),
+        Ty::Tuple(elems) => Ty::Tuple(
+            elems.iter().map(|e| resolve_assoc_projections_with(e, lookup)).collect(),
+        ),
+        Ty::Forall(vars, body) => Ty::Forall(
+            vars.clone(),
+            Box::new(resolve_assoc_projections_with(body, lookup)),
+        ),
+        _ => ty.clone(),
+    }
+}
+
+/// Resolve associated type projections using a direct binding map.
+/// Used during impl analysis where the bindings are already known.
+pub fn resolve_assoc_projections(ty: &Ty, bindings: &HashMap<String, Ty>) -> Ty {
+    resolve_assoc_projections_with(ty, &|_trait_name, _params, name| {
+        bindings.get(name).cloned()
+    })
+}
+
+/// Resolve `AssocProj` nodes in a type by looking up matching impls.
+/// When an `AssocProj` has fully-concrete trait_params, find the matching
+/// impl and use its associated type bindings to resolve the projection.
+pub fn resolve_assoc_projections_with_impls(
+    ty: &Ty,
+    impls: &[ImplInfo],
+    builtin_impls: &[BuiltinImplInfo],
+) -> Ty {
+    resolve_assoc_projections_with(ty, &|trait_name, params, name| {
+        lookup_assoc_type_binding(trait_name, params, impls, builtin_impls, name)
+    })
+}
+
+/// Look up an associated type binding from a matching impl.
+/// For `Mul F32 F32` with `Output = F32`, calling this with
+/// trait_name="Mul", trait_params=[F32, F32], assoc_name="Output"
+/// returns Some(F32).
+///
+/// All trait params must match the impl's `tys` (not just the first one),
+/// so that `Mul F32 F32`, `Mul F32 Vec2f`, etc. are distinguished correctly.
+fn lookup_assoc_type_binding(
+    trait_name: &str,
+    trait_params: &[Ty],
+    impls: &[ImplInfo],
+    builtin_impls: &[BuiltinImplInfo],
+    assoc_name: &str,
+) -> Option<Ty> {
+    let normalized_params: Vec<Ty> = trait_params.iter().map(normalize_type_aliases).collect();
+    // Collect all matching bindings from builtin impls
+    let mut found_binding: Option<Ty> = None;
+
+    for inst in builtin_impls {
+        if inst.trait_name == trait_name {
+            let matches = inst.tys.len() == normalized_params.len()
+                && inst.tys.iter().zip(normalized_params.iter())
+                    .all(|(inst_ty, param)| normalize_type_aliases(inst_ty) == *param);
+            if matches {
+                if let Some(binding) = inst.associated_type_bindings.get(assoc_name) {
+                    let resolved = resolve_assoc_projections_with_impls(binding, impls, builtin_impls);
+                    match &found_binding {
+                        Some(existing) if *existing != resolved => return None, // ambiguous
+                        _ => found_binding = Some(resolved),
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check user impls
+    for inst in impls {
+        if inst.trait_name.as_deref() == Some(trait_name) {
+            if inst.tys.len() == normalized_params.len()
+                && inst.tys.iter().zip(normalized_params.iter())
+                    .all(|(inst_ty, param)| normalize_type_aliases(inst_ty) == *param)
+            {
+                if let Some(binding) = inst.associated_type_bindings.get(assoc_name) {
+                    let resolved = resolve_assoc_projections_with_impls(binding, impls, builtin_impls);
+                    match &found_binding {
+                        Some(existing) if *existing != resolved => return None, // ambiguous
+                        _ => found_binding = Some(resolved),
+                    }
+                }
+            }
+        }
+    }
+
+    found_binding
 }
 
 fn fresh_var_id(engine: &mut InferEngine) -> TyVarId {
@@ -1950,6 +2348,65 @@ pub fn predicate_has_impl(
         .any(|inst| inst.trait_name == predicate.trait_name && inst.tys == predicate.tys)
 }
 
+/// When a single impl candidate matches a predicate, propagate its associated
+/// type bindings into the substitution. Finds any type variable mapped to an
+/// `AssocProj` referencing the matching impl's trait and with matching params,
+/// and updates the substitution to the concrete binding value.
+///
+/// This accelerates convergence of the fixpoint loop by resolving `AssocProj`
+/// eagerly, rather than waiting for `resolve_assoc_projections_in_subst` on
+/// the next iteration.
+fn apply_assoc_type_bindings(
+    engine: &mut InferEngine,
+    trait_name: &str,
+    impl_tys: &[Ty],
+    assoc_bindings: &HashMap<String, Ty>,
+) {
+    if assoc_bindings.is_empty() {
+        return;
+    }
+    let entries: Vec<(TyVarId, Ty)> = engine
+        .subst
+        .keys()
+        .filter_map(|key| {
+            let ty = engine.subst.lookup(key)?;
+            match ty {
+                Ty::AssocProj {
+                    trait_params,
+                    name,
+                    trait_name: proj_trait,
+                } if proj_trait == trait_name => {
+                    // Check if the trait params match the impl's tys after
+                    // applying the current substitution.
+                    let resolved_params: Vec<Ty> = trait_params
+                        .iter()
+                        .map(|p| p.apply_subst(&engine.subst))
+                        .collect();
+                    if resolved_params.len() == impl_tys.len()
+                        && resolved_params
+                            .iter()
+                            .zip(impl_tys.iter())
+                            .all(|(actual, expected)| {
+                                let actual = normalize_type_aliases(actual);
+                                let expected = normalize_type_aliases(expected);
+                                actual == expected
+                            })
+                    {
+                        if let Some(binding) = assoc_bindings.get(name) {
+                            return Some((key, binding.clone()));
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    for (key, resolved) in entries {
+        engine.subst.insert(key, resolved);
+    }
+}
+
 pub fn try_improve_predicate_with_impls(
     engine: &mut InferEngine,
     predicate: &Predicate,
@@ -1958,32 +2415,52 @@ pub fn try_improve_predicate_with_impls(
     builtin_impls: &[BuiltinImplInfo],
 ) {
     let predicate = predicate.apply_subst(&engine.subst);
+    // Resolve associated type projections in predicate types.
+    // This converts `Add F32 (F32.Output)` to `Add F32 F32` so that
+    // the predicate can match impls correctly.
+    let resolved_tys: Vec<Ty> = predicate.tys.iter()
+        .map(|ty| resolve_assoc_projections_with_impls(ty, impls, builtin_impls))
+        .collect();
+    let predicate = Predicate {
+        trait_name: predicate.trait_name,
+        tys: resolved_tys,
+    };
 
     if predicate.tys.iter().any(|ty| ty.free_vars().is_empty()) {
-        let candidates: Vec<Vec<Ty>> = impls
+        // Candidate: (impl_tys, associated_type_bindings)
+        let candidates: Vec<(Vec<Ty>, HashMap<String, Ty>)> = impls
             .iter()
             .filter(|inst| inst.trait_name.as_deref() == Some(predicate.trait_name.as_str()))
             .filter(|inst| inst.tys.len() == predicate.tys.len())
             .filter(|inst| predicate_matches_head(&predicate, &inst.tys))
-            .map(|inst| inst.tys.clone())
+            .map(|inst| (inst.tys.clone(), inst.associated_type_bindings.clone()))
             .collect();
         if candidates.len() == 1 {
-            for (actual, expected) in predicate.tys.iter().zip(candidates[0].iter()) {
+            let (tys, assoc_bindings) = &candidates[0];
+            for (actual, expected) in predicate.tys.iter().zip(tys.iter()) {
                 engine.unify(actual, expected, span);
             }
+            // Propagate associated type bindings: find any type variable in the
+            // substitution currently mapped to an AssocProj referencing this impl's
+            // trait, and update it to the concrete binding. This accelerates
+            // convergence by resolving AssocProj eagerly rather than waiting for
+            // the next iteration of the fixpoint loop.
+            apply_assoc_type_bindings(engine, &predicate.trait_name, tys, assoc_bindings);
             return;
         }
-        let builtin_candidates: Vec<Vec<Ty>> = builtin_impls
+        let builtin_candidates: Vec<(Vec<Ty>, HashMap<String, Ty>)> = builtin_impls
             .iter()
             .filter(|inst| inst.trait_name == predicate.trait_name)
             .filter(|inst| inst.tys.len() == predicate.tys.len())
             .filter(|inst| predicate_matches_head(&predicate, &inst.tys))
-            .map(|inst| inst.tys.clone())
+            .map(|inst| (inst.tys.clone(), inst.associated_type_bindings.clone()))
             .collect();
         if builtin_candidates.len() == 1 {
-            for (actual, expected) in predicate.tys.iter().zip(builtin_candidates[0].iter()) {
+            let (tys, assoc_bindings) = &builtin_candidates[0];
+            for (actual, expected) in predicate.tys.iter().zip(tys.iter()) {
                 engine.unify(actual, expected, span);
             }
+            apply_assoc_type_bindings(engine, &predicate.trait_name, tys, assoc_bindings);
         } else if let Some(preferred) = builtin_head_for_predicate(&predicate) {
             let preferred = preferred
                 .into_iter()
@@ -2004,6 +2481,191 @@ pub fn try_improve_predicate_with_impls(
             }
         }
     }
+}
+
+/// Resolve associated type projections in the substitution.
+///
+/// After type variables are unified with concrete types, `AssocProj` nodes
+/// like `AssocProj { trait_params: [F32, F32], name: "Output", trait_name: "Add" }`
+/// need to be resolved to their concrete types (e.g., `F32`) by looking
+/// up the matching impl's associated type bindings.
+pub fn resolve_assoc_projections_in_subst(
+    subst: &mut Substitution,
+    impls: &[ImplInfo],
+    builtin_impls: &[BuiltinImplInfo],
+) {
+    let entries: Vec<(TyVarId, Ty)> = subst
+        .keys()
+        .filter_map(|key| {
+            let ty = subst.lookup(key)?;
+            let substituted = ty.apply_subst(subst);
+            let resolved = resolve_assoc_projections_with_impls(&substituted, impls, builtin_impls);
+            if resolved != *ty {
+                Some((key, resolved))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (key, resolved) in entries {
+        subst.insert(key, resolved);
+    }
+}
+
+/// Maximum number of fixpoint iterations for predicate resolution
+/// before we declare convergence failure.
+const MAX_PREDICATE_ITERATIONS: usize = 16;
+
+/// Resolve inferred predicates using a fixpoint loop.
+///
+/// This is the canonical predicate resolution algorithm shared between
+/// the semantic analyzer and the AST lowering pass. It:
+///
+/// 1. Runs a fixpoint loop that resolves `AssocProj` nodes, applies the
+///    substitution, improves predicates against known impls, and repeats
+///    until nothing changes.
+///
+/// 2. Retains predicates that are still ambiguous (have free type variables),
+///    deduplicates them, and checks concrete predicates against available impls
+///    (emitting "missing trait implementation" errors for unsatisfied ones).
+pub fn resolve_predicates_fixpoint(
+    engine: &mut InferEngine,
+    impls: &[ImplInfo],
+    builtin_impls: &[BuiltinImplInfo],
+    mut pending: Vec<Predicate>,
+    active_constraints: &[Predicate],
+    span: Span,
+) -> Vec<Predicate> {
+    for _ in 0..MAX_PREDICATE_ITERATIONS {
+        let mut changed = false;
+
+        // Resolve AssocProj in predicate types before trying to improve.
+        // This ensures predicates like `Add F32 (F32.Output)` become `Add F32 F32`
+        // before we try to match them against impls.
+        for predicate in &mut pending {
+            let resolved_tys: Vec<Ty> = predicate
+                .tys
+                .iter()
+                .map(|ty| resolve_assoc_projections_with_impls(ty, impls, builtin_impls))
+                .collect();
+            if resolved_tys != predicate.tys {
+                predicate.tys = resolved_tys;
+                changed = true;
+            }
+        }
+
+        // Resolve AssocProj in the substitution before predicate improvement.
+        resolve_assoc_projections_in_subst(&mut engine.subst, impls, builtin_impls);
+
+        // Re-apply substitution after resolving AssocProj in subst values.
+        for predicate in &mut pending {
+            let improved = predicate.apply_subst(&engine.subst);
+            if improved != *predicate {
+                *predicate = improved;
+                changed = true;
+            }
+        }
+
+        for predicate in &mut pending {
+            let current = predicate.apply_subst(&engine.subst);
+            try_improve_predicate_with_impls(engine, &current, span, impls, builtin_impls);
+            let improved = current.apply_subst(&engine.subst);
+            changed |= improved != current;
+            *predicate = improved;
+        }
+
+        // After improvement, resolve AssocProj again (improvement may have
+        // unified type vars that allow further resolution).
+        resolve_assoc_projections_in_subst(&mut engine.subst, impls, builtin_impls);
+
+        for predicate in &mut pending {
+            let improved = predicate.apply_subst(&engine.subst);
+            if improved != *predicate {
+                *predicate = improved;
+                changed = true;
+            }
+            let resolved_tys: Vec<Ty> = predicate
+                .tys
+                .iter()
+                .map(|ty| resolve_assoc_projections_with_impls(ty, impls, builtin_impls))
+                .collect();
+            if resolved_tys != predicate.tys {
+                predicate.tys = resolved_tys;
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    // Retention phase: deduplicate, check against active constraints,
+    // and verify concrete predicates have impls.
+    let mut retained = Vec::new();
+    for predicate in pending
+        .into_iter()
+        .map(|predicate| {
+            let substituted = predicate.apply_subst(&engine.subst);
+            let resolved_tys: Vec<Ty> = substituted
+                .tys
+                .iter()
+                .map(|ty| resolve_assoc_projections_with_impls(ty, impls, builtin_impls))
+                .collect();
+            Predicate {
+                trait_name: substituted.trait_name,
+                tys: resolved_tys,
+            }
+        })
+    {
+        if retained.iter().any(|existing| existing == &predicate) {
+            continue;
+        }
+        if active_constraints.iter().any(|active| {
+            let active_sub = active.apply_subst(&engine.subst);
+            let active_resolved = Predicate {
+                trait_name: active_sub.trait_name,
+                tys: active_sub
+                    .tys
+                    .into_iter()
+                    .map(|ty| resolve_assoc_projections_with_impls(&ty, impls, builtin_impls))
+                    .collect(),
+            };
+            active_resolved == predicate
+        }) {
+            continue;
+        }
+        if predicate.tys.iter().all(|ty| ty.free_vars().is_empty()) {
+            let resolved_tys: Vec<Ty> = predicate
+                .tys
+                .iter()
+                .map(|ty| resolve_assoc_projections_with_impls(ty, impls, builtin_impls))
+                .collect();
+            let resolved_pred = Predicate {
+                trait_name: predicate.trait_name.clone(),
+                tys: resolved_tys,
+            };
+            if predicate_has_impl(&resolved_pred, impls, builtin_impls) {
+                continue;
+            }
+            engine.diagnostics.push(
+                Diagnostic::error(format!(
+                    "type `{}` does not implement trait `{}`",
+                    format_impl_head(&resolved_pred.tys),
+                    resolved_pred.trait_name
+                ))
+                .with_label(Label::primary(span, "missing trait implementation"))
+                .with_help(format!(
+                    "define `impl {} {} where ...`",
+                    resolved_pred.trait_name,
+                    format_impl_head(&resolved_pred.tys)
+                )),
+            );
+            continue;
+        }
+        retained.push(predicate);
+    }
+    retained
 }
 
 /// Extract Mat type info: Mat r c T -> Some((r, c, T))
@@ -2242,6 +2904,7 @@ mod tests {
             decls: vec![Decl::ImplDecl {
                 trait_name: None,
                 tys: vec![Type::Con("F32".into(), span())],
+                associated_types: vec![],
                 methods: vec![ImplMethod {
                     name: "half".into(),
                     ty: Some(Type::Arrow(
@@ -2398,6 +3061,7 @@ mod tests {
             decls: vec![Decl::ImplDecl {
                 trait_name: None,
                 tys: vec![Type::Con("ParticleState".into(), span())],
+                associated_types: vec![],
                 methods: vec![ImplMethod {
                     name: "sex".into(),
                     ty: Some(Type::Arrow(
@@ -2477,6 +3141,7 @@ mod tests {
                 Decl::ImplDecl {
                     trait_name: None,
                     tys: vec![Type::Con("F32".into(), span())],
+                    associated_types: vec![],
                     methods: vec![ImplMethod {
                         name: "half".into(),
                         ty: Some(Type::Arrow(
@@ -2569,6 +3234,7 @@ f particle = match particle
                 Decl::ImplDecl {
                     trait_name: None,
                     tys: vec![Type::Con("F32".into(), span())],
+                    associated_types: vec![],
                     methods: vec![ImplMethod {
                         name: "half".into(),
                         ty: Some(Type::Arrow(

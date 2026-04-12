@@ -90,6 +90,17 @@ impl AstLowering {
         }
     }
 
+    /// Finalize a type by applying the substitution and resolving any
+    /// associated type projections (e.g., `F32.Output` → `F32`).
+    fn finalize_resolve(&self, ty: &Ty) -> Ty {
+        let finalized = self.engine.finalize(ty);
+        shadml_semantic::resolve_assoc_projections_with_impls(
+            &finalized,
+            &self.impls,
+            &self.builtin_impls,
+        )
+    }
+
     /// Lower the entire program.
     pub fn lower_program(&mut self, program: &Program) -> HirProgram {
         // Flatten CfgDecl nodes so we see declarations from both branches.
@@ -385,6 +396,7 @@ impl AstLowering {
                 Decl::ImplDecl {
                     trait_name,
                     tys,
+                    associated_types,
                     methods,
                     span: _,
                     comments,
@@ -402,6 +414,16 @@ impl AstLowering {
                     if let Some(tname) = trait_name {
                         // Trait impl: look up trait method types
                         let mut method_info: Vec<(String, Ty)> = Vec::new();
+                        // Collect associated type bindings from this impl's decl
+                        let assoc_bindings: HashMap<String, Ty> = associated_types
+                            .iter()
+                            .map(|at| {
+                                (
+                                    at.name.clone(),
+                                    normalize_type_aliases(&self.convert_syntax_type_scheme(&at.ty).ty),
+                                )
+                            })
+                            .collect();
                         if let Some(trait_info) = self.traits.get(tname) {
                             for m in methods {
                                 let logical_name = match (tname.as_str(), m.name.as_str()) {
@@ -418,6 +440,10 @@ impl AstLowering {
                                             tmethod_ty,
                                             &trait_info.var_ids,
                                             &impl_tys,
+                                        );
+                                        let concrete_ty = shadml_semantic::resolve_assoc_projections(
+                                            &concrete_ty,
+                                            &assoc_bindings,
                                         );
                                         method_info.push((mangled.clone(), concrete_ty));
                                     }
@@ -777,13 +803,24 @@ impl AstLowering {
                 .get(&name)
                 .cloned()
                 .ok_or_else(|| format!("tuple value `{}` escaped tuple ABI lowering at {:?}", name, span)),
-            HirExpr::Tuple(items, ty, _) => Ok(TupleValue::Tuple(
-                items
-                    .into_iter()
-                    .map(|item| self.rewrite_tuple_expr(item, abi_map, tuple_env))
-                    .collect::<Result<Vec<_>, _>>()?,
-                ty,
-            )),
+            HirExpr::Tuple(items, ty, span) => {
+                // Unit `()` is represented as an empty tuple with type Ty::Con("()").
+                // It's a scalar value, not a multi-component tuple that needs ABI lowering.
+                if items.is_empty() {
+                    Ok(TupleValue::Scalar(
+                        HirExpr::Tuple(vec![], ty.clone(), span),
+                        ty,
+                    ))
+                } else {
+                    Ok(TupleValue::Tuple(
+                        items
+                            .into_iter()
+                            .map(|item| self.rewrite_tuple_expr(item, abi_map, tuple_env))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        ty,
+                    ))
+                }
+            }
             HirExpr::TupleIndex(base, index, _, span) => {
                 let base = self.rewrite_tuple_expr(*base, abi_map, tuple_env)?;
                 match base {
@@ -1114,20 +1151,34 @@ impl AstLowering {
         generic_templates: &HashMap<String, HirFunction>,
         pending: &mut VecDeque<PendingSpecialization>,
     ) -> HirFunction {
+        let body = self.rewrite_specialized_expr_with_subst(
+            template.body.clone(),
+            generic_templates,
+            pending,
+            &spec.subst,
+        );
+        let body = resolve_hir_expr_assoc_projections(
+            body, &self.impls, &self.builtin_impls,
+        );
+        let impls = &self.impls;
+        let builtin_impls = &self.builtin_impls;
+        let resolve = |ty: &Ty| -> Ty {
+            let substituted = substitute_ty_vars(ty, &spec.subst);
+            shadml_semantic::resolve_assoc_projections_with_impls(
+                &substituted,
+                impls,
+                builtin_impls,
+            )
+        };
         HirFunction {
             name: spec.concrete_name.clone(),
             params: template
                 .params
                 .iter()
-                .map(|(name, ty)| (name.clone(), substitute_ty_vars(ty, &spec.subst)))
+                .map(|(name, ty)| (name.clone(), resolve(ty)))
                 .collect(),
-            return_ty: substitute_ty_vars(&template.return_ty, &spec.subst),
-            body: self.rewrite_specialized_expr_with_subst(
-                template.body.clone(),
-                generic_templates,
-                pending,
-                &spec.subst,
-            ),
+            return_ty: resolve(&template.return_ty),
+            body,
             span: template.span,
             comments: template.comments.clone(),
         }
@@ -1535,10 +1586,20 @@ impl AstLowering {
             hir_body = HirExpr::Let(param_pattern_binds, Box::new(hir_body), body_ty.clone(), span);
         }
 
-        // Unify body type with the return type from the signature
-        self.engine.unify(&body_ty, &ret_ty_var, span);
+        // Resolve inferred predicates before unifying body type with return
+        // type. This ensures type variables constrained by trait predicates
+        // (e.g., the result type of an infix operator like `+`) are unified
+        // with concrete types before we check the body against the declared
+        // return type. Without this, AssocProj types with free type variables
+        // cannot unify with concrete types.
         let inferred_constraints =
             self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
+        shadml_semantic::resolve_assoc_projections_in_subst(&mut self.engine.subst, &self.impls, &self.builtin_impls);
+        let body_ty_resolved = body_ty.apply_subst(&self.engine.subst);
+        let body_ty_resolved = shadml_semantic::resolve_assoc_projections_with_impls(
+            &body_ty_resolved, &self.impls, &self.builtin_impls,
+        );
+        self.engine.unify(&body_ty_resolved, &ret_ty_var, span);
         for predicate in inferred_constraints {
             self.engine.diagnostics.push(
                 shadml_diagnostics::Diagnostic::error(format!(
@@ -1556,9 +1617,9 @@ impl AstLowering {
         // Finalize types
         let final_params: Vec<(String, Ty)> = hir_params
             .into_iter()
-            .map(|(n, ty)| (n, self.engine.finalize(&ty)))
+            .map(|(n, ty)| (n, self.finalize_resolve(&ty)))
             .collect();
-        let return_ty = self.engine.finalize(&body_ty);
+        let return_ty = self.finalize_resolve(&body_ty);
         let body = self.finalize_expr(hir_body);
 
         Some(HirFunction {
@@ -1610,9 +1671,9 @@ impl AstLowering {
 
         let final_params: Vec<(String, Ty)> = hir_params
             .into_iter()
-            .map(|(n, ty)| (n, self.engine.finalize(&ty)))
+            .map(|(n, ty)| (n, self.finalize_resolve(&ty)))
             .collect();
-        let return_ty = self.engine.finalize(&body_ty);
+        let return_ty = self.finalize_resolve(&body_ty);
         let body = self.finalize_expr(hir_body);
 
         Some(HirFunction {
@@ -1666,9 +1727,9 @@ impl AstLowering {
 
         let final_params: Vec<(String, Ty)> = hir_params
             .into_iter()
-            .map(|(n, ty)| (n, self.engine.finalize(&ty)))
+            .map(|(n, ty)| (n, self.finalize_resolve(&ty)))
             .collect();
-        let return_ty = self.engine.finalize(&body_ty);
+        let return_ty = self.finalize_resolve(&body_ty);
         let body = self.finalize_expr(hir_body);
 
         Some(HirFunction {
@@ -1730,9 +1791,16 @@ impl AstLowering {
         if !param_pattern_binds.is_empty() {
             hir_body = HirExpr::Let(param_pattern_binds, Box::new(hir_body), body_ty.clone(), span);
         }
-        self.engine.unify(&body_ty, &ret_ty_var, span);
+        // Resolve inferred predicates before unifying body type with return
+        // type (same as in lower_function).
         let inferred_constraints =
             self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
+        shadml_semantic::resolve_assoc_projections_in_subst(&mut self.engine.subst, &self.impls, &self.builtin_impls);
+        let body_ty_resolved = body_ty.apply_subst(&self.engine.subst);
+        let body_ty_resolved = shadml_semantic::resolve_assoc_projections_with_impls(
+            &body_ty_resolved, &self.impls, &self.builtin_impls,
+        );
+        self.engine.unify(&body_ty_resolved, &ret_ty_var, span);
         for predicate in inferred_constraints {
             self.engine.diagnostics.push(
                 shadml_diagnostics::Diagnostic::error(format!(
@@ -1749,9 +1817,9 @@ impl AstLowering {
 
         let final_params: Vec<(String, Ty)> = hir_params
             .into_iter()
-            .map(|(n, ty)| (n, self.engine.finalize(&ty)))
+            .map(|(n, ty)| (n, self.finalize_resolve(&ty)))
             .collect();
-        let return_ty = self.engine.finalize(&body_ty);
+        let return_ty = self.finalize_resolve(&body_ty);
         let body = self.finalize_expr(hir_body);
 
         let hir_attrs = attributes
@@ -1787,6 +1855,30 @@ impl AstLowering {
             .unwrap_or(&[])
     }
 
+    /// Eagerly resolve associated type projections in an operator's return type.
+    ///
+    /// When an operator like `(+)` returns `a.Output`, the substitution maps
+    /// the return type variable to an `AssocProj`. If the trait params are
+    /// already concrete, we can resolve the projection immediately.
+    ///
+    /// We must update the substitution directly rather than calling unify,
+    /// because if `subst[ret_ty_var]` is already `AssocProj`, unify would
+    /// normalize `ret_ty` to `AssocProj` and the permissive `AssocProj`-vs-concrete
+    /// case would accept it without updating the substitution.
+    fn eagerly_resolve_assoc_proj_in_ret(&mut self, ret_ty: &Ty, span: Span) {
+        let ret_substituted = ret_ty.apply_subst(&self.engine.subst);
+        let ret_resolved = shadml_semantic::resolve_assoc_projections_with_impls(
+            &ret_substituted, &self.impls, &self.builtin_impls,
+        );
+        if ret_resolved != ret_substituted {
+            if let Ty::Var(v) = ret_ty {
+                self.engine.subst.insert(*v, ret_resolved);
+            } else {
+                self.engine.unify(ret_ty, &ret_resolved, span);
+            }
+        }
+    }
+
     fn resolve_inferred_predicates(
         &mut self,
         start: usize,
@@ -1794,59 +1886,18 @@ impl AstLowering {
         span: Span,
     ) -> Vec<Predicate> {
         let pending: Vec<Predicate> = self.inferred_predicates.drain(start..).collect();
-        let mut retained = Vec::new();
-        let subst = self.engine.subst.clone();
-        for predicate in pending.into_iter().map(|predicate| predicate.apply_subst(&subst)) {
-            shadml_semantic::try_improve_predicate_with_impls(
-                &mut self.engine,
-                &predicate,
-                span,
-                &self.impls,
-                &self.builtin_impls,
-            );
-            let predicate = predicate.apply_subst(&self.engine.subst);
-            if retained.iter().any(|existing| existing == &predicate) {
-                continue;
-            }
-            if active_constraints
-                .iter()
-                .any(|active| active.apply_subst(&self.engine.subst) == predicate)
-            {
-                continue;
-            }
-            if predicate.tys.iter().all(|ty| ty.free_vars().is_empty()) {
-                if shadml_semantic::predicate_has_impl(
-                    &predicate,
-                    &self.impls,
-                    &self.builtin_impls,
-                ) {
-                    continue;
-                }
-                self.engine.diagnostics.push(
-                    shadml_diagnostics::Diagnostic::error(format!(
-                        "type `{}` does not implement trait `{}`",
-                        format_impl_head_local(&predicate.tys),
-                        predicate.trait_name
-                    ))
-                    .with_label(shadml_diagnostics::Label::primary(
-                        span,
-                        "missing trait implementation",
-                    ))
-                    .with_help(format!(
-                        "define `impl {} {} where ...`",
-                        predicate.trait_name,
-                        format_impl_head_local(&predicate.tys)
-                    )),
-                );
-                continue;
-            }
-            retained.push(predicate);
-        }
-        retained
+        shadml_semantic::resolve_predicates_fixpoint(
+            &mut self.engine,
+            &self.impls,
+            &self.builtin_impls,
+            pending,
+            active_constraints,
+            span,
+        )
     }
 
     fn build_pattern_bindings(&mut self, pat: &Pat, base: HirExpr, ty: &Ty) -> Vec<(String, HirExpr)> {
-        let final_ty = self.engine.finalize(ty);
+        let final_ty = self.finalize_resolve(ty);
         match pat {
             Pat::Var(name, _) => vec![(name.clone(), base)],
             Pat::Wild(_) => vec![],
@@ -2054,7 +2105,7 @@ impl AstLowering {
                     let (hir_func, func_ty) = self.lower_expr(func, env);
                     let (hir_arg, arg_ty) = self.lower_expr(arg, env);
                     let ret_ty = self.engine.fresh_var();
-                    let expected = Ty::arrow(arg_ty, ret_ty.clone());
+                    let expected = Ty::arrow(arg_ty.clone(), ret_ty.clone());
                     self.engine.unify(&func_ty, &expected, *span);
                     (
                         HirExpr::App(Box::new(hir_func), Box::new(hir_arg), ret_ty.clone(), *span),
@@ -2084,6 +2135,7 @@ impl AstLowering {
                         &Ty::arrow(lhs_ty, Ty::arrow(rhs_ty, ret_ty.clone())),
                         *span,
                     );
+                    self.eagerly_resolve_assoc_proj_in_ret(&ret_ty, *span);
                     (
                         HirExpr::BinOp(
                             binop,
@@ -2112,6 +2164,7 @@ impl AstLowering {
                         &Ty::arrow(lhs_ty, Ty::arrow(rhs_ty, ret_ty.clone())),
                         *span,
                     );
+                    self.eagerly_resolve_assoc_proj_in_ret(&ret_ty, *span);
                     let op_expr = HirExpr::Var(op.clone(), op_ty, *span);
                     let app1_ty = self.engine.fresh_var();
                     let app1 = HirExpr::App(Box::new(op_expr), Box::new(hir_lhs), app1_ty, *span);
@@ -2159,6 +2212,9 @@ impl AstLowering {
                     );
                     local_env.insert(bind.name.clone(), scheme);
                     hir_binds.push((bind.name.clone(), hir_expr));
+                    // Resolve AssocProj in the substitution after each binding so
+                    // that subsequent expressions can use the resolved types.
+                    shadml_semantic::resolve_assoc_projections_in_subst(&mut self.engine.subst, &self.impls, &self.builtin_impls);
                 }
                 let (hir_body, body_ty) = self.lower_expr(body, &mut local_env);
                 (
@@ -2298,7 +2354,7 @@ impl AstLowering {
 
             Expr::FieldAccess(expr, field, span) => {
                 let (hir_expr, expr_ty) = self.lower_expr(expr, env);
-                let expr_ty_final = self.engine.finalize(&expr_ty);
+                let expr_ty_final = self.finalize_resolve(&expr_ty);
 
                 // 1. Check for Vec swizzle patterns
                 if shadml_semantic::is_swizzle(field) {
@@ -2423,7 +2479,7 @@ impl AstLowering {
 
                 for elem in elems {
                     let (hir_elem, elem_ty) = self.lower_expr(elem, env);
-                    let elem_ty_final = self.engine.finalize(&elem_ty);
+                    let elem_ty_final = self.finalize_resolve(&elem_ty);
 
                     if let Some((n, inner_scalar)) =
                         shadml_semantic::extract_vec_type(&elem_ty_final)
@@ -2533,7 +2589,7 @@ impl AstLowering {
 
             Expr::RecordUpdate(base, fields, span) => {
                 let (hir_base, base_ty) = self.lower_expr(base, env);
-                let base_ty_final = self.engine.finalize(&base_ty);
+                let base_ty_final = self.finalize_resolve(&base_ty);
 
                 // Try to resolve bitfield type from the finalized base type
                 let bf_match = if let Ty::Con(ref type_name) = base_ty_final {
@@ -2567,7 +2623,7 @@ impl AstLowering {
 
                 // Non-bitfield record update: expr { field1 = val1, field2 = val2 }
                 // Look up the constructor for this record type.
-                let base_ty_final = self.engine.finalize(&base_ty);
+                let base_ty_final = self.finalize_resolve(&base_ty);
                 let type_name = if let Ty::Con(ref name) = base_ty_final {
                     Some(name.clone())
                 } else {
@@ -2701,7 +2757,7 @@ impl AstLowering {
     fn lower_pattern(&mut self, pat: &Pat, _scrutinee_ty: &Ty) -> HirPattern {
         match pat {
             Pat::Wild(_) => HirPattern::Wild,
-            Pat::Var(name, _) => HirPattern::Var(name.clone(), self.engine.finalize(_scrutinee_ty)),
+            Pat::Var(name, _) => HirPattern::Var(name.clone(), self.finalize_resolve(_scrutinee_ty)),
             Pat::Con(name, sub_pats, _) => {
                 if let Some(con_info) = self
                     .constructors
@@ -2759,7 +2815,7 @@ impl AstLowering {
                                         } else {
                                             HirPattern::Var(
                                                 field_name.clone(),
-                                                self.engine.finalize(field_ty),
+                                                self.finalize_resolve(field_ty),
                                             )
                                         }
                                     } else {
@@ -2915,7 +2971,42 @@ impl AstLowering {
                 }
             })
             .collect();
-        let ty = self.convert_syntax_type_with_scope(ty, &mut scope);
+
+        // Build constraint info for Type::Proj resolution
+        // Collect trait names with associated types first (before mutable borrows)
+        let traits_with_assoc: Vec<(String, bool)> = constraints
+            .iter()
+            .map(|constraint| {
+                let has_assoc = self.traits.get(&constraint.trait_name)
+                    .map(|info| !info.associated_types.is_empty())
+                    .unwrap_or(false);
+                (constraint.trait_name.clone(), has_assoc)
+            })
+            .collect();
+
+        let constraint_traits: Vec<(String, Vec<Ty>)> = constraints
+            .iter()
+            .zip(traits_with_assoc.iter())
+            .filter_map(|(constraint, (trait_name, has_assoc))| {
+                if !has_assoc {
+                    return None;
+                }
+                let trait_tys: Vec<Ty> = constraint
+                    .tys
+                    .iter()
+                    .map(|ty| self.convert_syntax_type_with_scope(ty, &mut scope))
+                    .collect();
+                Some((trait_name.clone(), trait_tys))
+            })
+            .collect();
+
+        let ty = if constraint_traits.is_empty() {
+            self.convert_syntax_type_with_scope(ty, &mut scope)
+        } else {
+            self.convert_syntax_type_with_scope_assoc(
+                ty, &mut scope, &constraint_traits,
+            )
+        };
         Scheme::poly_with_constraints(predicates, scope_vars(&scope), ty)
     }
 
@@ -2923,6 +3014,18 @@ impl AstLowering {
         &mut self,
         ty: &Type,
         scope: &mut HashMap<String, TyVarId>,
+    ) -> Ty {
+        self.convert_syntax_type_with_scope_assoc(ty, scope, &[])
+    }
+
+    /// Convert a syntax type with associated type context from constraints.
+    /// `constraint_traits` is a list of (trait_name, trait_param_types) for
+    /// constraints that have associated types.
+    fn convert_syntax_type_with_scope_assoc(
+        &mut self,
+        ty: &Type,
+        scope: &mut HashMap<String, TyVarId>,
+        constraint_traits: &[(String, Vec<Ty>)],
     ) -> Ty {
         let ty = match ty {
             Type::Con(name, _) => {
@@ -2936,18 +3039,49 @@ impl AstLowering {
                     .entry(name.clone())
                     .or_insert_with(|| fresh_var_id(&mut self.engine)),
             ),
+            Type::Proj(_base, name, _) => {
+                // Find the matching constraint trait for this associated type
+                if let Some((trait_name, trait_params)) =
+                    constraint_traits.iter().find_map(|(tn, tp)| {
+                        let trait_info = self.traits.get(tn)?;
+                        if trait_info.associated_types.iter().any(|n| n == name) {
+                            Some((tn.clone(), tp.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                {
+                    Ty::AssocProj {
+                        trait_params,
+                        name: name.clone(),
+                        trait_name,
+                    }
+                } else {
+                    // Fallback: cannot determine the trait for this
+                    // associated type projection. This typically means
+                    // the type signature uses `x.Output` without a
+                    // constraint like `Add a b => ...` that identifies
+                    // which trait's `Output` is meant.
+                    let base_ty = self.convert_syntax_type_with_scope_assoc(_base, scope, constraint_traits);
+                    Ty::AssocProj {
+                        trait_params: vec![base_ty],
+                        name: name.clone(),
+                        trait_name: String::new(),
+                    }
+                }
+            }
             Type::Nat(n, _) => Ty::Nat(*n),
             Type::Arrow(a, b, _) => {
-                let a = self.convert_syntax_type_with_scope(a, scope);
-                let b = self.convert_syntax_type_with_scope(b, scope);
+                let a = self.convert_syntax_type_with_scope_assoc(a, scope, constraint_traits);
+                let b = self.convert_syntax_type_with_scope_assoc(b, scope, constraint_traits);
                 Ty::arrow(a, b)
             }
             Type::App(f, a, _) => {
-                let f = self.convert_syntax_type_with_scope(f, scope);
-                let a = self.convert_syntax_type_with_scope(a, scope);
+                let f = self.convert_syntax_type_with_scope_assoc(f, scope, constraint_traits);
+                let a = self.convert_syntax_type_with_scope_assoc(a, scope, constraint_traits);
                 Ty::app(f, a)
             }
-            Type::Paren(inner, _) => self.convert_syntax_type_with_scope(inner, scope),
+            Type::Paren(inner, _) => self.convert_syntax_type_with_scope_assoc(inner, scope, constraint_traits),
             Type::Tuple(elems, _) => {
                 if elems.is_empty() {
                     Ty::unit()
@@ -2955,7 +3089,7 @@ impl AstLowering {
                     Ty::Tuple(
                         elems
                             .iter()
-                            .map(|e| self.convert_syntax_type_with_scope(e, scope))
+                            .map(|e| self.convert_syntax_type_with_scope_assoc(e, scope, constraint_traits))
                             .collect(),
                     )
                 }
@@ -2982,6 +3116,7 @@ impl AstLowering {
                 Ty::Con(name.clone())
             }
             Type::Var(name, _) => Ty::Con(name.clone()),
+            Type::Proj(_base, name, _) => Ty::Con(name.clone()),
             Type::Nat(n, _) => Ty::Nat(*n),
             Type::Arrow(a, b, _) => {
                 let a = self.convert_syntax_type_pure(a);
@@ -3268,9 +3403,9 @@ impl AstLowering {
 
     fn finalize_expr(&mut self, expr: HirExpr) -> HirExpr {
         match expr {
-            HirExpr::Lit(lit, ty, span) => HirExpr::Lit(lit, self.engine.finalize(&ty), span),
+            HirExpr::Lit(lit, ty, span) => HirExpr::Lit(lit, self.finalize_resolve(&ty), span),
             HirExpr::Var(name, ty, span) => {
-                let final_ty = self.engine.finalize(&ty);
+                let final_ty = self.finalize_resolve(&ty);
                 // Trait method dispatch: if this var is a trait method and the
                 // type resolves to a concrete type, rewrite to the mangled impl function.
                 let resolved_name = self.resolve_trait_method_or_diag(&name, &final_ty, span);
@@ -3278,19 +3413,19 @@ impl AstLowering {
             }
             HirExpr::Tuple(items, ty, span) => HirExpr::Tuple(
                 items.into_iter().map(|item| self.finalize_expr(item)).collect(),
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::TupleIndex(base, index, ty, span) => HirExpr::TupleIndex(
                 Box::new(self.finalize_expr(*base)),
                 index,
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::App(func, arg, ty, span) => {
                 let final_func = self.finalize_expr(*func);
                 let final_arg = self.finalize_expr(*arg);
-                let final_ty = self.engine.finalize(&ty);
+                let final_ty = self.finalize_resolve(&ty);
                 let app = HirExpr::App(
                     Box::new(final_func),
                     Box::new(final_arg),
@@ -3305,7 +3440,7 @@ impl AstLowering {
                     .map(|(name, expr)| (name, self.finalize_expr(expr)))
                     .collect(),
                 Box::new(self.finalize_expr(*body)),
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::Case(scrutinee, arms, ty, span) => HirExpr::Case(
@@ -3317,20 +3452,20 @@ impl AstLowering {
                         body: self.finalize_expr(arm.body),
                     })
                     .collect(),
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::If(cond, then_expr, else_expr, ty, span) => HirExpr::If(
                 Box::new(self.finalize_expr(*cond)),
                 Box::new(self.finalize_expr(*then_expr)),
                 Box::new(self.finalize_expr(*else_expr)),
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::BinOp(op, lhs, rhs, ty, span) => {
                 let final_lhs = self.finalize_expr(*lhs);
                 let final_rhs = self.finalize_expr(*rhs);
-                let final_ty = self.engine.finalize(&ty);
+                let final_ty = self.finalize_resolve(&ty);
                 let lhs_ty = final_lhs.ty().clone();
 
                 // Check if there's a trait instance for this operator on the lhs type.
@@ -3357,24 +3492,24 @@ impl AstLowering {
                 args.into_iter()
                     .map(|arg| self.finalize_expr(arg))
                     .collect(),
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::FieldAccess(expr, field, ty, span) => HirExpr::FieldAccess(
                 Box::new(self.finalize_expr(*expr)),
                 field,
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::Index(base, index, ty, span) => HirExpr::Index(
                 Box::new(self.finalize_expr(*base)),
                 Box::new(self.finalize_expr(*index)),
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::UnaryNeg(inner, ty, span) => {
                 let final_inner = self.finalize_expr(*inner);
-                let final_ty = self.engine.finalize(&ty);
+                let final_ty = self.finalize_resolve(&ty);
                 let inner_ty = final_inner.ty().clone();
                 if let Some(mangled) = self.resolve_unary_operator_trait("negate", &inner_ty) {
                     let method_ty = Ty::arrow(inner_ty, final_ty.clone());
@@ -3386,12 +3521,12 @@ impl AstLowering {
             }
             HirExpr::UnaryNot(inner, ty, span) => HirExpr::UnaryNot(
                 Box::new(self.finalize_expr(*inner)),
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::UnaryBitNot(inner, ty, span) => {
                 let final_inner = self.finalize_expr(*inner);
-                let final_ty = self.engine.finalize(&ty);
+                let final_ty = self.finalize_resolve(&ty);
                 let inner_ty = final_inner.ty().clone();
                 if let Some(mangled) = self.resolve_unary_operator_trait("bitnot", &inner_ty) {
                     let method_ty = Ty::arrow(inner_ty, final_ty.clone());
@@ -3408,7 +3543,7 @@ impl AstLowering {
                     .map(|(n, e)| (n, self.finalize_expr(e)))
                     .collect(),
                 Box::new(self.finalize_expr(*body)),
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::BitfieldConstruct(name, fields, ty, span) => HirExpr::BitfieldConstruct(
@@ -3417,7 +3552,7 @@ impl AstLowering {
                     .into_iter()
                     .map(|(n, e)| (n, self.finalize_expr(e)))
                     .collect(),
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
             HirExpr::BitfieldUpdate(name, base, fields, ty, span) => HirExpr::BitfieldUpdate(
@@ -3427,7 +3562,7 @@ impl AstLowering {
                     .into_iter()
                     .map(|(n, e)| (n, self.finalize_expr(e)))
                     .collect(),
-                self.engine.finalize(&ty),
+                self.finalize_resolve(&ty),
                 span,
             ),
         }
@@ -3466,14 +3601,16 @@ impl AstLowering {
             _ => op,
         };
         for trait_info in self.traits.values() {
+            // Get the name of the trait's output associated type (typically "Output").
+            let output_name = trait_info.associated_types.first();
             for (method_name, _) in &trait_info.methods {
                 if method_name == logical_op {
                     for inst in &self.impls {
                         if inst.trait_name.as_deref() == Some(trait_info.name.as_str())
-                            && inst.tys.len() == 3
+                            && inst.tys.len() == 2
                             && inst.tys[0] == *lhs_ty
                             && inst.tys[1] == *rhs_ty
-                            && inst.tys[2] == *result_ty
+                            && output_name.map_or(false, |name| inst.associated_type_bindings.get(name).map(|t| t == result_ty).unwrap_or(false))
                         {
                             if let Some(mangled) = inst.methods.get(logical_op) {
                                 return Some(mangled.clone());
@@ -3482,10 +3619,10 @@ impl AstLowering {
                     }
                     for inst in &self.builtin_impls {
                         if inst.trait_name == trait_info.name
-                            && inst.tys.len() == 3
+                            && inst.tys.len() == 2
                             && inst.tys[0] == *lhs_ty
                             && inst.tys[1] == *rhs_ty
-                            && inst.tys[2] == *result_ty
+                            && output_name.map_or(false, |name| inst.associated_type_bindings.get(name).map(|t| t == result_ty).unwrap_or(false))
                         {
                             if let Some(lowering) = inst.methods.get(logical_op) {
                                 return match lowering {
@@ -3549,10 +3686,10 @@ impl AstLowering {
         for arg in args.iter().rev() {
             full_ty = Ty::arrow(arg.ty().clone(), full_ty);
         }
-        let final_full_ty = self.engine.finalize(&full_ty);
+        let final_full_ty = self.finalize_resolve(&full_ty);
 
         for overload in overloads {
-            if self.engine.finalize(&overload.ty) == final_full_ty {
+            if self.finalize_resolve(&overload.ty) == final_full_ty {
                 if let BuiltinLowering::Intrinsic(target) = &overload.lowering {
                     return rename_hir_app_head(expr, target, final_full_ty, span);
                 }
@@ -3633,7 +3770,7 @@ impl AstLowering {
     fn finalize_pattern(&self, pattern: HirPattern) -> HirPattern {
         match pattern {
             HirPattern::Wild => HirPattern::Wild,
-            HirPattern::Var(name, ty) => HirPattern::Var(name, self.engine.finalize(&ty)),
+            HirPattern::Var(name, ty) => HirPattern::Var(name, self.finalize_resolve(&ty)),
             HirPattern::Constructor(name, tag, sub_patterns) => HirPattern::Constructor(
                 name,
                 tag,
@@ -3671,15 +3808,8 @@ fn format_predicate_local(predicate: &Predicate) -> String {
     format!(
         "{} {}",
         predicate.trait_name,
-        format_impl_head_local(&predicate.tys)
+        shadml_semantic::format_impl_head(&predicate.tys)
     )
-}
-
-fn format_impl_head_local(tys: &[Ty]) -> String {
-    tys.iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn fresh_var_id(engine: &mut InferEngine) -> TyVarId {
@@ -3761,6 +3891,156 @@ fn substitute_ty_vars(ty: &Ty, subst: &HashMap<TyVarId, Ty>) -> Ty {
         Ty::Forall(vars, body) => {
             Ty::Forall(vars.clone(), Box::new(substitute_ty_vars(body, subst)))
         }
+        Ty::AssocProj { trait_params, name, trait_name } => Ty::AssocProj {
+            trait_params: trait_params.iter().map(|t| substitute_ty_vars(t, subst)).collect(),
+            name: name.clone(),
+            trait_name: trait_name.clone(),
+        },
+    }
+}
+
+/// Resolve `AssocProj` types with concrete `trait_params` in a HIR expression.
+fn resolve_hir_expr_assoc_projections(
+    expr: HirExpr,
+    impls: &[shadml_semantic::ImplInfo],
+    builtin_impls: &[shadml_semantic::BuiltinImplInfo],
+) -> HirExpr {
+    let resolve = |ty: &Ty| -> Ty {
+        shadml_semantic::resolve_assoc_projections_with_impls(ty, impls, builtin_impls)
+    };
+    match expr {
+        HirExpr::Lit(lit, ty, span) => HirExpr::Lit(lit, resolve(&ty), span),
+        HirExpr::Var(name, ty, span) => HirExpr::Var(name, resolve(&ty), span),
+        HirExpr::Tuple(items, ty, span) => HirExpr::Tuple(
+            items
+                .into_iter()
+                .map(|item| resolve_hir_expr_assoc_projections(item, impls, builtin_impls))
+                .collect(),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::TupleIndex(base, index, ty, span) => HirExpr::TupleIndex(
+            Box::new(resolve_hir_expr_assoc_projections(*base, impls, builtin_impls)),
+            index,
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::App(func, arg, ty, span) => HirExpr::App(
+            Box::new(resolve_hir_expr_assoc_projections(*func, impls, builtin_impls)),
+            Box::new(resolve_hir_expr_assoc_projections(*arg, impls, builtin_impls)),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::Let(binds, body, ty, span) => HirExpr::Let(
+            binds
+                .into_iter()
+                .map(|(name, expr)| {
+                    (name, resolve_hir_expr_assoc_projections(expr, impls, builtin_impls))
+                })
+                .collect(),
+            Box::new(resolve_hir_expr_assoc_projections(*body, impls, builtin_impls)),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::Case(scrutinee, arms, ty, span) => HirExpr::Case(
+            Box::new(resolve_hir_expr_assoc_projections(*scrutinee, impls, builtin_impls)),
+            arms.into_iter()
+                .map(|arm| HirCaseArm {
+                    pattern: arm.pattern,
+                    guard: arm.guard.map(|guard| {
+                        resolve_hir_expr_assoc_projections(guard, impls, builtin_impls)
+                    }),
+                    body: resolve_hir_expr_assoc_projections(arm.body, impls, builtin_impls),
+                })
+                .collect(),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::If(cond, then_expr, else_expr, ty, span) => HirExpr::If(
+            Box::new(resolve_hir_expr_assoc_projections(*cond, impls, builtin_impls)),
+            Box::new(resolve_hir_expr_assoc_projections(*then_expr, impls, builtin_impls)),
+            Box::new(resolve_hir_expr_assoc_projections(*else_expr, impls, builtin_impls)),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::BinOp(op, lhs, rhs, ty, span) => HirExpr::BinOp(
+            op,
+            Box::new(resolve_hir_expr_assoc_projections(*lhs, impls, builtin_impls)),
+            Box::new(resolve_hir_expr_assoc_projections(*rhs, impls, builtin_impls)),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::UnaryNeg(inner, ty, span) => HirExpr::UnaryNeg(
+            Box::new(resolve_hir_expr_assoc_projections(*inner, impls, builtin_impls)),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::UnaryNot(inner, ty, span) => HirExpr::UnaryNot(
+            Box::new(resolve_hir_expr_assoc_projections(*inner, impls, builtin_impls)),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::UnaryBitNot(inner, ty, span) => HirExpr::UnaryBitNot(
+            Box::new(resolve_hir_expr_assoc_projections(*inner, impls, builtin_impls)),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::ConstructorCall(name, tag, args, ty, span) => HirExpr::ConstructorCall(
+            name,
+            tag,
+            args.into_iter()
+                .map(|arg| resolve_hir_expr_assoc_projections(arg, impls, builtin_impls))
+                .collect(),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::FieldAccess(base, field, ty, span) => HirExpr::FieldAccess(
+            Box::new(resolve_hir_expr_assoc_projections(*base, impls, builtin_impls)),
+            field,
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::Index(base, index, ty, span) => HirExpr::Index(
+            Box::new(resolve_hir_expr_assoc_projections(*base, impls, builtin_impls)),
+            Box::new(resolve_hir_expr_assoc_projections(*index, impls, builtin_impls)),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::Loop(loop_name, bindings, body, ty, span) => HirExpr::Loop(
+            loop_name,
+            bindings
+                .into_iter()
+                .map(|(name, expr)| {
+                    (name, resolve_hir_expr_assoc_projections(expr, impls, builtin_impls))
+                })
+                .collect(),
+            Box::new(resolve_hir_expr_assoc_projections(*body, impls, builtin_impls)),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::BitfieldConstruct(name, fields, ty, span) => HirExpr::BitfieldConstruct(
+            name,
+            fields
+                .into_iter()
+                .map(|(field_name, expr)| {
+                    (field_name, resolve_hir_expr_assoc_projections(expr, impls, builtin_impls))
+                })
+                .collect(),
+            resolve(&ty),
+            span,
+        ),
+        HirExpr::BitfieldUpdate(name, base, fields, ty, span) => HirExpr::BitfieldUpdate(
+            name,
+            Box::new(resolve_hir_expr_assoc_projections(*base, impls, builtin_impls)),
+            fields
+                .into_iter()
+                .map(|(field_name, expr)| {
+                    (field_name, resolve_hir_expr_assoc_projections(expr, impls, builtin_impls))
+                })
+                .collect(),
+            resolve(&ty),
+            span,
+        ),
     }
 }
 
@@ -3824,6 +4104,14 @@ fn collect_specialization_bindings(
         },
         Ty::Forall(_, body) => collect_specialization_bindings(body, concrete, subst),
         Ty::Error => true,
+        Ty::AssocProj { .. } => {
+            // Associated type projections in the template (e.g., a.Output) will
+            // resolve to concrete types once the trait parameters are bound.
+            // The type system has already verified consistency, so we can
+            // accept the match here. The important bindings come from the
+            // parameter types; the return type's AssocProj is derived.
+            true
+        }
     }
 }
 
@@ -4000,6 +4288,7 @@ fn ty_to_mono_suffix_local(ty: &Ty) -> String {
             .join("_"),
         Ty::Forall(_, body) => ty_to_mono_suffix_local(body),
         Ty::Error => "error".to_string(),
+        Ty::AssocProj { name, .. } => name.to_lowercase(),
     }
 }
 

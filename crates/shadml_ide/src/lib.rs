@@ -981,6 +981,7 @@ impl<'a> IndexBuilder<'a> {
                     self.walk_type(item, frames);
                 }
             }
+            Type::Proj(base, _, _) => self.walk_type(base, frames),
             Type::Nat(_, _) | Type::Unit(_) => {}
         }
     }
@@ -2314,6 +2315,7 @@ fn format_type(ty: &Type) -> String {
             format!("({})", rendered)
         }
         Type::Unit(_) => "()".to_owned(),
+        Type::Proj(base, name, _) => format!("{}.{}", format_type(base), name),
     }
 }
 

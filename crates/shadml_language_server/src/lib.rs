@@ -1634,6 +1634,7 @@ fn format_type(ty: &shadml_parser::parser::Type) -> String {
             format!("({})", parts.join(", "))
         }
         Type::Unit(_) => "()".to_string(),
+        Type::Proj(base, name, _) => format!("{}.{}", format_type(base), name),
     }
 }
 

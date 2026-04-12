@@ -956,6 +956,58 @@ show c = match c
         let (_, has_errors) = parse_and_analyze(source);
         assert!(!has_errors, "boolean operators should type check");
     }
+
+    // Regression: AssocProj with free type variables from indexing must
+    // resolve through predicate improvement, not cause type mismatches
+    // during inference. Previously, `p.basis[0][0] + 1.0` failed because
+    // the matrix index type variable wasn't resolved before the `+`
+    // operator created an AssocProj with a free param.
+    #[test]
+    fn assoc_proj_with_indexed_type_variable() {
+        let source = r#"
+data Params = Params { basis : Mat<3, 3, F32> }
+test : Params -> F32
+test p = p.basis[0][0] + 1.0
+"#;
+        let (_, has_errors) = parse_and_analyze(source);
+        assert!(
+            !has_errors,
+            "indexed expression used with arithmetic operator should type check"
+        );
+    }
+
+    #[test]
+    fn assoc_proj_with_indexed_type_variable_in_vec2() {
+        let source = r#"
+data Params = Params { basis : Mat<3, 3, F32> }
+test : Params -> Vec<2, F32>
+test p =
+  let scale = p.basis[0][0]
+      uv = vec2 1.0 1.0
+  in uv - vec2 (0.38 * cos (scale + 1.0)) (0.24 * sin scale)
+"#;
+        let (_, has_errors) = parse_and_analyze(source);
+        assert!(
+            !has_errors,
+            "indexed expression in nested arithmetic + vec2 should type check"
+        );
+    }
+
+    #[test]
+    fn impl_missing_associated_type_binding_errors() {
+        let source = r#"
+trait Add a b where
+  type Output
+  (+) : a -> b -> Output
+impl Add F32 F32 where
+  (+) x y = x + y
+"#;
+        let (_, has_errors) = parse_and_analyze(source);
+        assert!(
+            has_errors,
+            "impl missing `type Output = ...` should produce an error"
+        );
+    }
 }
 
 // =========================================================================
@@ -1986,7 +2038,7 @@ double x = x * 2
 
     #[test]
     fn test_full_pipeline_generic_function_not_emitted_without_specialization() {
-        let source = "add : Add a b c => a -> b -> c\nadd x y = x + y";
+        let source = "add : Add a b => a -> b -> a.Output\nadd x y = x + y";
         let wgsl =
             compile_to_wgsl(source).expect("generic definition with a signature should compile");
         assert!(
@@ -2004,7 +2056,7 @@ double x = x * 2
     #[test]
     fn test_full_pipeline_generic_function_specializes_at_concrete_call_site() {
         let source = r#"
-add : Add a b c => a -> b -> c
+add : Add a b => a -> b -> a.Output
 add x y = x + y
 
 result : I32
@@ -2012,14 +2064,14 @@ result = add 1 2
 "#;
         let wgsl = compile_to_wgsl(source).expect("generic call should specialize");
         assert!(
-            wgsl.contains("fn add_i32_i32_i32("),
-            "WGSL should contain the specialized add_i32_i32_i32 function, got: {}",
+            wgsl.contains("fn add_i32_i32("),
+            "WGSL should contain the specialized add_i32_i32 function, got: {}",
             wgsl
         );
         assert!(
             wgsl.contains("fn result() -> i32")
-                && wgsl.contains("return add_i32_i32_i32(1i, 2i);"),
-            "WGSL should call the specialized add_i32_i32_i32 helper from result, got: {}",
+                && wgsl.contains("return add_i32_i32(1i, 2i);"),
+            "WGSL should call the specialized add_i32_i32 helper from result, got: {}",
             wgsl
         );
     }
@@ -2991,7 +3043,8 @@ testWave x = wave x
         let source = r#"
 data Mask = Mask { bits : U32 }
 
-impl BitAnd Mask Mask Mask where
+impl BitAnd Mask Mask where
+  type Output = Mask
   (&) a b = Mask { bits = a.bits & b.bits }
 
 andMask : Mask -> Mask -> Mask
@@ -2999,12 +3052,12 @@ andMask a b = a & b
 "#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
-            wgsl.contains("fn bitand_Mask__Mask__Mask("),
+            wgsl.contains("fn bitand_Mask__Mask("),
             "WGSL should contain mangled bitand impl, got: {}",
             wgsl
         );
         assert!(
-            wgsl.contains("bitand_Mask__Mask__Mask(a, b)"),
+            wgsl.contains("bitand_Mask__Mask(a, b)"),
             "WGSL should dispatch & to the mangled BitAnd impl, got: {}",
             wgsl
         );
@@ -3015,7 +3068,8 @@ andMask a b = a & b
         let source = r#"
 data Mask = Mask { bits : U32 }
 
-impl BitXor Mask Mask Mask where
+impl BitXor Mask Mask where
+  type Output = Mask
   (^) a b = Mask { bits = a.bits ^ b.bits }
 
 xorMask : Mask -> Mask -> Mask
@@ -3023,12 +3077,12 @@ xorMask a b = a ^ b
 "#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
-            wgsl.contains("fn bitxor_Mask__Mask__Mask("),
+            wgsl.contains("fn bitxor_Mask__Mask("),
             "WGSL should contain mangled bitxor impl, got: {}",
             wgsl
         );
         assert!(
-            wgsl.contains("bitxor_Mask__Mask__Mask(a, b)"),
+            wgsl.contains("bitxor_Mask__Mask(a, b)"),
             "WGSL should dispatch ^ to the mangled BitXor impl, got: {}",
             wgsl
         );
@@ -3039,7 +3093,8 @@ xorMask a b = a ^ b
         let source = r#"
 data Mask = Mask { bits : U32 }
 
-impl Shl Mask Mask Mask where
+impl Shl Mask Mask where
+  type Output = Mask
   (<<) a b = Mask { bits = a.bits << b.bits }
 
 shlMask : Mask -> Mask -> Mask
@@ -3047,12 +3102,12 @@ shlMask a b = a << b
 "#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
-            wgsl.contains("fn shl_Mask__Mask__Mask("),
+            wgsl.contains("fn shl_Mask__Mask("),
             "WGSL should contain mangled shl impl, got: {}",
             wgsl
         );
         assert!(
-            wgsl.contains("shl_Mask__Mask__Mask(a, b)"),
+            wgsl.contains("shl_Mask__Mask(a, b)"),
             "WGSL should dispatch << to the mangled Shl impl, got: {}",
             wgsl
         );
@@ -3063,7 +3118,8 @@ shlMask a b = a << b
         let source = r#"
 data Mask = Mask { bits : U32 }
 
-impl Shr Mask Mask Mask where
+impl Shr Mask Mask where
+  type Output = Mask
   (>>) a b = Mask { bits = a.bits >> b.bits }
 
 shrMask : Mask -> Mask -> Mask
@@ -3071,12 +3127,12 @@ shrMask a b = a >> b
 "#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
-            wgsl.contains("fn shr_Mask__Mask__Mask("),
+            wgsl.contains("fn shr_Mask__Mask("),
             "WGSL should contain mangled shr impl, got: {}",
             wgsl
         );
         assert!(
-            wgsl.contains("shr_Mask__Mask__Mask(a, b)"),
+            wgsl.contains("shr_Mask__Mask(a, b)"),
             "WGSL should dispatch >> to the mangled Shr impl, got: {}",
             wgsl
         );
