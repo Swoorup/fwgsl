@@ -79,7 +79,41 @@ impl SemanticAnalyzer {
         // compilation paths (the compiler narrows later via evaluate_features).
         let all_decls = Decl::flatten_cfg_decls(&program.decls);
 
-        // Pass 1: collect data types and constructors
+        // Pass 1: predeclare type names so aliases and data declarations in the
+        // same module can refer to each other regardless of source order.
+        for decl in &all_decls {
+            match decl {
+                Decl::DataDecl {
+                    name, type_params, ..
+                } => {
+                    self.data_types.insert(
+                        name.clone(),
+                        DataTypeInfo {
+                            name: name.clone(),
+                            type_params: type_params.clone(),
+                            constructors: vec![],
+                        },
+                    );
+                }
+                Decl::BitfieldDecl { name, .. } => {
+                    self.bitfield_field_names.entry(name.clone()).or_default();
+                }
+                _ => {}
+            }
+        }
+
+        // Pass 1b: collect type aliases (treated as synonyms for semantic purposes)
+        for decl in &all_decls {
+            if let Decl::TypeAlias { name, ty, .. } = decl {
+                let alias_ty = self.convert_syntax_type(ty);
+                // Store the expanded type for alias resolution during type conversion
+                self.type_aliases.insert(name.clone(), alias_ty.ty.clone());
+                // Register the alias name as a type constructor
+                self.env.insert(name.clone(), alias_ty);
+            }
+        }
+
+        // Pass 1c: collect data types and constructors
         for decl in &all_decls {
             if let Decl::DataDecl {
                 name,
@@ -93,15 +127,8 @@ impl SemanticAnalyzer {
             }
         }
 
-        // Pass 1b: collect type aliases (treated as synonyms for semantic purposes)
+        // Pass 1d: collect bitfield metadata
         for decl in &all_decls {
-            if let Decl::TypeAlias { name, ty, .. } = decl {
-                let alias_ty = self.convert_syntax_type(ty);
-                // Store the expanded type for alias resolution during type conversion
-                self.type_aliases.insert(name.clone(), alias_ty.ty.clone());
-                // Register the alias name as a type constructor
-                self.env.insert(name.clone(), alias_ty);
-            }
             if let Decl::BitfieldDecl {
                 name,
                 base_ty,
@@ -238,11 +265,16 @@ impl SemanticAnalyzer {
                         }
                     } else {
                         let scheme = if let Some(method_ty) = &m.ty {
-                            self.convert_syntax_type(method_ty)
+                            let scheme = self.convert_syntax_type(method_ty);
+                            let declared_ty = self.engine.instantiate(&scheme);
+                            let expected_scheme = self
+                                .standalone_impl_method_scheme(&impl_ty_scheme.ty, m.params.len());
+                            let expected_ty = self.engine.instantiate(&expected_scheme);
+                            self.engine.unify(&declared_ty, &expected_ty, m.span);
+                            scheme
                         } else {
                             self.standalone_impl_method_scheme(&impl_ty_scheme.ty, m.params.len())
                         };
-                        self.env.insert(m.name.clone(), scheme.clone());
                         self.env.insert(mangled.clone(), scheme);
                     }
                 }
@@ -265,7 +297,8 @@ impl SemanticAnalyzer {
                             .methods
                             .iter()
                             .filter_map(|(method_name, _)| {
-                                (!impl_methods.contains_key(method_name)).then(|| method_name.clone())
+                                (!impl_methods.contains_key(method_name))
+                                    .then(|| method_name.clone())
                             })
                             .collect();
                         if !missing_methods.is_empty() {
@@ -299,14 +332,10 @@ impl SemanticAnalyzer {
                         );
                     }
 
-                    if self
-                        .impls
-                        .iter()
-                        .any(|existing| {
-                            existing.trait_name.as_deref() == Some(tname.as_str())
-                                && existing.ty == impl_ty_scheme.ty
-                        })
-                    {
+                    if self.impls.iter().any(|existing| {
+                        existing.trait_name.as_deref() == Some(tname.as_str())
+                            && existing.ty == impl_ty_scheme.ty
+                    }) {
                         self.engine.diagnostics.push(
                             Diagnostic::error(format!(
                                 "Duplicate implementation of trait '{}' for type '{}'",
@@ -347,10 +376,35 @@ impl SemanticAnalyzer {
                 } => {
                     self.check_function(name, params, body, &[], *span);
                 }
-                Decl::ImplDecl { methods, .. } => {
+                Decl::ImplDecl {
+                    trait_name,
+                    ty,
+                    methods,
+                    ..
+                } => {
                     // Type-check impl method bodies
                     for m in methods {
-                        self.check_function(&m.name, &m.params, &m.body, &[], m.span);
+                        let impl_ty = self.convert_syntax_type(ty);
+                        let type_suffix = format_type_suffix(&impl_ty.ty);
+                        let mangled = mangle_instance_method(&m.name, &type_suffix);
+                        let scheme = if trait_name.is_some() {
+                            let Some(scheme) = self.env.lookup(&mangled).cloned() else {
+                                continue;
+                            };
+                            scheme
+                        } else if let Some(method_ty) = &m.ty {
+                            self.convert_syntax_type(method_ty)
+                        } else {
+                            self.standalone_impl_method_scheme(&impl_ty.ty, m.params.len())
+                        };
+                        self.check_impl_method(
+                            &m.name,
+                            &scheme,
+                            &m.params,
+                            &m.body,
+                            m.span,
+                            trait_name.is_none(),
+                        );
                     }
                 }
                 _ => {}
@@ -365,6 +419,15 @@ impl SemanticAnalyzer {
         cons: &[ConDecl],
         _span: Span,
     ) {
+        self.data_types.insert(
+            name.to_string(),
+            DataTypeInfo {
+                name: name.to_string(),
+                type_params: type_params.to_vec(),
+                constructors: vec![],
+            },
+        );
+
         let mut type_scope = self.new_type_var_scope(type_params);
         let scheme_vars = scope_vars(&type_scope);
         let result_ty = apply_type_params(name, type_params, &type_scope);
@@ -430,14 +493,9 @@ impl SemanticAnalyzer {
             con_names.push(con.name.clone());
         }
 
-        self.data_types.insert(
-            name.to_string(),
-            DataTypeInfo {
-                name: name.to_string(),
-                type_params: type_params.to_vec(),
-                constructors: con_names,
-            },
-        );
+        if let Some(info) = self.data_types.get_mut(name) {
+            info.constructors = con_names;
+        }
     }
 
     /// Convert syntax-level Type to internal Ty.
@@ -447,11 +505,7 @@ impl SemanticAnalyzer {
         Scheme::poly(scope_vars(&scope), ty)
     }
 
-    fn convert_syntax_type_sig(
-        &mut self,
-        constraints: &[TypeConstraint],
-        ty: &Type,
-    ) -> Scheme {
+    fn convert_syntax_type_sig(&mut self, constraints: &[TypeConstraint], ty: &Type) -> Scheme {
         let mut scope = HashMap::new();
         let predicates = constraints
             .iter()
@@ -475,9 +529,19 @@ impl SemanticAnalyzer {
         scope: &mut HashMap<String, TyVarId>,
     ) -> Ty {
         let ty = match ty {
-            Type::Con(name, _) => {
+            Type::Con(name, span) => {
                 if let Some(expanded) = self.type_aliases.get(name).cloned() {
                     return expanded;
+                }
+                if !self.is_known_type_constructor(name) {
+                    self.engine.diagnostics.push(
+                        Diagnostic::error(format!("Unknown type '{}'", name))
+                            .with_label(Label::primary(*span, "unknown type"))
+                            .with_help(
+                                "declare a `data`, `bitfield`, or `alias` before using this type name",
+                            ),
+                    );
+                    return Ty::Error;
                 }
                 Ty::Con(name.clone())
             }
@@ -513,6 +577,35 @@ impl SemanticAnalyzer {
             Type::Unit(_) => Ty::unit(),
         };
         normalize_type_aliases(&ty)
+    }
+
+    fn is_known_type_constructor(&self, name: &str) -> bool {
+        matches!(
+            name,
+            ty_name::I32
+                | ty_name::U32
+                | ty_name::F32
+                | ty_name::BOOL
+                | ty_name::UNIT
+                | ty_name::STRING
+                | ty_name::VEC
+                | "Vector"
+                | ty_name::MAT
+                | "Matrix"
+                | ty_name::TENSOR
+                | "Array"
+                | "Ten"
+                | "Scalar"
+                | "Sca"
+                | "Option"
+                | "Options"
+                | "Result"
+                | "Pair"
+                | ty_name::UNIFORM
+                | ty_name::STORAGE
+        ) || self.data_types.contains_key(name)
+            || self.bitfield_field_names.contains_key(name)
+            || self.type_aliases.contains_key(name)
     }
 
     fn standalone_impl_method_scheme(&mut self, impl_ty: &Ty, arity: usize) -> Scheme {
@@ -615,6 +708,57 @@ impl SemanticAnalyzer {
         }
     }
 
+    fn check_impl_method(
+        &mut self,
+        local_name: &str,
+        declared_scheme: &Scheme,
+        params: &[Pat],
+        body: &Expr,
+        span: Span,
+        bind_local_name: bool,
+    ) {
+        let mut local_env = self.env.clone();
+        let declared = self.engine.instantiate_qualified(declared_scheme);
+        let active_constraints = declared.constraints.clone();
+        if bind_local_name {
+            local_env.insert(local_name.to_string(), Scheme::mono(declared.ty.clone()));
+        }
+
+        let mut param_types = Vec::new();
+        for pat in params {
+            if let Pat::Tuple(sub_pats, _) = pat {
+                for sub_pat in sub_pats {
+                    let ty = self.engine.fresh_var();
+                    self.bind_pattern(sub_pat, &ty, &mut local_env);
+                    param_types.push(ty);
+                }
+            } else {
+                let ty = self.engine.fresh_var();
+                self.bind_pattern(pat, &ty, &mut local_env);
+                param_types.push(ty);
+            }
+        }
+
+        let mut cursor = &declared.ty;
+        for param_ty in &param_types {
+            if let Ty::Arrow(from, to) = cursor {
+                self.engine.unify(param_ty, from, span);
+                cursor = to;
+            } else {
+                break;
+            }
+        }
+
+        let body_ty = self.infer_expr(body, &mut local_env, &active_constraints);
+
+        let mut fun_ty = body_ty;
+        for param_ty in param_types.into_iter().rev() {
+            fun_ty = Ty::arrow(param_ty, fun_ty);
+        }
+
+        self.engine.unify(&fun_ty, &declared.ty, span);
+    }
+
     fn bind_pattern(&mut self, pat: &Pat, ty: &Ty, env: &mut TypeEnv) {
         match pat {
             Pat::Var(name, _) => {
@@ -677,7 +821,7 @@ impl SemanticAnalyzer {
                     self.bind_pattern(pat, elem_ty, env);
                 }
             }
-            Pat::Record(con_name, fields, span) => {
+            Pat::Record(con_name, fields, _, span) => {
                 if let Some(con_info) = self
                     .constructors
                     .get(con_name)
@@ -696,6 +840,14 @@ impl SemanticAnalyzer {
                                     // Punned field: bind field name as variable
                                     env.insert(field_name.clone(), Scheme::mono(field_ty.clone()));
                                 }
+                            } else {
+                                self.engine.diagnostics.push(
+                                    Diagnostic::error(format!(
+                                        "no field `{}` on constructor `{}`",
+                                        field_name, con_name
+                                    ))
+                                    .with_label(Label::primary(*span, "unknown record field")),
+                                );
                             }
                         }
                     }
@@ -713,11 +865,27 @@ impl SemanticAnalyzer {
         }
     }
 
-    fn infer_expr(&mut self, expr: &Expr, env: &mut TypeEnv, active_constraints: &[Predicate]) -> Ty {
+    fn infer_expr(
+        &mut self,
+        expr: &Expr,
+        env: &mut TypeEnv,
+        active_constraints: &[Predicate],
+    ) -> Ty {
         match expr {
             Expr::Lit(lit, _) => self.lit_type(lit),
 
             Expr::Var(name, span) => {
+                if is_internal_impl_method_name(&self.impls, name) {
+                    self.engine.diagnostics.push(
+                        Diagnostic::error(format!(
+                            "Internal impl method `{}` is not accessible from source",
+                            name
+                        ))
+                        .with_label(Label::primary(*span, "compiler-internal symbol"))
+                        .with_help("call the source method name or use dot syntax instead"),
+                    );
+                    return Ty::Error;
+                }
                 if let Some(scheme) = env.lookup(name) {
                     self.engine.instantiate(scheme)
                 } else {
@@ -853,7 +1021,8 @@ impl SemanticAnalyzer {
                     let mut arm_env = env.clone();
                     self.bind_pattern(pat, &scrut_ty, &mut arm_env);
                     if let Some(guard_expr) = guard {
-                        let guard_ty = self.infer_expr(guard_expr, &mut arm_env, active_constraints);
+                        let guard_ty =
+                            self.infer_expr(guard_expr, &mut arm_env, active_constraints);
                         self.engine.unify(&guard_ty, &Ty::bool(), *span);
                     }
                     let body_ty = self.infer_expr(body, &mut arm_env, active_constraints);
@@ -885,14 +1054,42 @@ impl SemanticAnalyzer {
                 }
             }
 
-            Expr::Record(name, fields, _span) => {
-                for (_, expr) in fields {
-                    self.infer_expr(expr, env, active_constraints);
-                }
-                // If named, resolve to the type constructor; otherwise fresh var
-                if let Some(type_name) = name {
-                    Ty::Con(type_name.clone())
+            Expr::Record(name, fields, span) => {
+                if let Some(con_name) = name {
+                    if let Some(con_info) = self
+                        .constructors
+                        .get(con_name)
+                        .cloned()
+                        .map(|info| info.instantiate(&mut self.engine))
+                    {
+                        if let ConstructorFields::Record(con_fields) = &con_info.fields {
+                            for (field_name, field_expr) in fields {
+                                let val_ty = self.infer_expr(field_expr, env, active_constraints);
+                                if let Some((_, expected_ty)) =
+                                    con_fields.iter().find(|(n, _)| n == field_name)
+                                {
+                                    self.engine.unify(&val_ty, expected_ty, *span);
+                                }
+                            }
+                        } else {
+                            // Constructor exists but has positional/empty fields, infer anyway
+                            for (_, expr) in fields {
+                                self.infer_expr(expr, env, active_constraints);
+                            }
+                        }
+                        con_info.result_ty.clone()
+                    } else {
+                        // Unknown constructor name, fall back to old behavior
+                        for (_, expr) in fields {
+                            self.infer_expr(expr, env, active_constraints);
+                        }
+                        Ty::Con(con_name.clone())
+                    }
                 } else {
+                    // Anonymous record
+                    for (_, expr) in fields {
+                        self.infer_expr(expr, env, active_constraints);
+                    }
                     self.engine.fresh_var()
                 }
             }
@@ -1163,9 +1360,12 @@ impl SemanticAnalyzer {
 
     fn lookup_trait_method_name(&self, name: &str) -> Option<(String, Ty)> {
         self.traits.values().find_map(|trait_info| {
-            trait_info.methods.iter().find_map(|(method_name, method_ty)| {
-                (method_name == name).then_some((trait_info.name.clone(), method_ty.clone()))
-            })
+            trait_info
+                .methods
+                .iter()
+                .find_map(|(method_name, method_ty)| {
+                    (method_name == name).then_some((trait_info.name.clone(), method_ty.clone()))
+                })
         })
     }
 
@@ -1212,7 +1412,10 @@ impl SemanticAnalyzer {
                 receiver_ty, trait_name
             ))
             .with_label(Label::primary(span, "missing trait implementation"))
-            .with_help(format!("define `impl {} {} where ...`", trait_name, receiver_ty))
+            .with_help(format!(
+                "define `impl {} {} where ...`",
+                trait_name, receiver_ty
+            ))
         } else {
             Diagnostic::error(format!("missing trait constraint `{}`", trait_name))
                 .with_label(Label::primary(span, "trait method requires a constraint"))
@@ -1286,6 +1489,21 @@ fn resolve_impl_method_name(impls: &[ImplInfo], name: &str, receiver_ty: &Ty) ->
         .find_map(|inst| inst.methods.get(name).cloned())
 }
 
+pub fn is_internal_impl_method_name(impls: &[ImplInfo], name: &str) -> bool {
+    impls
+        .iter()
+        .any(|inst| inst.methods.values().any(|mangled| mangled == name))
+}
+
+fn resolve_unique_standalone_impl_method_name(impls: &[ImplInfo], name: &str) -> Option<String> {
+    let mut matches = impls
+        .iter()
+        .filter(|inst| inst.trait_name.is_none())
+        .filter_map(|inst| inst.methods.get(name).cloned());
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
 fn impl_heads_overlap(a: &Ty, b: &Ty) -> bool {
     let mut engine = InferEngine::new();
     engine.unify(a, b, Span::new(0, 0));
@@ -1304,6 +1522,7 @@ pub fn resolve_dot_call_target(
     receiver_ty: &Ty,
 ) -> Option<String> {
     resolve_impl_method_name(impls, name, receiver_ty)
+        .or_else(|| resolve_unique_standalone_impl_method_name(impls, name))
         .or_else(|| env.lookup(name).map(|_| name.to_string()))
 }
 
@@ -1329,12 +1548,10 @@ pub fn replace_trait_var(ty: &Ty, trait_var: TyVarId, replacement: &Ty) -> Ty {
                 .map(|e| replace_trait_var(e, trait_var, replacement))
                 .collect(),
         ),
-        Ty::Forall(vars, body) => {
-            Ty::Forall(
-                vars.clone(),
-                Box::new(replace_trait_var(body, trait_var, replacement)),
-            )
-        }
+        Ty::Forall(vars, body) => Ty::Forall(
+            vars.clone(),
+            Box::new(replace_trait_var(body, trait_var, replacement)),
+        ),
     }
 }
 
@@ -1682,6 +1899,250 @@ mod tests {
     }
 
     #[test]
+    fn test_unknown_type_constructor_produces_error() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::DataDecl {
+                name: "ParticleState".into(),
+                type_params: vec![],
+                constructors: vec![ConDecl {
+                    name: "Active".into(),
+                    fields: ConFields::Record(vec![RecordField {
+                        name: "position".into(),
+                        ty: Type::Con("Vec3F".into(), span()),
+                        attributes: vec![],
+                        doc: None,
+                    }]),
+                    discriminant: None,
+                    span: span(),
+                    doc: None,
+                }],
+                span: span(),
+                comments: vec![],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        assert!(sa.has_errors(), "undeclared type constructors should be rejected");
+        assert!(sa
+            .diagnostics()
+            .iter()
+            .any(|diag| diag.message.contains("Unknown type 'Vec3F'")));
+    }
+
+    #[test]
+    fn test_standalone_impl_receiver_must_match_impl_type() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::ImplDecl {
+                trait_name: None,
+                ty: Type::Con("ParticleState".into(), span()),
+                methods: vec![ImplMethod {
+                    name: "sex".into(),
+                    ty: Some(Type::Arrow(
+                        Box::new(Type::Con("F32".into(), span())),
+                        Box::new(Type::Con("F32".into(), span())),
+                        span(),
+                    )),
+                    params: vec![Pat::Var("x".into(), span())],
+                    body: Expr::Var("x".into(), span()),
+                    span: span(),
+                }],
+                span: span(),
+                comments: vec![],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        assert!(
+            sa.has_errors(),
+            "standalone impl methods should use the impl type as their first parameter"
+        );
+    }
+
+    #[test]
+    fn test_same_file_alias_is_visible_in_data_decl() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![
+                Decl::TypeAlias {
+                    name: "Vec3F".into(),
+                    params: vec![],
+                    ty: Type::App(
+                        Box::new(Type::App(
+                            Box::new(Type::Con("Vec".into(), span())),
+                            Box::new(Type::Nat(3, span())),
+                            span(),
+                        )),
+                        Box::new(Type::Con("F32".into(), span())),
+                        span(),
+                    ),
+                    span: span(),
+                    comments: vec![],
+                },
+                Decl::DataDecl {
+                    name: "ParticleState".into(),
+                    type_params: vec![],
+                    constructors: vec![ConDecl {
+                        name: "Active".into(),
+                        fields: ConFields::Record(vec![RecordField {
+                            name: "position".into(),
+                            ty: Type::Con("Vec3F".into(), span()),
+                            attributes: vec![],
+                            doc: None,
+                        }]),
+                        discriminant: None,
+                        span: span(),
+                        doc: None,
+                    }],
+                    span: span(),
+                    comments: vec![],
+                },
+            ],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        assert!(
+            !sa.has_errors(),
+            "aliases declared in the same module should be usable inside data declarations"
+        );
+    }
+
+    #[test]
+    fn test_standalone_impl_method_is_not_callable_as_plain_function() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![
+                Decl::ImplDecl {
+                    trait_name: None,
+                    ty: Type::Con("F32".into(), span()),
+                    methods: vec![ImplMethod {
+                        name: "half".into(),
+                        ty: Some(Type::Arrow(
+                            Box::new(Type::Con("F32".into(), span())),
+                            Box::new(Type::Con("F32".into(), span())),
+                            span(),
+                        )),
+                        params: vec![Pat::Var("x".into(), span())],
+                        body: Expr::Var("x".into(), span()),
+                        span: span(),
+                    }],
+                    span: span(),
+                    comments: vec![],
+                },
+                Decl::FunDecl {
+                    name: "bad".into(),
+                    params: vec![],
+                    body: Expr::App(
+                        Box::new(Expr::Var("half".into(), span())),
+                        Box::new(Expr::Lit(Lit::Float(1.0), span())),
+                        span(),
+                    ),
+                    where_binds: vec![],
+                    span: span(),
+                    comments: vec![],
+                },
+            ],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        assert!(
+            sa.has_errors(),
+            "standalone impl methods should only be callable through method syntax"
+        );
+    }
+
+    #[test]
+    fn test_internal_impl_mangled_name_is_not_callable_from_source() {
+        let source = r#"
+impl F32 where
+  half : F32 -> F32
+  half x = x
+
+bad = half_F32 1.0
+"#;
+        let mut parser = Parser::new(source);
+        let mut program = parser.parse_program();
+        with_prelude(&mut program);
+
+        let mut sa = SemanticAnalyzer::new();
+        sa.analyze(&program);
+        assert!(sa.has_errors(), "mangled impl names should stay internal");
+        assert!(sa
+            .diagnostics()
+            .iter()
+            .any(|diag| diag.message.contains("Internal impl method `half_F32`")));
+    }
+
+    #[test]
+    fn test_record_pattern_unknown_field_produces_error() {
+        let source = r#"
+data ParticleState
+  = Active { life : F32 }
+  | Dead
+
+f particle = match particle
+  | Active { lif, .. } -> lif
+  | Dead -> 0.0
+"#;
+        let mut parser = Parser::new(source);
+        let mut program = parser.parse_program();
+        with_prelude(&mut program);
+
+        let mut sa = SemanticAnalyzer::new();
+        sa.analyze(&program);
+        assert!(sa.has_errors(), "unknown record-pattern fields should be rejected");
+        assert!(sa
+            .diagnostics()
+            .iter()
+            .any(|diag| diag.message.contains("no field `lif` on constructor `Active`")));
+    }
+
+    #[test]
+    fn test_standalone_impl_method_remains_callable_with_dot_syntax() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![
+                Decl::ImplDecl {
+                    trait_name: None,
+                    ty: Type::Con("F32".into(), span()),
+                    methods: vec![ImplMethod {
+                        name: "half".into(),
+                        ty: Some(Type::Arrow(
+                            Box::new(Type::Con("F32".into(), span())),
+                            Box::new(Type::Con("F32".into(), span())),
+                            span(),
+                        )),
+                        params: vec![Pat::Var("x".into(), span())],
+                        body: Expr::Var("x".into(), span()),
+                        span: span(),
+                    }],
+                    span: span(),
+                    comments: vec![],
+                },
+                Decl::FunDecl {
+                    name: "ok".into(),
+                    params: vec![Pat::Var("x".into(), span())],
+                    body: Expr::FieldAccess(
+                        Box::new(Expr::Var("x".into(), span())),
+                        "half".into(),
+                        span(),
+                    ),
+                    where_binds: vec![],
+                    span: span(),
+                    comments: vec![],
+                },
+            ],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        assert!(
+            !sa.has_errors(),
+            "standalone impl methods should still resolve through dot syntax"
+        );
+    }
+
+    #[test]
     fn test_dot_syntax_accepts_prelude_functions() {
         let mut sa = SemanticAnalyzer::new();
         let mut program = Program {
@@ -1800,10 +2261,9 @@ impl Light SpotLight where
         sa.analyze(&program);
 
         assert!(sa.has_errors());
-        assert!(sa
-            .diagnostics()
-            .iter()
-            .any(|diag| diag.message.contains("Duplicate implementation of trait 'Light'")));
+        assert!(sa.diagnostics().iter().any(|diag| diag
+            .message
+            .contains("Duplicate implementation of trait 'Light'")));
     }
 
     #[test]
@@ -1830,7 +2290,8 @@ impl Light SpotLight where
 
         assert!(sa.has_errors());
         assert!(sa.diagnostics().iter().any(|diag| {
-            diag.message.contains("Incomplete implementation of trait 'Light'")
+            diag.message
+                .contains("Incomplete implementation of trait 'Light'")
                 && diag.message.contains("color")
         }));
     }
@@ -1909,10 +2370,9 @@ impl Convert (Vec<3, F32>) where
         sa.analyze(&program);
 
         assert!(sa.has_errors());
-        assert!(sa
-            .diagnostics()
-            .iter()
-            .any(|diag| diag.message.contains("Overlapping implementation of trait 'Convert'")));
+        assert!(sa.diagnostics().iter().any(|diag| diag
+            .message
+            .contains("Overlapping implementation of trait 'Convert'")));
     }
 
     #[test]

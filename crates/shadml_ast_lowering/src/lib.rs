@@ -390,12 +390,14 @@ impl AstLowering {
                         for (i, m) in methods.iter().enumerate() {
                             if let Some((mangled, concrete_ty)) = method_info.get(i) {
                                 if let Some(f) = self.lower_impl_method(
+                                    &m.name,
                                     mangled,
                                     &m.params,
                                     &m.body,
                                     concrete_ty,
                                     m.span,
                                     comments.clone(),
+                                    false,
                                 ) {
                                     functions.push(f);
                                 }
@@ -411,15 +413,18 @@ impl AstLowering {
                             let lowered = if let Some(method_ty) = &m.ty {
                                 let concrete_ty = self.convert_syntax_type_scheme(method_ty).ty;
                                 self.lower_impl_method(
+                                    &m.name,
                                     &mangled,
                                     &m.params,
                                     &m.body,
                                     &concrete_ty,
                                     m.span,
                                     comments.clone(),
+                                    true,
                                 )
                             } else {
                                 self.lower_standalone_impl_method(
+                                    &m.name,
                                     &mangled,
                                     &m.params,
                                     &m.body,
@@ -437,7 +442,6 @@ impl AstLowering {
                                     fun_ty = Ty::arrow(pty.clone(), fun_ty);
                                 }
                                 let scheme = Scheme::mono(fun_ty);
-                                self.env.insert(m.name.clone(), scheme.clone());
                                 self.env.insert(mangled.clone(), scheme);
                                 functions.push(f);
                             }
@@ -820,14 +824,19 @@ impl AstLowering {
     /// Lower an impl method body into a regular HIR function.
     fn lower_impl_method(
         &mut self,
+        local_name: &str,
         mangled_name: &str,
         params: &[Pat],
         body: &Expr,
         concrete_ty: &Ty,
         span: Span,
         comments: Vec<String>,
+        bind_local_name: bool,
     ) -> Option<HirFunction> {
         let mut local_env = self.env.clone();
+        if bind_local_name {
+            local_env.insert(local_name.to_string(), Scheme::mono(concrete_ty.clone()));
+        }
 
         // Extract parameter types from the concrete method type (which is curried arrows)
         let mut hir_params = Vec::new();
@@ -869,6 +878,7 @@ impl AstLowering {
     /// Lower a standalone impl method — infer types from parameters and body.
     fn lower_standalone_impl_method(
         &mut self,
+        local_name: &str,
         mangled_name: &str,
         params: &[Pat],
         body: &Expr,
@@ -878,6 +888,17 @@ impl AstLowering {
     ) -> Option<HirFunction> {
         let mut local_env = self.env.clone();
         let mut hir_params = Vec::new();
+        let mut fun_ty = self.engine.fresh_var();
+
+        for i in (0..params.len()).rev() {
+            let param_ty = if i == 0 {
+                impl_ty.clone()
+            } else {
+                self.engine.fresh_var()
+            };
+            fun_ty = Ty::arrow(param_ty, fun_ty);
+        }
+        local_env.insert(local_name.to_string(), Scheme::mono(fun_ty));
 
         for (i, pat) in params.iter().enumerate() {
             // First parameter gets the impl type; rest are inferred.
@@ -1846,7 +1867,7 @@ impl AstLowering {
                     HirPattern::Wild
                 }
             }
-            Pat::Record(con_name, fields, _) => {
+            Pat::Record(con_name, fields, _, _) => {
                 if let Some(con_info) = self
                     .constructors
                     .get(con_name)
@@ -1856,18 +1877,22 @@ impl AstLowering {
                     let sub_pats: Vec<HirPattern> = if let ConstructorFields::Record(con_fields) =
                         &con_info.fields
                     {
-                        fields
+                        con_fields
                             .iter()
-                            .map(|(fname, maybe_pat)| {
-                                let field_ty = con_fields
-                                    .iter()
-                                    .find(|(n, _)| n == fname)
-                                    .map(|(_, ty)| ty.clone())
-                                    .unwrap_or(Ty::Error);
-                                if let Some(p) = maybe_pat {
-                                    self.lower_pattern(p, &field_ty)
+                            .map(|(field_name, field_ty)| {
+                                if let Some((_, maybe_pat)) =
+                                    fields.iter().find(|(name, _)| name == field_name)
+                                {
+                                    if let Some(p) = maybe_pat {
+                                        self.lower_pattern(p, field_ty)
+                                    } else {
+                                        HirPattern::Var(
+                                            field_name.clone(),
+                                            self.engine.finalize(field_ty),
+                                        )
+                                    }
                                 } else {
-                                    HirPattern::Var(fname.clone(), self.engine.finalize(&field_ty))
+                                    HirPattern::Wild
                                 }
                             })
                             .collect()
@@ -1959,7 +1984,7 @@ impl AstLowering {
                     self.bind_pattern(pat, elem_ty, env);
                 }
             }
-            Pat::Record(con_name, fields, span) => {
+            Pat::Record(con_name, fields, _, span) => {
                 if let Some(con_info) = self
                     .constructors
                     .get(con_name)

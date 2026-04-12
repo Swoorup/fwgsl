@@ -86,6 +86,7 @@ struct IdeState<'a> {
     source: &'a str,
     analyzer: SemanticAnalyzer,
     index: DocumentIndex,
+    symbol_types: HashMap<Span, String>,
     /// Doc comments extracted from declarations, keyed by symbol name.
     doc_comments: HashMap<String, String>,
     /// Record field types, keyed by field name (for hover display).
@@ -185,6 +186,7 @@ struct IndexBuilder<'a> {
     index: DocumentIndex,
     top_level_values: HashMap<String, usize>,
     top_level_types: HashMap<String, usize>,
+    impl_method_symbols: HashMap<String, Vec<usize>>,
     /// Record field name → symbol ID, for resolving field access and field init.
     field_symbols: HashMap<String, usize>,
 }
@@ -197,6 +199,7 @@ impl<'a> IndexBuilder<'a> {
             index: DocumentIndex::default(),
             top_level_values: HashMap::new(),
             top_level_types: HashMap::new(),
+            impl_method_symbols: HashMap::new(),
             field_symbols: HashMap::new(),
         }
     }
@@ -415,10 +418,37 @@ impl<'a> IndexBuilder<'a> {
                         self.top_level_values.insert(m.name.clone(), mid);
                     }
                 }
-                Decl::ImplDecl { .. } | Decl::ExternDecl { .. } => {
-                    // Impl methods are lowered as mangled functions;
+                Decl::ImplDecl {
+                    trait_name,
+                    ty,
+                    methods,
+                    span,
+                    ..
+                } => {
+                    let container = match trait_name {
+                        Some(trait_name) => format!("impl {} {}", trait_name, format_type(ty)),
+                        None => format!("impl {}", format_type(ty)),
+                    };
+                    for m in methods {
+                        let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
+                        let mid = self.index.push_symbol(NewSymbol {
+                            name: m.name.clone(),
+                            namespace: Namespace::Value,
+                            kind: SymbolKind::Function,
+                            span: mspan,
+                            scope_span: *span,
+                            scope_depth: 0,
+                            visible_from: 0,
+                            container: Some(container.clone()),
+                        });
+                        self.impl_method_symbols
+                            .entry(m.name.clone())
+                            .or_default()
+                            .push(mid);
+                    }
+                }
+                Decl::ExternDecl { .. } => {
                     // Extern declarations are type-level only.
-                    // No separate top-level symbols needed.
                 }
                 Decl::ModuleDecl { .. } | Decl::ImportDecl { .. } => {
                     // Module/import declarations don't define symbols.
@@ -598,7 +628,7 @@ impl<'a> IndexBuilder<'a> {
                     if let Some(method_ty) = &m.ty {
                         self.walk_type(method_ty, frames);
                     }
-                    self.walk_expr(&m.body, frames);
+                    self.walk_callable(&m.name, &m.params, &m.body, &[], m.span, frames);
                 }
             }
             Decl::ExternDecl { ty, .. } => {
@@ -766,6 +796,14 @@ impl<'a> IndexBuilder<'a> {
                         self.index
                             .push_occurrence(symbol_id, name_span, OccurrenceRole::Reference);
                     }
+                } else if let Some([symbol_id]) =
+                    self.impl_method_symbols.get(field_name).map(Vec::as_slice)
+                {
+                    if let Some(name_span) = self.last_name_span_before(field_name, *span, span.end)
+                    {
+                        self.index
+                            .push_occurrence(*symbol_id, name_span, OccurrenceRole::Reference);
+                    }
                 }
             }
             Expr::Index(base, index, _) => {
@@ -918,14 +956,34 @@ impl<'a> IndexBuilder<'a> {
                     self.define_pattern(item, visible_from, frames, kind);
                 }
             }
-            Pat::Record(name, fields, span) => {
+            Pat::Record(name, fields, _, span) => {
                 if let Some(symbol_id) = self.resolve_value(name, frames) {
                     self.index
                         .push_occurrence(symbol_id, *span, OccurrenceRole::Reference);
                 }
-                for (_, field) in fields {
+                for (field_name, field) in fields {
                     if let Some(field_pattern) = field {
                         self.define_pattern(field_pattern, visible_from, frames, kind);
+                    } else if let Some(name_span) = self.first_name_span(field_name, *span) {
+                        let depth = frames.len() - 1;
+                        let symbol_id = self.index.push_symbol(NewSymbol {
+                            name: field_name.clone(),
+                            namespace: Namespace::Value,
+                            kind,
+                            span: name_span,
+                            scope_span: frames[depth].span,
+                            scope_depth: depth,
+                            visible_from,
+                            container: frames[depth].container.clone(),
+                        });
+                        frames[depth].value_defs.insert(field_name.clone(), symbol_id);
+                        if let Some(&field_symbol_id) = self.field_symbols.get(field_name) {
+                            self.index.push_occurrence(
+                                field_symbol_id,
+                                name_span,
+                                OccurrenceRole::Reference,
+                            );
+                        }
                     }
                 }
             }
@@ -999,6 +1057,7 @@ impl<'a> IndexBuilder<'a> {
 pub fn build_completions(source: &str, pos: Position) -> Vec<CompletionItem> {
     let prefix = completion_prefix(source, pos);
     let context = completion_context(source, pos, &prefix);
+    let is_member_context = is_member_completion_context(source, pos, &prefix);
     let offset = position_to_offset(source, pos).unwrap_or(source.len()) as u32;
     let state = build_ide_state(source);
 
@@ -1018,7 +1077,10 @@ pub fn build_completions(source: &str, pos: Position) -> Vec<CompletionItem> {
 
     if context != CompletionContext::Attribute {
         for (label, scheme) in state.analyzer.env.iter() {
-            if seen.contains(label) || !matches_prefix(label, &prefix) || !is_word_completion(label)
+            if shadml_semantic::is_internal_impl_method_name(&state.analyzer.impls, label)
+                || seen.contains(label)
+                || !matches_prefix(label, &prefix)
+                || !is_word_completion(label)
             {
                 continue;
             }
@@ -1029,6 +1091,36 @@ pub fn build_completions(source: &str, pos: Position) -> Vec<CompletionItem> {
                 builtin_completion_kind(label),
             ));
             seen.insert(label.to_owned());
+        }
+    }
+
+    if is_member_context {
+        for impl_info in &state.analyzer.impls {
+            for (method_name, mangled_name) in &impl_info.methods {
+                if seen.contains(method_name) || !matches_prefix(method_name, &prefix) {
+                    continue;
+                }
+                let detail = state
+                    .analyzer
+                    .env
+                    .lookup(mangled_name)
+                    .map(|scheme| {
+                        format!(
+                            "method : {}",
+                            format_scheme(&state.analyzer.engine, scheme)
+                        )
+                    })
+                    .unwrap_or_else(|| "method".to_owned());
+                items.push(CompletionItem {
+                    label: method_name.clone(),
+                    kind: Some(CompletionItemKind::METHOD),
+                    detail: Some(detail),
+                    sort_text: Some(format!("00-member-{}", method_name)),
+                    filter_text: Some(method_name.clone()),
+                    ..Default::default()
+                });
+                seen.insert(method_name.clone());
+            }
         }
     }
 
@@ -1156,6 +1248,29 @@ pub fn build_goto_definition(
     let state = build_ide_state(source);
     let occurrence = state.index.symbol_at_offset(offset)?;
     let symbol = &state.index.symbols[occurrence.symbol_id];
+    if occurrence.role == OccurrenceRole::Definition && symbol.kind == SymbolKind::PatternBinding {
+        if let Some(field_occurrence) = state.index.occurrences.iter().find(|candidate| {
+            candidate.span == occurrence.span
+                && candidate.role == OccurrenceRole::Reference
+                && state.index.symbols[candidate.symbol_id].kind == SymbolKind::RecordField
+        }) {
+            let field_symbol = &state.index.symbols[field_occurrence.symbol_id];
+            let locations = field_symbol
+                .definition_spans
+                .iter()
+                .copied()
+                .map(|span| Location {
+                    uri: uri.clone(),
+                    range: span_to_range(source, span),
+                })
+                .collect::<Vec<_>>();
+            return match locations.as_slice() {
+                [] => None,
+                [single] => Some(GotoDefinitionResponse::Scalar(single.clone())),
+                _ => Some(GotoDefinitionResponse::Array(locations)),
+            };
+        }
+    }
     let mut definition_spans = symbol.definition_spans.clone();
     definition_spans.sort_by(|left, right| {
         left.start
@@ -1232,6 +1347,7 @@ fn build_ide_state(source: &str) -> IdeState<'_> {
     // don't correspond to positions in the user's source and would cause
     // symbol_at_offset to return wrong results.
     let index = IndexBuilder::new(source).build(&user_program);
+    let symbol_types = collect_symbol_types(&user_program, &analyzer);
     let doc_comments = extract_doc_comments(&user_program);
     let field_types = extract_field_types(&user_program, source);
 
@@ -1239,6 +1355,7 @@ fn build_ide_state(source: &str) -> IdeState<'_> {
         source,
         analyzer,
         index,
+        symbol_types,
         doc_comments,
         field_types,
     }
@@ -1411,6 +1528,17 @@ fn completion_context(source: &str, pos: Position, prefix: &str) -> CompletionCo
     CompletionContext::Value
 }
 
+fn is_member_completion_context(source: &str, pos: Position, prefix: &str) -> bool {
+    let offset = position_to_offset(source, pos).unwrap_or(source.len());
+    let before_cursor = &source[..offset];
+    let before_prefix = &before_cursor[..before_cursor.len().saturating_sub(prefix.len())];
+    before_prefix
+        .chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .is_some_and(|ch| ch == '.')
+}
+
 fn is_completion_word_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '\'' | '$')
 }
@@ -1505,12 +1633,15 @@ fn symbol_detail(state: &IdeState<'_>, symbol: &Symbol) -> String {
                 )
             })
             .unwrap_or_else(|| "entry point".to_owned()),
-        SymbolKind::Parameter => "parameter".to_owned(),
+        SymbolKind::Parameter => state
+            .symbol_types
+            .get(&symbol.primary_span)
+            .map(|ty| format!("parameter : {}", ty))
+            .unwrap_or_else(|| "parameter".to_owned()),
         SymbolKind::LocalBinding | SymbolKind::PatternBinding => state
-            .analyzer
-            .env
-            .lookup(&symbol.name)
-            .map(|scheme| format!("local : {}", format_scheme(&state.analyzer.engine, scheme)))
+            .symbol_types
+            .get(&symbol.primary_span)
+            .map(|ty| format!("local : {}", ty))
             .unwrap_or_else(|| "local binding".to_owned()),
         SymbolKind::Constructor => state
             .analyzer
@@ -1567,6 +1698,9 @@ fn symbol_signature(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
     match symbol.kind {
         SymbolKind::DataType | SymbolKind::TypeAlias | SymbolKind::TypeParameter => None,
         SymbolKind::RecordField => state.field_types.get(&symbol.name).cloned(),
+        SymbolKind::Parameter | SymbolKind::LocalBinding | SymbolKind::PatternBinding => {
+            state.symbol_types.get(&symbol.primary_span).cloned()
+        }
         _ => state
             .analyzer
             .env
@@ -1698,6 +1832,123 @@ fn format_scheme(engine: &InferEngine, scheme: &Scheme) -> String {
     rendered
 }
 
+fn format_type(ty: &Type) -> String {
+    match ty {
+        Type::Con(name, _) | Type::Var(name, _) => name.clone(),
+        Type::Nat(n, _) => n.to_string(),
+        Type::App(f, a, _) => format!("{} {}", format_type(f), format_type(a)),
+        Type::Arrow(a, b, _) => format!("{} -> {}", format_type(a), format_type(b)),
+        Type::Paren(inner, _) => format!("({})", format_type(inner)),
+        Type::Tuple(items, _) => {
+            let rendered = items.iter().map(format_type).collect::<Vec<_>>().join(", ");
+            format!("({})", rendered)
+        }
+        Type::Unit(_) => "()".to_owned(),
+    }
+}
+
+fn format_ty(engine: &InferEngine, ty: &shadml_typechecker::Ty) -> String {
+    format!("{}", engine.finalize(ty))
+}
+
+fn collect_symbol_types(program: &Program, analyzer: &SemanticAnalyzer) -> HashMap<Span, String> {
+    let mut types = HashMap::new();
+    let all_decls = Decl::flatten_cfg_decls(&program.decls);
+    let mut impl_infos = analyzer.impls.iter();
+    for decl in &all_decls {
+        match decl {
+            Decl::FunDecl {
+                name, params, span, ..
+            }
+            | Decl::EntryPoint {
+                name, params, span, ..
+            } => {
+                if let Some(scheme) = analyzer.env.lookup(name) {
+                    let mut cursor = analyzer.engine.finalize(&scheme.ty);
+                    for pat in params {
+                        if let shadml_typechecker::Ty::Arrow(from, to) = cursor {
+                            collect_pattern_types(
+                                pat,
+                                from.as_ref(),
+                                analyzer,
+                                &mut types,
+                            );
+                            cursor = (*to).clone();
+                        } else {
+                            let _ = span;
+                            break;
+                        }
+                    }
+                }
+            }
+            Decl::ImplDecl { methods, .. } => {
+                let Some(impl_info) = impl_infos.next() else {
+                    continue;
+                };
+                for method in methods {
+                    let Some(mangled) = impl_info.methods.get(&method.name) else {
+                        continue;
+                    };
+                    if let Some(scheme) = analyzer.env.lookup(&mangled) {
+                        let mut cursor = analyzer.engine.finalize(&scheme.ty);
+                        for pat in &method.params {
+                            if let shadml_typechecker::Ty::Arrow(from, to) = cursor {
+                                collect_pattern_types(
+                                    pat,
+                                    from.as_ref(),
+                                    analyzer,
+                                    &mut types,
+                                );
+                                cursor = (*to).clone();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    types
+}
+
+fn collect_pattern_types(
+    pattern: &Pat,
+    ty: &shadml_typechecker::Ty,
+    analyzer: &SemanticAnalyzer,
+    types: &mut HashMap<Span, String>,
+) {
+    match pattern {
+        Pat::Var(_, span) => {
+            types.insert(*span, format_ty(&analyzer.engine, ty));
+        }
+        Pat::Paren(inner, _) => collect_pattern_types(inner, ty, analyzer, types),
+        Pat::Tuple(items, _) => {
+            if let shadml_typechecker::Ty::Tuple(elem_tys) = analyzer.engine.finalize(ty) {
+                for (item, elem_ty) in items.iter().zip(elem_tys.iter()) {
+                    collect_pattern_types(item, elem_ty, analyzer, types);
+                }
+            }
+        }
+        Pat::Record(con_name, fields, _, _) => {
+            if let Some(con_info) = analyzer.constructors.get(con_name) {
+                if let shadml_typechecker::ConstructorFields::Record(con_fields) = &con_info.fields {
+                    for (field_name, maybe_pat) in fields {
+                        if let Some((_, field_ty)) = con_fields.iter().find(|(n, _)| n == field_name)
+                        {
+                            if let Some(pat) = maybe_pat {
+                                collect_pattern_types(pat, field_ty, analyzer, types);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn compute_line_starts(source: &str) -> Vec<u32> {
     let mut starts = vec![0u32];
     for (i, b) in source.bytes().enumerate() {
@@ -1765,6 +2016,20 @@ mod tests {
     }
 
     #[test]
+    fn member_completions_prefer_source_impl_method_name() {
+        let source = r#"
+impl F32 where
+  half : F32 -> F32
+  half x = x
+
+value = 1.0.ha
+"#;
+        let items = build_completions(source, Position::new(5, 14));
+        assert!(items.iter().any(|item| item.label == "half"));
+        assert!(!items.iter().any(|item| item.label == "half_F32"));
+    }
+
+    #[test]
     fn hover_on_prefixed_builtin_includes_signature() {
         let source = "main x = length x";
         let hover = build_hover(source, Position::new(0, 10)).unwrap();
@@ -1790,6 +2055,108 @@ mod tests {
                 assert_eq!(locations[1].range.start.line, 1);
             }
             other => panic!("expected multiple locations, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn goto_definition_for_member_impl_method() {
+        let source = r#"impl F32 where
+  half : F32 -> F32
+  half x = x
+
+value = 1.0.half"#;
+        let uri = Url::parse("file:///test.shadml").unwrap();
+        let response = build_goto_definition(&uri, source, Position::new(4, 13)).unwrap();
+        match response {
+            GotoDefinitionResponse::Array(locations) => {
+                assert!(locations.iter().any(|loc| loc.range.start.line == 1));
+                assert!(locations.iter().any(|loc| loc.range.start.line == 2));
+            }
+            GotoDefinitionResponse::Scalar(loc) => {
+                assert!(loc.range.start.line == 1 || loc.range.start.line == 2);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn goto_definition_for_record_pattern_binding_then_field() {
+        let source = r#"data ParticleState
+  = Active { position : F32, life : F32 }
+  | Dead
+
+lifeValue particle =
+  match particle
+    | Active { life, .. } -> life
+    | Dead -> 0.0"#;
+        let uri = Url::parse("file:///test.shadml").unwrap();
+
+        let body_response = build_goto_definition(&uri, source, Position::new(6, 29)).unwrap();
+        let body_target = match body_response {
+            GotoDefinitionResponse::Scalar(loc) => loc,
+            GotoDefinitionResponse::Array(mut locs) => {
+                locs.sort_by_key(|loc| (loc.range.start.line, loc.range.start.character));
+                locs[0].clone()
+            }
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_eq!(body_target.range.start.line, 6);
+
+        let pattern_response = build_goto_definition(&uri, source, Position::new(6, 15)).unwrap();
+        let pattern_target = match pattern_response {
+            GotoDefinitionResponse::Scalar(loc) => loc,
+            GotoDefinitionResponse::Array(mut locs) => {
+                locs.sort_by_key(|loc| (loc.range.start.line, loc.range.start.character));
+                locs[0].clone()
+            }
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_eq!(pattern_target.range.start.line, 1);
+    }
+
+    #[test]
+    fn hover_on_impl_parameter_includes_type() {
+        let source = r#"trait Light a where
+  illumination : a -> Vec<3, F32> -> Vec<3, F32> -> Vec<3, F32>
+
+data SpotLight = SpotLight
+
+impl Light SpotLight where
+  illumination light worldPos normal =
+    let lambert = dot normal worldPos
+    in lambert"#;
+        let hover = build_hover(source, Position::new(7, 24)).unwrap();
+        match hover.contents {
+            HoverContents::Markup(markup) => {
+                assert!(markup.value.contains("normal"));
+                assert!(markup.value.contains("Vec"));
+                assert!(markup.value.contains("F32"));
+            }
+            other => panic!("expected markup hover, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn goto_definition_for_impl_parameter_reference() {
+        let source = r#"trait Light a where
+  illumination : a -> Vec<3, F32> -> Vec<3, F32> -> Vec<3, F32>
+
+data SpotLight = SpotLight
+
+impl Light SpotLight where
+  illumination light worldPos normal =
+    let lambert = dot normal worldPos
+    in lambert"#;
+        let uri = Url::parse("file:///test.shadml").unwrap();
+        let response = build_goto_definition(&uri, source, Position::new(7, 24)).unwrap();
+        match response {
+            GotoDefinitionResponse::Scalar(loc) => {
+                assert_eq!(loc.range.start.line, 6);
+            }
+            GotoDefinitionResponse::Array(locs) => {
+                assert!(locs.iter().any(|loc| loc.range.start.line == 6));
+            }
+            other => panic!("unexpected response: {other:?}"),
         }
     }
 

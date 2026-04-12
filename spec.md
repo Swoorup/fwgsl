@@ -233,6 +233,7 @@ alias MyArray = Array<F32, 10>
 ```
 
 Type aliases are expanded during semantic analysis. The `alias` keyword is the only way to declare type aliases (`type` and `newtype` are not supported).
+Capitalized names in type position are not implicit aliases: if you want a shorthand like `Vec3F`, write `alias Vec3F = Vec<3, F32>` explicitly.
 
 ### 3.9 Type Variables
 
@@ -858,6 +859,19 @@ case 4i, 8i: { ... }
 
 Tuple patterns in function parameters are desugared to curried parameters.
 
+### 6.7 Record Pattern
+
+```
+Point { x, y }           -- bind selected fields
+Point { x = px, y = py } -- explicit subpatterns
+Active { life, .. }      -- bind listed fields, ignore the rest
+```
+
+Record patterns destructure named record constructors by field. Field punning is
+supported, so `life` means `life = life`. Record patterns are partial matches:
+only the listed fields are inspected and bound. Writing `..` makes the ignored
+remainder explicit.
+
 ### 6.7 As-Pattern
 
 ```
@@ -938,7 +952,7 @@ The number of components (2–4) is inferred from the elements. Scalar and vecto
 
 shadml uses a constraint-based Hindley-Milner type inference engine:
 
-- **Fresh type variables** are generated for unknown types
+- **Fresh type variables** are generated for inferred expression and pattern types
 - **Unification** resolves constraints between types
 - **Substitution** maps type variables to concrete types
 - **Generalization** creates polymorphic type schemes over variables not free in the environment

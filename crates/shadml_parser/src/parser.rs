@@ -417,7 +417,7 @@ pub enum Pat {
     Lit(Lit, Span),
     Paren(Box<Pat>, Span),
     Tuple(Vec<Pat>, Span),
-    Record(String, Vec<(String, Option<Pat>)>, Span),
+    Record(String, Vec<(String, Option<Pat>)>, bool, Span),
     As(String, Box<Pat>, Span),
     /// Or-pattern: `p1 | p2 | p3` — used for multi-value switch cases.
     Or(Vec<Pat>, Span),
@@ -499,7 +499,7 @@ impl Pat {
             | Pat::Lit(_, s)
             | Pat::Paren(_, s)
             | Pat::Tuple(_, s)
-            | Pat::Record(_, _, s)
+            | Pat::Record(_, _, _, s)
             | Pat::As(_, _, s)
             | Pat::Or(_, s) => *s,
         }
@@ -3312,9 +3312,17 @@ impl Parser {
     fn parse_record_pat(&mut self, con_name: String, start: u32) -> Pat {
         self.expect(SyntaxKind::LBrace);
         let mut fields = Vec::new();
+        let mut has_rest = false;
         loop {
             self.skip_trivia();
             if self.at(SyntaxKind::RBrace) || self.at_end() {
+                break;
+            }
+
+            if self.at(SyntaxKind::DotDot) {
+                self.bump();
+                has_rest = true;
+                self.skip_trivia();
                 break;
             }
 
@@ -3333,13 +3341,21 @@ impl Parser {
             }
 
             self.skip_trivia();
-            if !self.eat(SyntaxKind::Comma) {
+            if self.eat(SyntaxKind::Comma) {
+                self.skip_trivia();
+                if self.at(SyntaxKind::DotDot) {
+                    self.bump();
+                    has_rest = true;
+                    self.skip_trivia();
+                    break;
+                }
+            } else {
                 break;
             }
         }
         self.expect(SyntaxKind::RBrace);
         let span = self.span_from(start);
-        Pat::Record(con_name, fields, span)
+        Pat::Record(con_name, fields, has_rest, span)
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -4131,6 +4147,27 @@ main x =
                 );
             }
             other => panic!("expected ImplDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_record_pattern_with_rest() {
+        let source = "f value = match value\n  | Active { life, .. } -> life\n  | Dead -> 0.0";
+        let prog = parse(source);
+        match &prog.decls[0] {
+            Decl::FunDecl { body, .. } => match body {
+                Expr::Case(_, arms, _) => match &arms[0].0 {
+                    Pat::Record(name, fields, has_rest, _) => {
+                        assert_eq!(name, "Active");
+                        assert_eq!(fields.len(), 1);
+                        assert_eq!(fields[0].0, "life");
+                        assert!(*has_rest, "expected record pattern rest marker");
+                    }
+                    other => panic!("expected record pattern, got {:?}", other),
+                },
+                other => panic!("expected match expression, got {:?}", other),
+            },
+            other => panic!("expected FunDecl, got {:?}", other),
         }
     }
 }

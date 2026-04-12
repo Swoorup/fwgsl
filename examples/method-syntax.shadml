@@ -43,7 +43,7 @@ main input =
       -- Method-call sugar with args: p.value.clampVal p.lo p.hi
       -- is clampVal(p.value, p.lo, p.hi)
       cl = p.value.clampVal p.lo p.hi
-      -- Pipeline compatibility: value |> half |> double
-      d  = p.value |> half |> double
+      -- Pipeline compatibility without treating impl methods as free functions.
+      d  = p.value.half |> double
       color = vec4 h cl d 1.0
   in writeAt output idx color

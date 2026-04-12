@@ -1,6 +1,18 @@
+alias Vec3F = Vec<3, F32>
+
 data ParticleState
   = Active { position : Vec3F, velocity : Vec3F, life : F32 }
   | Dead
+
+a =
+  Active { position = vec3 0.0 0.0 0.0, velocity = vec3 1.0 0.0 0.0, life = 1.0 }.lifeValue
+
+impl ParticleState where
+  lifeValue : ParticleState -> F32
+  lifeValue particle =
+    match particle
+      | Active { life, .. } -> life
+      | Dead -> 0.0
 
 stepParticle : F32 -> ParticleState -> ParticleState
 stepParticle dt particle =

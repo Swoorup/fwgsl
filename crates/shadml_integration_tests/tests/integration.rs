@@ -1887,6 +1887,28 @@ mod full_pipeline_tests {
     }
 
     #[test]
+    fn test_full_pipeline_record_pattern_rest_binds_named_field() {
+        let source = r#"
+alias Vec3F = Vec<3, F32>
+
+data ParticleState
+  = Active { position : Vec3F, velocity : Vec3F, life : F32 }
+  | Dead
+
+impl ParticleState where
+  lifeValue : ParticleState -> F32
+  lifeValue particle =
+    match particle
+      | Active { life, .. } -> life
+      | Dead -> 0.0
+"#;
+        let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
+        assert!(wgsl.contains("let life = "), "WGSL: {}", wgsl);
+        assert!(wgsl.contains(".life;"), "WGSL: {}", wgsl);
+        assert!(!wgsl.contains("let life = _scrut_607.position;"), "WGSL: {}", wgsl);
+    }
+
+    #[test]
     fn test_full_pipeline_double_function() {
         let source = "double x = x * 2";
         let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
