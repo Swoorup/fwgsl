@@ -763,6 +763,8 @@ a.collapse      -- desugars to: collapse a
 
 Any in-scope callable may be used with dot syntax. If a matching `impl` provides the method for the resolved receiver type, that impl method takes priority over a plain function with the same name.
 
+Dot syntax is defined as **receiver-first call sugar**, not as a separate dispatch mechanism. This is important for future trait evolution: if shadml adopts multi-parameter operator or method traits, expressions such as `x.method y` will still desugar to `method x y`, and ordinary type inference / constraint solving will resolve the call. Dot syntax itself does not privilege receiver-only lookup beyond the surface-level priority rules below.
+
 Priority: **swizzle** > **matching impl method** > **in-scope function call** > **struct field access**.
 
 ### 5.18 Index Access
@@ -1125,6 +1127,25 @@ impl Neg Wrapper where
 
 The operator method syntax uses parenthesized operator names: `(+)`, `(-)`, `(*)`, `(&)`, `(^)`, `(<<)`, etc. Non-operator trait methods like `shr`, `bitnot`, and `negate` use plain names.
 
+**Current language status:** the working implementation models these operator traits as **single-parameter homogeneous traits**. That means the trait form can directly express operators whose two operands and result have the same type, but it does **not** yet provide a principled language-level account of heterogeneous operators such as:
+
+```
+Vec<n, a> * a -> Vec<n, a>
+a * Vec<n, a> -> Vec<n, a>
+Mat<r, c, a> * Vec<c, a> -> Vec<r, a>
+```
+
+WGSL supports several such heterogeneous arithmetic forms, but shadml should not specify them merely as backend magic. The intended direction is to extend traits so operators can be described coherently at the language level first, and only then mapped to builtin / intrinsic lowering.
+
+One plausible future direction is a multi-parameter form in the spirit of:
+
+```
+trait Mul a b c where
+  (*) : a -> b -> c
+```
+
+This is a **design direction**, not yet part of the implemented language.
+
 ### 9.5 Dispatch Mechanism
 
 Generic functions that use non-operator trait methods must declare an explicit
@@ -1145,15 +1166,20 @@ lighting : a -> Vec<3, F32> -> Vec<3, F32>   -- rejected
 Current implementation note: the explicit-constraint enforcement above does
 not yet apply to the built-in operator traits (`Add`, `Sub`, `Mul`, `Div`,
 `Mod`, `BitAnd`, `BitXor`, `Shl`, `Shr`, `BitNot`, `Neg`). Those operators
-continue to resolve through the existing WGSL/native operator path, which
-preserves behavior such as vector negation.
+continue to resolve through the existing WGSL/native operator path in places,
+which preserves behavior such as vector negation. This is transitional
+implementation behavior rather than the final intended language design.
 
 Trait dispatch is **fully static** — no vtables or runtime dispatch. Impl methods are compiled as regular functions with mangled names (e.g., `add_Fp64`). At trait resolution time, `Var(method)` is rewritten to `Var(mangled_name)` based on the resolved type of the operands.
 
-Trait impl resolution uses the fully resolved concrete receiver type and
-requires an exact match on the impl head. There is no partial-ordering rule
-between impls because specialized or overlapping trait impls are not part of
-the current language.
+Trait impl resolution in the current implementation uses the fully resolved
+concrete receiver type and requires an exact match on the impl head. There is
+no partial-ordering rule between impls because specialized or overlapping
+trait impls are not part of the current language.
+
+If shadml adopts multi-parameter traits, the same non-overlapping principle
+should continue to apply to the **full impl head**, not just the receiver
+position.
 
 If two impl heads for the same trait would both match the same concrete type,
 the program is rejected with a diagnostic in the spirit of:
@@ -1502,6 +1528,28 @@ trait BitNot a where bitnot : a -> a
 trait Neg a where negate : a -> a
 ```
 
+These are the **current prelude-facing homogeneous forms**.
+
+They are sufficient for same-type operators and unary operators, but they do
+not yet express heterogeneous numeric relationships such as vector-scalar,
+scalar-vector, matrix-scalar, or matrix-vector arithmetic in a language-native
+way.
+
+The intended evolution is toward operator traits whose operand and result
+types are explicit in the trait head, for example:
+
+```
+trait Add a b c where (+) : a -> b -> c
+trait Sub a b c where (-) : a -> b -> c
+trait Mul a b c where (*) : a -> b -> c
+trait Div a b c where (/) : a -> b -> c
+trait Mod a b c where (%) : a -> b -> c
+```
+
+shadml should adopt such forms only alongside corresponding trait-resolution
+and constraint-solving support; they are not implied by the current
+implementation.
+
 ### 14.3 Arithmetic Operators
 
 ```
@@ -1511,6 +1559,10 @@ extern (*) : a -> a -> a
 extern (/) : a -> a -> a
 extern (%) : a -> a -> a
 ```
+
+These declarations describe the current surface model, but they are likewise
+homogeneous. They should be revised when the trait system grows first-class
+support for heterogeneous operator constraints.
 
 ### 14.4 Comparison Operators
 
