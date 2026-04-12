@@ -16,7 +16,7 @@ do
 done
 
 if [[ -z "$GRAMMAR_LIB" ]]; then
-  echo "missing built tree-sitter grammar: run \`mise run grammar:build\` first" >&2
+  echo "missing built tree-sitter grammar: run \`mise run shadml:grammar:build\` first" >&2
   exit 1
 fi
 

@@ -10,4 +10,4 @@ shade fragCoord time resolution = vec4 color'.x color'.y color'.z 1.0
     colorC = vec3 0.0 0.8 0.6
     t      = uv.x + sin (uv.y * 3.0 + time) * 0.2
     color  = mix colorA colorB (smoothstep 0.0 0.5 t)
-    color' = mix color  colorC (smoothstep 0.5 1.0 t)
+    color' = mix color colorC (smoothstep 0.5 1.0 t)

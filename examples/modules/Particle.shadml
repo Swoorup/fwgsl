@@ -3,8 +3,8 @@
 import Math.Vec
 
 data Particle = Particle {
-  pos : Vec<2, F32>,
-  vel : Vec<2, F32>,
+  pos  : Vec<2, F32>,
+  vel  : Vec<2, F32>,
   mass : F32,
 }
 

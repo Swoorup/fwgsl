@@ -302,7 +302,9 @@ impl<'a> FormatEngine<'a> {
         }
 
         // No space before `[` when preceded by an identifier or `)` (array indexing)
+        // but only when the tokens were adjacent in the original source.
         if kind == SyntaxKind::LBracket
+            && self.last_skipped_ws.is_none()
             && matches!(
                 prev,
                 Some(
@@ -1136,6 +1138,27 @@ mod tests {
         let source = "f x = buf[idx]\n";
         let result = format_default(source);
         assert_eq!(result, "f x = buf[idx]\n");
+    }
+
+    #[test]
+    fn format_vec_literal_argument_preserves_space() {
+        let source = "f x [1.0, 2.0] [3.0, 4.0]\n";
+        let result = format_default(source);
+        assert_eq!(result, "f x [1.0, 2.0] [3.0, 4.0]\n");
+    }
+
+    #[test]
+    fn format_array_index_still_no_space() {
+        let source = "buf[i]\n";
+        let result = format_default(source);
+        assert_eq!(result, "buf[i]\n");
+    }
+
+    #[test]
+    fn format_vec_literal_after_paren_preserves_space() {
+        let source = "f (g x) [1.0, 2.0]\n";
+        let result = format_default(source);
+        assert_eq!(result, "f (g x) [1.0, 2.0]\n");
     }
 
     #[test]

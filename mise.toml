@@ -107,7 +107,7 @@ sed -i '' "s/^version = \"${current}\"/version = \"${base}\"/" Cargo.toml
 echo "Released $base"
 """
 
-[tasks."grammar:build"]
+[tasks."shadml:grammar:build"]
 description = "Build tree-sitter grammar for shadml"
 sources = ["tree-sitter-shadml/grammar.js", "tree-sitter-shadml/src/**/*"]
 outputs = ["tree-sitter-shadml/shadml.dylib"]
@@ -119,13 +119,30 @@ tree-sitter generate
 tree-sitter build
 """
 
-[tasks."grammar:parse-all"]
+[tasks."shadml:grammar:parse-all"]
 description = "Parse all shadml files with the tree-sitter grammar"
 run = "./scripts/validate_treesitter_parse.sh"
 
+[tasks."shadml:fmt"]
+description = "Format all shadml example files in-place"
+run = "./scripts/shadml_examples.sh fmt"
+
+[tasks."shadml:fmt:check"]
+description = "Check all shadml example files are formatted"
+run = "./scripts/shadml_examples.sh fmt-check"
+
+[tasks."shadml:validate"]
+description = "Validate that formatted shadml examples compile"
+run = "./scripts/shadml_examples.sh validate"
+
+[tasks."shadml:compile"]
+description = "Compile a single shadml file"
+usage = 'arg "<file>" help="Path to .shadml file to compile"'
+run = 'cargo run -pshadml_cli c ${usage_file}'
+
 [tasks.helix]
 description = "Launch Helix editor with shadml support"
-depends = ["release", "grammar:build"]
+depends = ["release", "shadml:grammar:build"]
 run = "./editors/helix/run-helix.sh"
 
 [tasks.zed]
