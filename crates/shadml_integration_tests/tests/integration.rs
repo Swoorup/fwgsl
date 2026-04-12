@@ -1859,9 +1859,7 @@ mod full_pipeline_tests {
 
     #[test]
     fn test_full_pipeline_add_function() {
-        // add : I32 -> I32 -> I32
-        // add x y = x + y
-        let source = "add x y = x + y";
+        let source = "add : I32 -> I32 -> I32\nadd x y = x + y";
         let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
         assert!(
             wgsl.contains("fn add("),
@@ -1980,23 +1978,61 @@ impl ParticleState where
 
     #[test]
     fn test_full_pipeline_multiple_functions() {
-        // Multi-line type sigs + function defs don't parse due to known parser
-        // limitation. Use single-line declarations instead.
-        let source = "add x y = x + y";
+        let source = r#"
+add : I32 -> I32 -> I32
+add x y = x + y
+
+double : I32 -> I32
+double x = x * 2
+"#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
             wgsl.contains("fn add("),
             "should contain fn add, got: {}",
             wgsl
         );
-        assert!(wgsl.contains("i32"), "should contain i32, got: {}", wgsl);
-
-        let source2 = "double x = x * 2";
-        let wgsl2 = compile_to_wgsl(source2).expect("should compile");
         assert!(
-            wgsl2.contains("fn double("),
+            wgsl.contains("fn double("),
             "should contain fn double, got: {}",
-            wgsl2
+            wgsl
+        );
+        assert!(wgsl.contains("i32"), "should contain i32, got: {}", wgsl);
+    }
+
+    #[test]
+    fn test_full_pipeline_generic_function_not_emitted_without_specialization() {
+        let source = "add x y = x + y";
+        let wgsl = compile_to_wgsl(source).expect("generic definition should compile");
+        assert!(
+            !wgsl.contains("fn add("),
+            "unspecialized generic template should not be emitted as WGSL, got: {}",
+            wgsl
+        );
+        assert!(
+            !wgsl.contains("fn add_i32("),
+            "no specialization should be emitted without a concrete call site, got: {}",
+            wgsl
+        );
+    }
+
+    #[test]
+    fn test_full_pipeline_generic_function_specializes_at_concrete_call_site() {
+        let source = r#"
+add x y = x + y
+
+result : I32
+result = add 1 2
+"#;
+        let wgsl = compile_to_wgsl(source).expect("generic call should specialize");
+        assert!(
+            wgsl.contains("fn add_i32("),
+            "WGSL should contain the specialized add_i32 function, got: {}",
+            wgsl
+        );
+        assert!(
+            wgsl.contains("fn result() -> i32") && wgsl.contains("return add_i32(1i, 2i);"),
+            "WGSL should call the specialized add_i32 helper from result, got: {}",
+            wgsl
         );
     }
 
