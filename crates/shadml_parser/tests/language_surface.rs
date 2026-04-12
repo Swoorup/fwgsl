@@ -237,3 +237,17 @@ fn parse_index_expr() {
     };
     assert!(matches!(body, Expr::Index(_, _, _)));
 }
+
+#[test]
+fn parse_vec_literal_arguments_after_whitespace_application() {
+    let mut p = Parser::new("main = lighting point [0.0, 0.0, 0.0] [0.0, 1.0, 0.0]");
+    let program = p.parse_program();
+    assert!(
+        !p.diagnostics().has_errors(),
+        "vector literal arguments after application should parse cleanly"
+    );
+    let Decl::FunDecl { body, .. } = &program.decls[0] else {
+        panic!("fun")
+    };
+    assert!(matches!(body, Expr::App(_, _, _)));
+}

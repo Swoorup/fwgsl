@@ -1,0 +1,75 @@
+-- Slang-inspired generic lights example.
+
+trait Light a where
+  position     : a -> Vec<3, F32>
+  color        : a -> Vec<3, F32>
+  illumination : a -> Vec<3, F32> -> Vec<3, F32> -> Vec<3, F32>
+  isCullable   : a -> Vec<3, F32> -> Bool
+
+data PointLight = PointLight {
+  lightPosition : Vec<3, F32>,
+  lightColor    : Vec<3, F32>,
+  intensity     : F32,
+}
+
+data SpotLight = SpotLight {
+  lightPosition   : Vec<3, F32>,
+  lightDirection  : Vec<3, F32>,
+  lightColor      : Vec<3, F32>,
+  intensity       : F32,
+  cutoffAngle     : F32,
+  falloffExponent : F32,
+}
+
+impl Light PointLight where
+  position light = light.lightPosition
+  color light = light.lightColor
+  illumination light worldPos normal =
+    let lightDir = normalize (light.lightPosition - worldPos)
+        dist     = distance light.lightPosition worldPos
+        atten    = light.intensity / (dist * dist)
+        lambert  = max (dot normal lightDir) 0.0
+    in vec3 atten atten atten * light.lightColor * vec3 lambert lambert lambert
+  isCullable light worldPos = distance light.lightPosition worldPos > 100.0
+
+impl Light SpotLight where
+  position light = light.lightPosition
+  color light = light.lightColor
+  illumination light worldPos normal =
+    let lightDir   = normalize (light.lightPosition - worldPos)
+        dist       = distance light.lightPosition worldPos
+        cosAngle   = dot (negate lightDir) (normalize light.lightDirection)
+        spotFactor = pow (max (cosAngle - cos light.cutoffAngle) 0.0) light.falloffExponent
+        atten      = (light.intensity * spotFactor) / (dist * dist)
+        lambert    = max (dot normal lightDir) 0.0
+    in vec3 atten atten atten * light.lightColor * vec3 lambert lambert lambert
+  isCullable light worldPos = distance light.lightPosition worldPos > 100.0
+
+lighting : Light a => a -> Vec<3, F32> -> Vec<3, F32> -> Vec<3, F32>
+lighting light worldPos normal =
+  let lightDir = normalize (position light - worldPos)
+      lambert  = max (dot normal lightDir) 0.0
+  in illumination light worldPos normal * color light * vec3 lambert lambert lambert
+
+point : PointLight
+point = PointLight {
+  lightPosition = [0.0, 2.0, 1.0],
+  lightColor    = [1.0, 0.9, 0.8],
+  intensity     = 8.0,
+}
+
+spot : SpotLight
+spot = SpotLight {
+  lightPosition   = [0.0, 5.0, 0.0],
+  lightDirection  = [0.0, -1.0, 0.0],
+  lightColor      = [0.6, 0.7, 1.0],
+  intensity       = 12.0,
+  cutoffAngle     = 0.7,
+  falloffExponent = 6.0,
+}
+
+pointResult : Vec<3, F32>
+pointResult = lighting point [0.0, 0.0, 0.0] [0.0, 1.0, 0.0]
+
+spotResult : Vec<3, F32>
+spotResult = lighting spot [0.0, 0.0, 0.0] [0.0, 1.0, 0.0]

@@ -47,6 +47,7 @@ Program {
         },
         TypeSig {
             name: "show",
+            constraints: [],
             ty: Arrow(
                 Con(
                     "Color",
@@ -168,6 +169,7 @@ Program {
         },
         TypeSig {
             name: "add",
+            constraints: [],
             ty: Arrow(
                 Con(
                     "I32",
@@ -255,6 +257,7 @@ Program {
         },
         TypeSig {
             name: "main",
+            constraints: [],
             ty: Arrow(
                 Con(
                     "I32",

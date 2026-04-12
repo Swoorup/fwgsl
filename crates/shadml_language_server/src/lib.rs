@@ -721,7 +721,13 @@ fn symbol_description(analyzer: &SemanticAnalyzer, label: &str, kind: SyntaxKind
 
 fn format_scheme(engine: &InferEngine, scheme: &Scheme) -> String {
     let ty = engine.finalize(&scheme.ty);
-    if scheme.vars.is_empty() {
+    let constraints = scheme
+        .constraints
+        .iter()
+        .map(|predicate| format!("{} {}", predicate.trait_name, engine.finalize(&predicate.ty)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut rendered = if scheme.vars.is_empty() {
         format!("{}", ty)
     } else {
         let vars = scheme
@@ -731,7 +737,11 @@ fn format_scheme(engine: &InferEngine, scheme: &Scheme) -> String {
             .collect::<Vec<_>>()
             .join(" ");
         format!("forall {}. {}", vars, ty)
+    };
+    if !constraints.is_empty() {
+        rendered = format!("{} => {}", constraints, rendered);
     }
+    rendered
 }
 
 // ============================================================================

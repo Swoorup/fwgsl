@@ -4,7 +4,7 @@
 //! type inference (mirroring the semantic analyzer) while simultaneously
 //! building HIR nodes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use shadml_hir::*;
 use shadml_parser::parser::*;
@@ -33,6 +33,13 @@ pub struct AstLowering {
     /// Map from bitfield type name → ordered list of (field_name, meta).
     /// Populated during `lower_program` before expressions are lowered.
     pub bitfield_fields: HashMap<String, Vec<(String, BitfieldFieldMeta)>>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSpecialization {
+    original_name: String,
+    concrete_name: String,
+    subst: HashMap<TyVarId, Ty>,
 }
 
 impl AstLowering {
@@ -102,9 +109,16 @@ impl AstLowering {
 
         // Pass 2: collect type signatures
         for decl in &all_decls {
-            if let Decl::TypeSig { name, ty, .. } = decl {
-                let inferred_ty = self.convert_syntax_type_scheme(ty);
+            if let Decl::TypeSig {
+                name,
+                constraints,
+                ty,
+                ..
+            } = decl
+            {
+                let inferred_ty = self.convert_syntax_type_sig_scheme(constraints, ty);
                 let flattened = Scheme {
+                    constraints: inferred_ty.constraints.clone(),
                     vars: inferred_ty.vars.clone(),
                     ty: flatten_tuple_arrows(&inferred_ty.ty),
                 };
@@ -117,6 +131,7 @@ impl AstLowering {
             if let Decl::ExternDecl { name, ty, .. } = decl {
                 let inferred_ty = self.convert_syntax_type_scheme(ty);
                 let flattened = Scheme {
+                    constraints: inferred_ty.constraints.clone(),
                     vars: inferred_ty.vars.clone(),
                     ty: flatten_tuple_arrows(&inferred_ty.ty),
                 };
@@ -362,8 +377,9 @@ impl AstLowering {
                                     shadml_semantic::mangle_instance_method(&m.name, &type_suffix);
                                 for (tmethod_name, tmethod_ty) in &trait_info.methods {
                                     if tmethod_name == &m.name {
-                                        let concrete_ty = shadml_semantic::replace_all_vars(
+                                        let concrete_ty = shadml_semantic::replace_trait_var(
                                             tmethod_ty,
+                                            trait_info.var_id,
                                             &impl_ty_scheme.ty,
                                         );
                                         method_info.push((mangled.clone(), concrete_ty));
@@ -431,14 +447,306 @@ impl AstLowering {
             }
         }
 
-        HirProgram {
+        self.monomorphize_generic_functions(HirProgram {
             functions,
             data_types,
             entry_points,
             bindings,
             bitfields,
             constants,
+        })
+    }
+
+    fn monomorphize_generic_functions(&mut self, mut program: HirProgram) -> HirProgram {
+        let generic_templates: HashMap<String, HirFunction> = program
+            .functions
+            .iter()
+            .filter(|f| is_generic_hir_function(f))
+            .map(|f| (f.name.clone(), f.clone()))
+            .collect();
+
+        if generic_templates.is_empty() {
+            return program;
         }
+
+        let mut pending = VecDeque::new();
+
+        program.constants = program
+            .constants
+            .into_iter()
+            .map(|constant| HirConst {
+                value: self.rewrite_specialized_expr(constant.value, &generic_templates, &mut pending),
+                ..constant
+            })
+            .collect();
+
+        program.entry_points = program
+            .entry_points
+            .into_iter()
+            .map(|entry| HirEntryPoint {
+                body: self.rewrite_specialized_expr(entry.body, &generic_templates, &mut pending),
+                ..entry
+            })
+            .collect();
+
+        let mut retained_functions = Vec::new();
+        for function in program.functions.into_iter() {
+            if generic_templates.contains_key(&function.name) {
+                continue;
+            }
+            retained_functions.push(HirFunction {
+                body: self.rewrite_specialized_expr(function.body, &generic_templates, &mut pending),
+                ..function
+            });
+        }
+
+        let mut emitted = HashMap::new();
+        let mut ordered_specializations = Vec::new();
+        while let Some(spec) = pending.pop_front() {
+            if emitted.contains_key(&spec.concrete_name) {
+                continue;
+            }
+            let Some(template) = generic_templates.get(&spec.original_name) else {
+                continue;
+            };
+            let specialized = self.specialize_function(template, &spec, &generic_templates, &mut pending);
+            emitted.insert(spec.concrete_name.clone(), ());
+            ordered_specializations.push(specialized);
+        }
+
+        retained_functions.extend(ordered_specializations);
+        program.functions = retained_functions;
+        program
+    }
+
+    fn specialize_function(
+        &mut self,
+        template: &HirFunction,
+        spec: &PendingSpecialization,
+        generic_templates: &HashMap<String, HirFunction>,
+        pending: &mut VecDeque<PendingSpecialization>,
+    ) -> HirFunction {
+        HirFunction {
+            name: spec.concrete_name.clone(),
+            params: template
+                .params
+                .iter()
+                .map(|(name, ty)| (name.clone(), substitute_ty_vars(ty, &spec.subst)))
+                .collect(),
+            return_ty: substitute_ty_vars(&template.return_ty, &spec.subst),
+            body: self.rewrite_specialized_expr_with_subst(
+                template.body.clone(),
+                generic_templates,
+                pending,
+                &spec.subst,
+            ),
+            span: template.span,
+            comments: template.comments.clone(),
+        }
+    }
+
+    fn rewrite_specialized_expr(
+        &mut self,
+        expr: HirExpr,
+        generic_templates: &HashMap<String, HirFunction>,
+        pending: &mut VecDeque<PendingSpecialization>,
+    ) -> HirExpr {
+        self.rewrite_specialized_expr_with_subst(expr, generic_templates, pending, &HashMap::new())
+    }
+
+    fn rewrite_specialized_expr_with_subst(
+        &mut self,
+        expr: HirExpr,
+        generic_templates: &HashMap<String, HirFunction>,
+        pending: &mut VecDeque<PendingSpecialization>,
+        subst: &HashMap<TyVarId, Ty>,
+    ) -> HirExpr {
+        let rewritten = match expr {
+            HirExpr::Lit(lit, ty, span) => HirExpr::Lit(lit, substitute_ty_vars(&ty, subst), span),
+            HirExpr::Var(name, ty, span) => {
+                let ty = substitute_ty_vars(&ty, subst);
+                let resolved_name = self.resolve_trait_method_or_diag(&name, &ty, span);
+                HirExpr::Var(resolved_name, ty, span)
+            }
+            HirExpr::App(func, arg, ty, span) => HirExpr::App(
+                Box::new(self.rewrite_specialized_expr_with_subst(*func, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(*arg, generic_templates, pending, subst)),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::Let(binds, body, ty, span) => HirExpr::Let(
+                binds
+                    .into_iter()
+                    .map(|(name, expr)| {
+                        (
+                            name,
+                            self.rewrite_specialized_expr_with_subst(expr, generic_templates, pending, subst),
+                        )
+                    })
+                    .collect(),
+                Box::new(self.rewrite_specialized_expr_with_subst(*body, generic_templates, pending, subst)),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::Case(scrutinee, arms, ty, span) => HirExpr::Case(
+                Box::new(self.rewrite_specialized_expr_with_subst(*scrutinee, generic_templates, pending, subst)),
+                arms.into_iter()
+                    .map(|arm| HirCaseArm {
+                        pattern: substitute_pattern_ty_vars(arm.pattern, subst),
+                        guard: arm
+                            .guard
+                            .map(|guard| self.rewrite_specialized_expr_with_subst(guard, generic_templates, pending, subst)),
+                        body: self.rewrite_specialized_expr_with_subst(arm.body, generic_templates, pending, subst),
+                    })
+                    .collect(),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::If(cond, then_expr, else_expr, ty, span) => HirExpr::If(
+                Box::new(self.rewrite_specialized_expr_with_subst(*cond, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(*then_expr, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(*else_expr, generic_templates, pending, subst)),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::BinOp(op, lhs, rhs, ty, span) => HirExpr::BinOp(
+                op,
+                Box::new(self.rewrite_specialized_expr_with_subst(*lhs, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(*rhs, generic_templates, pending, subst)),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::UnaryNeg(inner, ty, span) => HirExpr::UnaryNeg(
+                Box::new(self.rewrite_specialized_expr_with_subst(*inner, generic_templates, pending, subst)),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::UnaryNot(inner, ty, span) => HirExpr::UnaryNot(
+                Box::new(self.rewrite_specialized_expr_with_subst(*inner, generic_templates, pending, subst)),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::UnaryBitNot(inner, ty, span) => HirExpr::UnaryBitNot(
+                Box::new(self.rewrite_specialized_expr_with_subst(*inner, generic_templates, pending, subst)),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::ConstructorCall(name, tag, args, ty, span) => HirExpr::ConstructorCall(
+                name,
+                tag,
+                args.into_iter()
+                    .map(|arg| self.rewrite_specialized_expr_with_subst(arg, generic_templates, pending, subst))
+                    .collect(),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::FieldAccess(base, field, ty, span) => HirExpr::FieldAccess(
+                Box::new(self.rewrite_specialized_expr_with_subst(*base, generic_templates, pending, subst)),
+                field,
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::Index(base, index, ty, span) => HirExpr::Index(
+                Box::new(self.rewrite_specialized_expr_with_subst(*base, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(*index, generic_templates, pending, subst)),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::Loop(loop_name, bindings, body, ty, span) => HirExpr::Loop(
+                loop_name,
+                bindings
+                    .into_iter()
+                    .map(|(name, expr)| {
+                        (
+                            name,
+                            self.rewrite_specialized_expr_with_subst(expr, generic_templates, pending, subst),
+                        )
+                    })
+                    .collect(),
+                Box::new(self.rewrite_specialized_expr_with_subst(*body, generic_templates, pending, subst)),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::BitfieldConstruct(name, fields, ty, span) => HirExpr::BitfieldConstruct(
+                name,
+                fields
+                    .into_iter()
+                    .map(|(name, expr)| {
+                        (
+                            name,
+                            self.rewrite_specialized_expr_with_subst(expr, generic_templates, pending, subst),
+                        )
+                    })
+                    .collect(),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::BitfieldUpdate(name, base, fields, ty, span) => HirExpr::BitfieldUpdate(
+                name,
+                Box::new(self.rewrite_specialized_expr_with_subst(*base, generic_templates, pending, subst)),
+                fields
+                    .into_iter()
+                    .map(|(name, expr)| {
+                        (
+                            name,
+                            self.rewrite_specialized_expr_with_subst(expr, generic_templates, pending, subst),
+                        )
+                    })
+                    .collect(),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+        };
+
+        self.specialize_application_if_needed(rewritten, generic_templates, pending)
+    }
+
+    fn specialize_application_if_needed(
+        &mut self,
+        expr: HirExpr,
+        generic_templates: &HashMap<String, HirFunction>,
+        pending: &mut VecDeque<PendingSpecialization>,
+    ) -> HirExpr {
+        let (head, _) = collect_hir_app_args(&expr);
+        let Some((name, head_ty, span)) = (match head {
+            HirExpr::Var(name, head_ty, span) => Some((name.clone(), head_ty.clone(), *span)),
+            _ => None,
+        }) else {
+            return expr;
+        };
+        let Some(template) = generic_templates.get(&name) else {
+            return expr;
+        };
+
+        let template_ty = hir_function_type(template);
+        let mut subst = HashMap::new();
+        if !collect_specialization_bindings(&template_ty, &head_ty, &mut subst) || subst.is_empty()
+        {
+            return expr;
+        }
+        if subst.values().any(|ty| !ty.free_vars().is_empty()) {
+            return expr;
+        }
+
+        let mut vars = template_ty.free_vars();
+        vars.sort_unstable();
+        vars.dedup();
+        let concrete_args: Vec<Ty> = vars
+            .into_iter()
+            .filter_map(|var| subst.get(&var).cloned())
+            .collect();
+        if concrete_args.is_empty() {
+            return expr;
+        }
+
+        let concrete_name = mono_mangled_function_name(&name, &concrete_args);
+        pending.push_back(PendingSpecialization {
+            original_name: name,
+            concrete_name: concrete_name.clone(),
+            subst,
+        });
+
+        rename_hir_app_head(expr, &concrete_name, head_ty, span)
     }
 
     fn lower_fun_decl(
@@ -1692,6 +2000,28 @@ impl AstLowering {
         Scheme::poly(scope_vars(&scope), ty)
     }
 
+    fn convert_syntax_type_sig_scheme(
+        &mut self,
+        constraints: &[TypeConstraint],
+        ty: &Type,
+    ) -> Scheme {
+        let mut scope = HashMap::new();
+        let predicates = constraints
+            .iter()
+            .map(|constraint| {
+                let var = *scope
+                    .entry(constraint.type_var.clone())
+                    .or_insert_with(|| fresh_var_id(&mut self.engine));
+                Predicate {
+                    trait_name: constraint.trait_name.clone(),
+                    ty: Ty::Var(var),
+                }
+            })
+            .collect();
+        let ty = self.convert_syntax_type_with_scope(ty, &mut scope);
+        Scheme::poly_with_constraints(predicates, scope_vars(&scope), ty)
+    }
+
     fn convert_syntax_type_with_scope(
         &mut self,
         ty: &Type,
@@ -2039,14 +2369,14 @@ impl AstLowering {
         Some((hir_loop, result_ty))
     }
 
-    fn finalize_expr(&self, expr: HirExpr) -> HirExpr {
+    fn finalize_expr(&mut self, expr: HirExpr) -> HirExpr {
         match expr {
             HirExpr::Lit(lit, ty, span) => HirExpr::Lit(lit, self.engine.finalize(&ty), span),
             HirExpr::Var(name, ty, span) => {
                 let final_ty = self.engine.finalize(&ty);
                 // Trait method dispatch: if this var is a trait method and the
                 // type resolves to a concrete type, rewrite to the mangled impl function.
-                let resolved_name = self.resolve_trait_method(&name, &final_ty);
+                let resolved_name = self.resolve_trait_method_or_diag(&name, &final_ty, span);
                 HirExpr::Var(resolved_name, final_ty, span)
             }
             HirExpr::App(func, arg, ty, span) => HirExpr::App(
@@ -2229,7 +2559,7 @@ impl AstLowering {
 
     /// Resolve a trait or standalone impl method name to a concrete mangled name,
     /// if the resolved type is concrete and a matching impl exists.
-    fn resolve_trait_method(&self, name: &str, ty: &Ty) -> String {
+    fn resolve_trait_method_or_diag(&mut self, name: &str, ty: &Ty, span: Span) -> String {
         // Check trait methods
         for trait_info in self.traits.values() {
             for (method_name, _) in &trait_info.methods {
@@ -2244,6 +2574,24 @@ impl AstLowering {
                                     return mangled.clone();
                                 }
                             }
+                        }
+                        if concrete_ty.free_vars().is_empty()
+                            && should_emit_missing_trait_impl_diag(&trait_info.name)
+                        {
+                            self.engine.diagnostics.push(
+                                shadml_diagnostics::Diagnostic::error(format!(
+                                    "type `{}` does not implement trait `{}`",
+                                    concrete_ty, trait_info.name
+                                ))
+                                .with_label(shadml_diagnostics::Label::primary(
+                                    span,
+                                    "missing trait implementation",
+                                ))
+                                .with_help(format!(
+                                    "define `impl {} {} where ...`",
+                                    trait_info.name, concrete_ty
+                                )),
+                            );
                         }
                     }
                 }
@@ -2356,6 +2704,196 @@ fn flatten_tuple_arrows(ty: &Ty) -> Ty {
     }
 }
 
+fn is_generic_hir_function(function: &HirFunction) -> bool {
+    !hir_function_type(function).free_vars().is_empty()
+}
+
+fn hir_function_type(function: &HirFunction) -> Ty {
+    function
+        .params
+        .iter()
+        .rev()
+        .fold(function.return_ty.clone(), |acc, (_, ty)| Ty::arrow(ty.clone(), acc))
+}
+
+fn substitute_ty_vars(ty: &Ty, subst: &HashMap<TyVarId, Ty>) -> Ty {
+    match ty {
+        Ty::Var(id) => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
+        Ty::Con(_) | Ty::Nat(_) | Ty::Error => ty.clone(),
+        Ty::App(f, a) => Ty::App(
+            Box::new(substitute_ty_vars(f, subst)),
+            Box::new(substitute_ty_vars(a, subst)),
+        ),
+        Ty::Arrow(a, b) => Ty::Arrow(
+            Box::new(substitute_ty_vars(a, subst)),
+            Box::new(substitute_ty_vars(b, subst)),
+        ),
+        Ty::Tuple(elems) => Ty::Tuple(
+            elems
+                .iter()
+                .map(|elem| substitute_ty_vars(elem, subst))
+                .collect(),
+        ),
+        Ty::Forall(vars, body) => {
+            Ty::Forall(vars.clone(), Box::new(substitute_ty_vars(body, subst)))
+        }
+    }
+}
+
+fn substitute_pattern_ty_vars(pattern: HirPattern, subst: &HashMap<TyVarId, Ty>) -> HirPattern {
+    match pattern {
+        HirPattern::Wild => HirPattern::Wild,
+        HirPattern::Var(name, ty) => HirPattern::Var(name, substitute_ty_vars(&ty, subst)),
+        HirPattern::Constructor(name, tag, sub_patterns) => HirPattern::Constructor(
+            name,
+            tag,
+            sub_patterns
+                .into_iter()
+                .map(|pattern| substitute_pattern_ty_vars(pattern, subst))
+                .collect(),
+        ),
+        HirPattern::Lit(lit) => HirPattern::Lit(lit),
+        HirPattern::Or(patterns) => HirPattern::Or(
+            patterns
+                .into_iter()
+                .map(|pattern| substitute_pattern_ty_vars(pattern, subst))
+                .collect(),
+        ),
+    }
+}
+
+fn collect_specialization_bindings(
+    pattern: &Ty,
+    concrete: &Ty,
+    subst: &mut HashMap<TyVarId, Ty>,
+) -> bool {
+    match pattern {
+        Ty::Var(id) => match subst.get(id) {
+            Some(existing) => existing == concrete,
+            None => {
+                subst.insert(*id, concrete.clone());
+                true
+            }
+        },
+        Ty::Con(name) => matches!(concrete, Ty::Con(other) if other == name),
+        Ty::Nat(n) => matches!(concrete, Ty::Nat(other) if other == n),
+        Ty::App(pf, pa) => match concrete {
+            Ty::App(cf, ca) => {
+                collect_specialization_bindings(pf, cf, subst)
+                    && collect_specialization_bindings(pa, ca, subst)
+            }
+            _ => false,
+        },
+        Ty::Arrow(pa, pb) => match concrete {
+            Ty::Arrow(ca, cb) => {
+                collect_specialization_bindings(pa, ca, subst)
+                    && collect_specialization_bindings(pb, cb, subst)
+            }
+            _ => false,
+        },
+        Ty::Tuple(pats) => match concrete {
+            Ty::Tuple(args) if pats.len() == args.len() => pats
+                .iter()
+                .zip(args.iter())
+                .all(|(pat, arg)| collect_specialization_bindings(pat, arg, subst)),
+            _ => false,
+        },
+        Ty::Forall(_, body) => collect_specialization_bindings(body, concrete, subst),
+        Ty::Error => true,
+    }
+}
+
+fn collect_hir_app_args(expr: &HirExpr) -> (&HirExpr, Vec<&HirExpr>) {
+    let mut args = Vec::new();
+    let mut current = expr;
+    while let HirExpr::App(func, arg, _, _) = current {
+        args.push(arg.as_ref());
+        current = func.as_ref();
+    }
+    args.reverse();
+    (current, args)
+}
+
+fn rename_hir_app_head(expr: HirExpr, new_name: &str, new_ty: Ty, span: Span) -> HirExpr {
+    match expr {
+        HirExpr::App(func, arg, ty, app_span) => HirExpr::App(
+            Box::new(rename_hir_app_head(*func, new_name, new_ty, span)),
+            arg,
+            ty,
+            app_span,
+        ),
+        HirExpr::Var(_, _, _) => HirExpr::Var(new_name.to_string(), new_ty, span),
+        other => other,
+    }
+}
+
+fn mono_mangled_function_name(name: &str, concrete_args: &[Ty]) -> String {
+    let mut mangled = name.to_string();
+    for ty in concrete_args {
+        mangled.push('_');
+        mangled.push_str(&ty_to_mono_suffix_local(ty));
+    }
+    mangled
+}
+
+fn should_emit_missing_trait_impl_diag(trait_name: &str) -> bool {
+    !matches!(
+        trait_name,
+        "Add"
+            | "Sub"
+            | "Mul"
+            | "Div"
+            | "Mod"
+            | "BitAnd"
+            | "BitXor"
+            | "Shl"
+            | "Shr"
+            | "BitNot"
+            | "Neg"
+    )
+}
+
+fn ty_to_mono_suffix_local(ty: &Ty) -> String {
+    match ty {
+        Ty::Con(name) => match name.as_str() {
+            ty_name::I32 => "i32".to_string(),
+            ty_name::U32 => "u32".to_string(),
+            ty_name::F32 => "f32".to_string(),
+            ty_name::BOOL => "bool".to_string(),
+            ty_name::UNIT => "unit".to_string(),
+            other => other.to_lowercase(),
+        },
+        Ty::App(_, _) => {
+            let mut parts = Vec::new();
+            let mut cursor = ty;
+            loop {
+                match cursor {
+                    Ty::App(f, arg) => {
+                        parts.push(ty_to_mono_suffix_local(arg));
+                        cursor = f.as_ref();
+                    }
+                    other => {
+                        parts.push(ty_to_mono_suffix_local(other));
+                        break;
+                    }
+                }
+            }
+            parts.reverse();
+            parts.join("_")
+        }
+        Ty::Nat(n) => n.to_string(),
+        Ty::Var(id) => format!("t{}", id),
+        Ty::Arrow(_, _) => "fn".to_string(),
+        Ty::Tuple(elems) => elems
+            .iter()
+            .map(ty_to_mono_suffix_local)
+            .collect::<Vec<_>>()
+            .join("_"),
+        Ty::Forall(_, body) => ty_to_mono_suffix_local(body),
+        Ty::Error => "error".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2378,6 +2916,7 @@ mod tests {
             decls: vec![
                 Decl::TypeSig {
                     name: "add".into(),
+                    constraints: vec![],
                     ty: Type::Arrow(
                         Box::new(Type::Con("I32".into(), span())),
                         Box::new(Type::Arrow(

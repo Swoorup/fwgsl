@@ -2244,6 +2244,43 @@ apply x = x.sin
     }
 
     #[test]
+    fn slang_style_generic_lighting_compiles_with_specialization() {
+        let source = include_str!("../../../examples/slang-generics.shadml");
+        let wgsl = compile_to_wgsl(source).expect("slang generics example should compile");
+        assert!(wgsl.contains("fn lighting_pointlight("));
+        assert!(wgsl.contains("fn lighting_spotlight("));
+        assert!(wgsl.contains("position_PointLight"));
+        assert!(wgsl.contains("position_SpotLight"));
+        assert!(wgsl.contains("lighting_pointlight(point(),"));
+        assert!(wgsl.contains("lighting_spotlight(spot(),"));
+    }
+
+    #[test]
+    fn constrained_generic_call_without_impl_fails() {
+        let source = r#"
+trait Light a where
+  position : a -> Vec<3, F32>
+
+data Unlit = Unlit {
+  value : F32
+}
+
+lighting : Light a => a -> Vec<3, F32>
+lighting light = position light
+
+bad : Unlit
+bad = Unlit { value = 1.0 }
+
+result : Vec<3, F32>
+result = lighting bad
+"#;
+        assert!(
+            compile_to_wgsl(source).is_err(),
+            "calling a constrained generic function without a matching impl should fail"
+        );
+    }
+
+    #[test]
     fn semantic_analysis_with_traits() {
         let source = r#"
 trait Show a where

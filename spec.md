@@ -272,6 +272,7 @@ Vec<3, F32>     -- Nat(3) applied to Vec
 
 ```
 name : Type
+name : TraitName a => Type
 ```
 
 Type signatures are optional but recommended. They precede the corresponding function definition:
@@ -280,6 +281,21 @@ Type signatures are optional but recommended. They precede the corresponding fun
 add : I32 -> I32 -> I32
 add x y = x + y
 ```
+
+Trait-constrained generic functions use `=>` before the main type:
+
+```
+lighting : Light a => a -> Vec<3, F32> -> Vec<3, F32>
+```
+
+When a function body uses trait methods on a type variable, the corresponding
+constraint must be declared explicitly. Unconstrained uses are rejected.
+
+Current implementation note: this explicit-constraint check is applied to
+user/non-operator trait methods. Built-in operator traits (`Add`, `Sub`,
+`Mul`, `Div`, `Mod`, `BitAnd`, `BitXor`, `Shl`, `Shr`, `BitNot`, `Neg`)
+still use the existing operator/native lowering path so built-in forms such as
+vector negation continue to work without the new diagnostic.
 
 ### 4.2 Function Declarations
 
@@ -527,9 +543,19 @@ MyConstructor   -- Constructor (uppercase)
 f x             -- Apply f to x
 f x y           -- Curried: (f x) y
 f (g x)         -- Nested application
+f [1.0, 0.0]    -- Vector literal as an argument
 ```
 
 Application is left-associative and binds tighter than all infix operators (binding power 11).
+
+Square brackets are parsed as indexing only when they are immediately attached to
+the expression on the left:
+
+```
+arr[i]          -- Indexing
+f [1, 2, 3]     -- Application of a vector literal
+f x [1, 2, 3]   -- ((f x) [1, 2, 3])
+```
 
 ### 5.4 Binary Operators
 
@@ -1027,6 +1053,32 @@ impl Fp64 where
 
 Impl-local method type signatures are optional, but when present they are checked just like top-level signatures. For standalone `impl` blocks, the receiver remains the first argument.
 
+For trait `impl` blocks, the implementation must define every method declared
+by the trait. Omitting any required method is a compile-time error.
+
+For a given trait and concrete type, at most one trait impl is allowed. Writing
+two `impl Trait Type where ...` blocks for the same pair is a compile-time
+error.
+
+Trait impl selection is exact-match only. The language does not currently
+support trait impl specialization, blanket impls, or overlapping impls. Generic
+function specialization during lowering is a separate mechanism and does not
+affect trait impl selection.
+
+Concretely, a trait impl head may not contain free type variables. For example,
+this is rejected:
+
+```
+impl Convert (Vec<3, a>) where
+  convert v = ...
+```
+
+with a diagnostic in the spirit of:
+
+```
+Trait impl heads must be concrete: blanket impls like `impl Convert ...` are not supported
+```
+
 ### 9.4 Operator Overloading
 
 **Arithmetic operator traits:** `Add` (`+`), `Sub` (`-`), `Mul` (`*`), `Div` (`/`), `Mod` (`%`).
@@ -1061,7 +1113,40 @@ The operator method syntax uses parenthesized operator names: `(+)`, `(-)`, `(*)
 
 ### 9.5 Dispatch Mechanism
 
+Generic functions that use non-operator trait methods must declare an explicit
+constraint:
+
+```
+lighting : Light a => a -> Vec<3, F32> -> Vec<3, F32>
+lighting light worldPos =
+  position light - worldPos
+```
+
+Omitting the constraint is a type error:
+
+```
+lighting : a -> Vec<3, F32> -> Vec<3, F32>   -- rejected
+```
+
+Current implementation note: the explicit-constraint enforcement above does
+not yet apply to the built-in operator traits (`Add`, `Sub`, `Mul`, `Div`,
+`Mod`, `BitAnd`, `BitXor`, `Shl`, `Shr`, `BitNot`, `Neg`). Those operators
+continue to resolve through the existing WGSL/native operator path, which
+preserves behavior such as vector negation.
+
 Trait dispatch is **fully static** — no vtables or runtime dispatch. Impl methods are compiled as regular functions with mangled names (e.g., `add_Fp64`). At trait resolution time, `Var(method)` is rewritten to `Var(mangled_name)` based on the resolved type of the operands.
+
+Trait impl resolution uses the fully resolved concrete receiver type and
+requires an exact match on the impl head. There is no partial-ordering rule
+between impls because specialized or overlapping trait impls are not part of
+the current language.
+
+If two impl heads for the same trait would both match the same concrete type,
+the program is rejected with a diagnostic in the spirit of:
+
+```
+Overlapping implementation of trait 'Convert' for type 'Vec<3, F32>'
+```
 
 ---
 
@@ -1577,6 +1662,7 @@ The `AstLowering` phase:
 - Beta-reduces lambda applications
 - Desugars pipeline `|>` to function application
 - Desugars method-call syntax to function application
+- Specializes generic functions at concrete call sites
 - Resolves bitfield operations
 - Runs a finalization pass to apply all type substitutions
 
@@ -1590,6 +1676,7 @@ The MIR lowering phase:
 - Lowers `loop` to `MirStmt::Loop` with `var` + `continue` + `break`
 - Lowers bitfield access to shift/mask operations
 - Lowers bitfield construction/update to bit manipulation
+- Converts specialized generic functions to plain WGSL functions
 - Converts `toF32`/`toI32`/`toU32`/`toBool` to `MirExpr::Cast`
 - Converts `load` to identity, `writeAt` to `MirStmt::IndexAssign`
 

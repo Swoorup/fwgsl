@@ -8,7 +8,7 @@ use shadml_span::Span;
 use shadml_typechecker::Ty;
 
 /// HIR Program (desugared, type-annotated).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirProgram {
     pub functions: Vec<HirFunction>,
     pub data_types: Vec<HirDataType>,
@@ -19,7 +19,7 @@ pub struct HirProgram {
 }
 
 /// A module-level constant declaration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirConst {
     pub name: String,
     pub ty: Ty,
@@ -47,7 +47,7 @@ pub struct HirBitfieldField {
 }
 
 /// A GPU binding declaration (uniform / storage).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirBinding {
     pub name: String,
     pub ty: Ty,
@@ -56,7 +56,7 @@ pub struct HirBinding {
     pub binding: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirFunction {
     pub name: String,
     pub params: Vec<(String, Ty)>,
@@ -66,7 +66,7 @@ pub struct HirFunction {
     pub comments: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirEntryPoint {
     pub name: String,
     pub attributes: Vec<HirAttribute>,
@@ -83,7 +83,7 @@ pub struct HirAttribute {
     pub args: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirDataType {
     pub name: String,
     pub type_params: Vec<String>,
@@ -105,7 +105,7 @@ pub struct HirFieldDef {
     pub attributes: Vec<HirAttribute>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HirExpr {
     Lit(HirLit, Ty, Span),
     Var(String, Ty, Span),
@@ -155,7 +155,7 @@ impl HirExpr {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirCaseArm {
     pub pattern: HirPattern,
     /// Optional when-guard: `| pat when expr -> body`.
@@ -163,7 +163,7 @@ pub struct HirCaseArm {
     pub body: HirExpr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HirPattern {
     Wild,
     Var(String, Ty),

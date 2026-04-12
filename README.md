@@ -10,6 +10,7 @@ Written in Rust, the compiler is structured as a fast multi-crate pipeline and i
 
 - Pure functional surface language that lowers to valid WGSL.
 - HM-style inference with explicit type signatures when needed.
+- Explicit trait constraints for generic functions: `Light a => ...`.
 - Algebraic data types, pattern matching, and `where` bindings.
 - Traits and operator overloading (arithmetic, bitwise, and user-defined).
 - Module system with imports, selective exports, and dead-code elimination.
@@ -121,7 +122,7 @@ For more examples, see [examples/README.md](examples/README.md).
 | ADTs | Implemented | Constructors, records, enums with discriminants |
 | Pattern matching | Implemented | Constructor, literal, wildcard, multi-value, when-guards |
 | `let` / `where` | Implemented | `where` desugars to local bindings |
-| Traits | Implemented | Static dispatch, operator overloading, method-call syntax |
+| Traits | Implemented | Static dispatch, operator overloading, method-call syntax; impls must be complete and unique per `(trait, type)` |
 | Modules | Implemented | Imports, selective exports, topological ordering, DCE |
 | Bitfields | Implemented | Packed flags with typed enum fields, construction, update |
 | Loop / foldRange | Implemented | Named tail-recursive loops, fold-over-range combinator |
@@ -129,6 +130,8 @@ For more examples, see [examples/README.md](examples/README.md).
 | Conditional compilation | Implemented | `when cfg.x` / `else when` / `else` with `--feature` flags |
 | Dimension types | Implemented | `Nat`-backed dimensions for `Vec`, `Mat`, `Array` |
 | Generic data / phantom types | Implemented | Polymorphic constructor schemes |
+| Generic function specialization | Implemented | Concrete call sites monomorphize polymorphic helpers during lowering; separate from trait impl selection |
+| Trait impl specialization / overlap | Not supported | Trait impl lookup is exact-match only; trait impl heads must be concrete, and overlapping or specialized trait impls are rejected by design |
 | WGSL code generation | Implemented | AST -> HIR -> MIR -> WGSL pipeline end-to-end |
 | LSP | Implemented | Diagnostics, hover, completion, goto-definition, references, semantic tokens |
 | Playground | Implemented | Monaco editor, live diagnostics, hover/completion, WGSL output, WebGPU preview |
@@ -276,7 +279,7 @@ WGSL is intentionally restrictive. `shadml` exists to bridge that gap.
 |----------------|--------------------|
 | No recursion | Detect and lower acceptable cases; reject unsupported recursion |
 | No first-class functions | Lower higher-order structure toward first-order representations |
-| No runtime generics | Specialize polymorphism during lowering |
+| No runtime generics | Specialize generic data and generic functions during lowering |
 | No native ADTs | Encode constructors as WGSL-friendly layouts |
 | GPU-oriented fixed layouts | Preserve as much static information as possible in the source type system |
 

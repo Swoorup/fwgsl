@@ -39,6 +39,9 @@ struct LowerCtx<'a> {
     /// Collected concrete instantiations: (type_name, vec of concrete Ty args)
     /// e.g., ("Box", [Ty::Con("I32")]) or ("Pair", [Ty::Con("F32"), Ty::Con("I32")])
     mono_instances: Vec<(String, Vec<Ty>)>,
+    /// Source-level nullary definitions lower to zero-arg WGSL functions.
+    /// References to them in value position must become calls.
+    zero_arg_functions: HashSet<String>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -80,6 +83,12 @@ impl<'a> LowerCtx<'a> {
         // Collect concrete instantiations of generic types from all HIR expressions
         let mut mono_instances = Vec::new();
         let mut seen = HashSet::new();
+        let zero_arg_functions: HashSet<String> = hir
+            .functions
+            .iter()
+            .filter(|f| f.params.is_empty())
+            .map(|f| f.name.clone())
+            .collect();
         for f in &hir.functions {
             collect_mono_instances_from_expr(
                 &f.body,
@@ -122,6 +131,7 @@ impl<'a> LowerCtx<'a> {
             bitfields,
             generic_types,
             mono_instances,
+            zero_arg_functions,
         }
     }
 
@@ -1059,7 +1069,11 @@ fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>,
 
         HirExpr::Var(name, ty, _span) => {
             let mir_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
-            Ok(MirExpr::Var(ctx.arena.alloc_str(name), mir_ty))
+            if ctx.zero_arg_functions.contains(name) {
+                Ok(MirExpr::Call(ctx.arena.alloc_str(name), vec![], mir_ty))
+            } else {
+                Ok(MirExpr::Var(ctx.arena.alloc_str(name), mir_ty))
+            }
         }
 
         HirExpr::BinOp(op, lhs, rhs, ty, _span) => {

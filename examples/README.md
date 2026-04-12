@@ -33,6 +33,7 @@ cargo run -p shadml_cli -- compile examples/conditional-compilation.shadml --fea
 | `vec-literals.shadml` | Vector literals and swizzles | `compile` |
 | `swizzles.shadml` | Comprehensive xyzw/rgba swizzle coverage | `compile` |
 | `generic-data.shadml` | Generic and phantom data declarations | `check` |
+| `slang-generics.shadml` | Slang-style light/interface example using traits and a generic lighting helper | `compile` |
 | `dependent-types.shadml` | Type-level naturals in vector/matrix signatures | `check` |
 | `tensor-aliases.shadml` | `Tensor` / `Vector` / `Matrix` / `Scalar` aliases | `check` |
 | `option-result.shadml` | Builtin `Option` / `Result` constructors and matching | `check` |

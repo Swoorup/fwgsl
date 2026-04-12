@@ -114,6 +114,7 @@ impl Decl {
 pub enum Decl {
     TypeSig {
         name: String,
+        constraints: Vec<TypeConstraint>,
         ty: Type,
         span: Span,
         comments: Vec<String>,
@@ -434,6 +435,13 @@ pub enum Type {
     Unit(Span),
 }
 
+#[derive(Debug, Clone)]
+pub struct TypeConstraint {
+    pub trait_name: String,
+    pub type_var: String,
+    pub span: Span,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Span accessors for AST nodes
 // ═══════════════════════════════════════════════════════════════════════════
@@ -604,6 +612,17 @@ impl Parser {
             }
             i += 1;
         }
+    }
+
+    /// Whether the next non-trivia postfix token is directly attached to `base`
+    /// with no intervening whitespace. This lets `f [1, 2]` parse as
+    /// application while preserving `arr[i]` indexing.
+    fn postfix_is_adjacent(&self, base: Span) -> bool {
+        let mut i = self.pos;
+        while i < self.tokens.len() && self.tokens[i].kind.is_trivia() {
+            i += 1;
+        }
+        i < self.tokens.len() && span_touches(base, self.tokens[i].span)
     }
 
     /// Lookahead: check if the token stream has `{ ident = ...` starting at
@@ -1071,13 +1090,58 @@ impl Parser {
     fn parse_type_sig(&mut self, name: String, start: u32) -> Decl {
         self.expect(SyntaxKind::Colon); // consume `:`
         self.skip_trivia();
-        let ty = self.parse_type();
+        let lhs = self.parse_type();
+        self.skip_trivia();
+        let (constraints, ty) = if self.at(SyntaxKind::FatArrow) {
+            self.bump();
+            self.skip_trivia();
+            let constraint = self
+                .type_to_constraint(&lhs)
+                .map(|constraint| vec![constraint])
+                .unwrap_or_default();
+            (constraint, self.parse_type())
+        } else {
+            (vec![], lhs)
+        };
         let span = self.span_from(start);
         Decl::TypeSig {
             name,
+            constraints,
             ty,
             span,
             comments: vec![],
+        }
+    }
+
+    fn type_to_constraint(&mut self, ty: &Type) -> Option<TypeConstraint> {
+        match ty {
+            Type::App(f, arg, span) => match (f.as_ref(), arg.as_ref()) {
+                (Type::Con(trait_name, _), Type::Var(type_var, _)) => Some(TypeConstraint {
+                    trait_name: trait_name.clone(),
+                    type_var: type_var.clone(),
+                    span: *span,
+                }),
+                _ => {
+                    self.diagnostics.push(
+                        Diagnostic::error("expected trait constraint before `=>`")
+                            .with_label(Label::primary(
+                                ty.span(),
+                                "expected `TraitName typeVar`",
+                            ))
+                            .with_help("write constraints like `Light a => a -> a`"),
+                    );
+                    None
+                }
+            },
+            Type::Paren(inner, _) => self.type_to_constraint(inner),
+            _ => {
+                self.diagnostics.push(
+                    Diagnostic::error("expected trait constraint before `=>`")
+                        .with_label(Label::primary(ty.span(), "expected `TraitName typeVar`"))
+                        .with_help("write constraints like `Light a => a -> a`"),
+                );
+                None
+            }
         }
     }
 
@@ -2395,7 +2459,8 @@ impl Parser {
             }
 
             // Index access: expr[expr]
-            if op_kind == SyntaxKind::LBracket && min_bp <= 21 {
+            if op_kind == SyntaxKind::LBracket && min_bp <= 21 && self.postfix_is_adjacent(lhs.span())
+            {
                 self.skip_trivia();
                 self.bump();
                 self.skip_trivia();
@@ -2521,7 +2586,7 @@ impl Parser {
                         break;
                     }
                 }
-                SyntaxKind::LBracket => {
+                SyntaxKind::LBracket if self.postfix_is_adjacent(expr.span()) => {
                     self.skip_trivia();
                     self.bump(); // consume `[`
                     self.skip_trivia();
@@ -3477,6 +3542,10 @@ fn is_atom_start(kind: SyntaxKind) -> bool {
     )
 }
 
+fn span_touches(lhs: Span, rhs: Span) -> bool {
+    lhs.end == rhs.start
+}
+
 fn flatten_app(expr: Expr) -> (Expr, Vec<Expr>) {
     let mut args = Vec::new();
     let mut head = expr;
@@ -3678,7 +3747,33 @@ mod tests {
         let prog = parse("add : I32 -> I32 -> I32");
         assert_eq!(prog.decls.len(), 1);
         match &prog.decls[0] {
-            Decl::TypeSig { name, .. } => assert_eq!(name, "add"),
+            Decl::TypeSig {
+                name, constraints, ..
+            } => {
+                assert_eq!(name, "add");
+                assert!(constraints.is_empty());
+            }
+            other => panic!("expected TypeSig, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_constrained_type_sig() {
+        let prog = parse("lighting : Light a => a -> a");
+        assert_eq!(prog.decls.len(), 1);
+        match &prog.decls[0] {
+            Decl::TypeSig {
+                name,
+                constraints,
+                ty,
+                ..
+            } => {
+                assert_eq!(name, "lighting");
+                assert_eq!(constraints.len(), 1);
+                assert_eq!(constraints[0].trait_name, "Light");
+                assert_eq!(constraints[0].type_var, "a");
+                assert!(matches!(ty, Type::Arrow(_, _, _)));
+            }
             other => panic!("expected TypeSig, got {:?}", other),
         }
     }

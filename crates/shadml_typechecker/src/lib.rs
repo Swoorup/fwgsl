@@ -34,6 +34,21 @@ pub mod ty_name {
 /// Unique type variable identifier.
 pub type TyVarId = u32;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Predicate {
+    pub trait_name: String,
+    pub ty: Ty,
+}
+
+impl Predicate {
+    pub fn apply_subst(&self, subst: &Substitution) -> Predicate {
+        Predicate {
+            trait_name: self.trait_name.clone(),
+            ty: self.ty.apply_subst(subst),
+        }
+    }
+}
+
 /// Type representation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
@@ -284,18 +299,45 @@ impl Substitution {
 /// Type scheme (polymorphic type).
 #[derive(Debug, Clone)]
 pub struct Scheme {
+    pub constraints: Vec<Predicate>,
     pub vars: Vec<TyVarId>,
     pub ty: Ty,
 }
 
 impl Scheme {
     pub fn mono(ty: Ty) -> Self {
-        Scheme { vars: vec![], ty }
+        Scheme {
+            constraints: vec![],
+            vars: vec![],
+            ty,
+        }
     }
 
     pub fn poly(vars: Vec<TyVarId>, ty: Ty) -> Self {
-        Scheme { vars, ty }
+        Scheme {
+            constraints: vec![],
+            vars,
+            ty,
+        }
     }
+
+    pub fn poly_with_constraints(
+        constraints: Vec<Predicate>,
+        vars: Vec<TyVarId>,
+        ty: Ty,
+    ) -> Self {
+        Scheme {
+            constraints,
+            vars,
+            ty,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QualifiedType {
+    pub constraints: Vec<Predicate>,
+    pub ty: Ty,
 }
 
 /// Type environment.
@@ -331,6 +373,13 @@ impl TypeEnv {
                     vars.push(v);
                 }
             }
+            for predicate in &scheme.constraints {
+                for v in predicate.ty.free_vars() {
+                    if !scheme.vars.contains(&v) {
+                        vars.push(v);
+                    }
+                }
+            }
         }
         vars.sort();
         vars.dedup();
@@ -343,6 +392,9 @@ impl TypeEnv {
             .flat_map(|scheme| {
                 let mut vars = scheme.vars.clone();
                 vars.extend(scheme.ty.free_vars());
+                for predicate in &scheme.constraints {
+                    vars.extend(predicate.ty.free_vars());
+                }
                 vars
             })
             .max()
@@ -428,11 +480,22 @@ impl InferEngine {
 
     /// Instantiate a type scheme with fresh variables.
     pub fn instantiate(&mut self, scheme: &Scheme) -> Ty {
+        self.instantiate_qualified(scheme).ty
+    }
+
+    pub fn instantiate_qualified(&mut self, scheme: &Scheme) -> QualifiedType {
         let mut subst = Substitution::new();
         for &var in &scheme.vars {
             subst.insert(var, self.fresh_var());
         }
-        scheme.ty.apply_subst(&subst)
+        QualifiedType {
+            constraints: scheme
+                .constraints
+                .iter()
+                .map(|predicate| predicate.apply_subst(&subst))
+                .collect(),
+            ty: scheme.ty.apply_subst(&subst),
+        }
     }
 
     /// Generalize a type over variables not free in the environment.
