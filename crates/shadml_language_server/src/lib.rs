@@ -724,7 +724,13 @@ fn format_scheme(engine: &InferEngine, scheme: &Scheme) -> String {
     let constraints = scheme
         .constraints
         .iter()
-        .map(|predicate| format!("{} {}", predicate.trait_name, engine.finalize(&predicate.ty)))
+        .map(|predicate| {
+            format!(
+                "{} {}",
+                predicate.trait_name,
+                engine.finalize(&predicate.ty)
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let mut rendered = if scheme.vars.is_empty() {

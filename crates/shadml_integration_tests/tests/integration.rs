@@ -1905,7 +1905,11 @@ impl ParticleState where
         let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
         assert!(wgsl.contains("let life = "), "WGSL: {}", wgsl);
         assert!(wgsl.contains(".life;"), "WGSL: {}", wgsl);
-        assert!(!wgsl.contains("let life = _scrut_607.position;"), "WGSL: {}", wgsl);
+        assert!(
+            !wgsl.contains("let life = _scrut_607.position;"),
+            "WGSL: {}",
+            wgsl
+        );
     }
 
     #[test]
@@ -2488,6 +2492,7 @@ main idx =
 
 mod const_promotion_tests {
     use super::*;
+    use std::panic;
 
     fn compile_to_wgsl(source: &str) -> Result<String, String> {
         let mut parser = Parser::new(source);
@@ -2636,6 +2641,64 @@ main input =
             !wgsl.contains("fn maxLights"),
             "should NOT emit function, got: {}",
             wgsl
+        );
+    }
+
+    #[test]
+    fn mir_validation_rejects_const_call_and_codegen_panics() {
+        let program = MirProgram {
+            structs: vec![],
+            globals: vec![],
+            functions: vec![],
+            constants: vec![MirConst {
+                name: "maxLights",
+                ty: MirType::I32,
+                value: MirExpr::Lit(MirLit::I32(64)),
+            }],
+            entry_points: vec![MirEntryPoint {
+                name: "main",
+                stage: ShaderStage::Compute,
+                workgroup_size: Some([1, 1, 1]),
+                params: vec![],
+                return_ty: MirType::Unit,
+                body: vec![MirStmt::Let(
+                    "x",
+                    MirType::I32,
+                    MirExpr::Call("maxLights", vec![], MirType::I32),
+                )],
+                return_expr: None,
+                comments: vec![],
+            }],
+        };
+
+        let errors = shadml_mir::validate::validate_program(&program)
+            .expect_err("validator should reject calls to constants");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("invalid call to constant 'maxLights'")),
+            "expected const-call validation error, got: {:?}",
+            errors
+        );
+
+        let panic_payload = panic::catch_unwind(|| emit_wgsl(&program))
+            .expect_err("emit_wgsl should panic on invalid MIR");
+        let panic_message = if let Some(msg) = panic_payload.downcast_ref::<String>() {
+            msg.clone()
+        } else if let Some(msg) = panic_payload.downcast_ref::<&str>() {
+            msg.to_string()
+        } else {
+            "<non-string panic>".to_string()
+        };
+        assert!(
+            panic_message.contains("attempted to emit invalid MIR as WGSL"),
+            "expected codegen panic to mention invalid MIR, got: {}",
+            panic_message
+        );
+        assert!(
+            panic_message.contains("invalid call to constant 'maxLights'"),
+            "expected codegen panic to include validator detail, got: {}",
+            panic_message
         );
     }
 }

@@ -479,7 +479,11 @@ impl AstLowering {
             .constants
             .into_iter()
             .map(|constant| HirConst {
-                value: self.rewrite_specialized_expr(constant.value, &generic_templates, &mut pending),
+                value: self.rewrite_specialized_expr(
+                    constant.value,
+                    &generic_templates,
+                    &mut pending,
+                ),
                 ..constant
             })
             .collect();
@@ -499,7 +503,11 @@ impl AstLowering {
                 continue;
             }
             retained_functions.push(HirFunction {
-                body: self.rewrite_specialized_expr(function.body, &generic_templates, &mut pending),
+                body: self.rewrite_specialized_expr(
+                    function.body,
+                    &generic_templates,
+                    &mut pending,
+                ),
                 ..function
             });
         }
@@ -513,7 +521,8 @@ impl AstLowering {
             let Some(template) = generic_templates.get(&spec.original_name) else {
                 continue;
             };
-            let specialized = self.specialize_function(template, &spec, &generic_templates, &mut pending);
+            let specialized =
+                self.specialize_function(template, &spec, &generic_templates, &mut pending);
             emitted.insert(spec.concrete_name.clone(), ());
             ordered_specializations.push(specialized);
         }
@@ -573,8 +582,18 @@ impl AstLowering {
                 HirExpr::Var(resolved_name, ty, span)
             }
             HirExpr::App(func, arg, ty, span) => HirExpr::App(
-                Box::new(self.rewrite_specialized_expr_with_subst(*func, generic_templates, pending, subst)),
-                Box::new(self.rewrite_specialized_expr_with_subst(*arg, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *func,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *arg,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
@@ -584,54 +603,119 @@ impl AstLowering {
                     .map(|(name, expr)| {
                         (
                             name,
-                            self.rewrite_specialized_expr_with_subst(expr, generic_templates, pending, subst),
+                            self.rewrite_specialized_expr_with_subst(
+                                expr,
+                                generic_templates,
+                                pending,
+                                subst,
+                            ),
                         )
                     })
                     .collect(),
-                Box::new(self.rewrite_specialized_expr_with_subst(*body, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *body,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
             HirExpr::Case(scrutinee, arms, ty, span) => HirExpr::Case(
-                Box::new(self.rewrite_specialized_expr_with_subst(*scrutinee, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *scrutinee,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 arms.into_iter()
                     .map(|arm| HirCaseArm {
                         pattern: substitute_pattern_ty_vars(arm.pattern, subst),
-                        guard: arm
-                            .guard
-                            .map(|guard| self.rewrite_specialized_expr_with_subst(guard, generic_templates, pending, subst)),
-                        body: self.rewrite_specialized_expr_with_subst(arm.body, generic_templates, pending, subst),
+                        guard: arm.guard.map(|guard| {
+                            self.rewrite_specialized_expr_with_subst(
+                                guard,
+                                generic_templates,
+                                pending,
+                                subst,
+                            )
+                        }),
+                        body: self.rewrite_specialized_expr_with_subst(
+                            arm.body,
+                            generic_templates,
+                            pending,
+                            subst,
+                        ),
                     })
                     .collect(),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
             HirExpr::If(cond, then_expr, else_expr, ty, span) => HirExpr::If(
-                Box::new(self.rewrite_specialized_expr_with_subst(*cond, generic_templates, pending, subst)),
-                Box::new(self.rewrite_specialized_expr_with_subst(*then_expr, generic_templates, pending, subst)),
-                Box::new(self.rewrite_specialized_expr_with_subst(*else_expr, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *cond,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *then_expr,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *else_expr,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
             HirExpr::BinOp(op, lhs, rhs, ty, span) => HirExpr::BinOp(
                 op,
-                Box::new(self.rewrite_specialized_expr_with_subst(*lhs, generic_templates, pending, subst)),
-                Box::new(self.rewrite_specialized_expr_with_subst(*rhs, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *lhs,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *rhs,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
             HirExpr::UnaryNeg(inner, ty, span) => HirExpr::UnaryNeg(
-                Box::new(self.rewrite_specialized_expr_with_subst(*inner, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *inner,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
             HirExpr::UnaryNot(inner, ty, span) => HirExpr::UnaryNot(
-                Box::new(self.rewrite_specialized_expr_with_subst(*inner, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *inner,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
             HirExpr::UnaryBitNot(inner, ty, span) => HirExpr::UnaryBitNot(
-                Box::new(self.rewrite_specialized_expr_with_subst(*inner, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *inner,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
@@ -639,20 +723,42 @@ impl AstLowering {
                 name,
                 tag,
                 args.into_iter()
-                    .map(|arg| self.rewrite_specialized_expr_with_subst(arg, generic_templates, pending, subst))
+                    .map(|arg| {
+                        self.rewrite_specialized_expr_with_subst(
+                            arg,
+                            generic_templates,
+                            pending,
+                            subst,
+                        )
+                    })
                     .collect(),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
             HirExpr::FieldAccess(base, field, ty, span) => HirExpr::FieldAccess(
-                Box::new(self.rewrite_specialized_expr_with_subst(*base, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *base,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 field,
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
             HirExpr::Index(base, index, ty, span) => HirExpr::Index(
-                Box::new(self.rewrite_specialized_expr_with_subst(*base, generic_templates, pending, subst)),
-                Box::new(self.rewrite_specialized_expr_with_subst(*index, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *base,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *index,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
@@ -663,11 +769,21 @@ impl AstLowering {
                     .map(|(name, expr)| {
                         (
                             name,
-                            self.rewrite_specialized_expr_with_subst(expr, generic_templates, pending, subst),
+                            self.rewrite_specialized_expr_with_subst(
+                                expr,
+                                generic_templates,
+                                pending,
+                                subst,
+                            ),
                         )
                     })
                     .collect(),
-                Box::new(self.rewrite_specialized_expr_with_subst(*body, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *body,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 substitute_ty_vars(&ty, subst),
                 span,
             ),
@@ -678,7 +794,12 @@ impl AstLowering {
                     .map(|(name, expr)| {
                         (
                             name,
-                            self.rewrite_specialized_expr_with_subst(expr, generic_templates, pending, subst),
+                            self.rewrite_specialized_expr_with_subst(
+                                expr,
+                                generic_templates,
+                                pending,
+                                subst,
+                            ),
                         )
                     })
                     .collect(),
@@ -687,13 +808,23 @@ impl AstLowering {
             ),
             HirExpr::BitfieldUpdate(name, base, fields, ty, span) => HirExpr::BitfieldUpdate(
                 name,
-                Box::new(self.rewrite_specialized_expr_with_subst(*base, generic_templates, pending, subst)),
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *base,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
                 fields
                     .into_iter()
                     .map(|(name, expr)| {
                         (
                             name,
-                            self.rewrite_specialized_expr_with_subst(expr, generic_templates, pending, subst),
+                            self.rewrite_specialized_expr_with_subst(
+                                expr,
+                                generic_templates,
+                                pending,
+                                subst,
+                            ),
                         )
                     })
                     .collect(),
@@ -1874,31 +2005,30 @@ impl AstLowering {
                     .cloned()
                     .map(|info| info.instantiate(&mut self.engine))
                 {
-                    let sub_pats: Vec<HirPattern> = if let ConstructorFields::Record(con_fields) =
-                        &con_info.fields
-                    {
-                        con_fields
-                            .iter()
-                            .map(|(field_name, field_ty)| {
-                                if let Some((_, maybe_pat)) =
-                                    fields.iter().find(|(name, _)| name == field_name)
-                                {
-                                    if let Some(p) = maybe_pat {
-                                        self.lower_pattern(p, field_ty)
+                    let sub_pats: Vec<HirPattern> =
+                        if let ConstructorFields::Record(con_fields) = &con_info.fields {
+                            con_fields
+                                .iter()
+                                .map(|(field_name, field_ty)| {
+                                    if let Some((_, maybe_pat)) =
+                                        fields.iter().find(|(name, _)| name == field_name)
+                                    {
+                                        if let Some(p) = maybe_pat {
+                                            self.lower_pattern(p, field_ty)
+                                        } else {
+                                            HirPattern::Var(
+                                                field_name.clone(),
+                                                self.engine.finalize(field_ty),
+                                            )
+                                        }
                                     } else {
-                                        HirPattern::Var(
-                                            field_name.clone(),
-                                            self.engine.finalize(field_ty),
-                                        )
+                                        HirPattern::Wild
                                     }
-                                } else {
-                                    HirPattern::Wild
-                                }
-                            })
-                            .collect()
-                    } else {
-                        vec![]
-                    };
+                                })
+                                .collect()
+                        } else {
+                            vec![]
+                        };
                     HirPattern::Constructor(con_name.clone(), con_info.tag, sub_pats)
                 } else {
                     HirPattern::Wild
@@ -2738,7 +2868,9 @@ fn hir_function_type(function: &HirFunction) -> Ty {
         .params
         .iter()
         .rev()
-        .fold(function.return_ty.clone(), |acc, (_, ty)| Ty::arrow(ty.clone(), acc))
+        .fold(function.return_ty.clone(), |acc, (_, ty)| {
+            Ty::arrow(ty.clone(), acc)
+        })
 }
 
 fn substitute_ty_vars(ty: &Ty, subst: &HashMap<TyVarId, Ty>) -> Ty {

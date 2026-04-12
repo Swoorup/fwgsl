@@ -639,35 +639,50 @@ pub fn lower_hir_to_mir<'a>(
     // Promote zero-param functions with const-evaluable bodies to constants.
     // This turns `maxLights = 64` into `const maxLights: i32 = 64i;` instead
     // of `fn maxLights() -> i32 { return 64i; }`.
-    let mut promoted_functions = Vec::new();
-    for f in functions.drain(..) {
-        if f.params.is_empty()
-            && f.body.is_empty()
-            && f.return_ty != MirType::Unit
-            && f.return_expr
-                .as_ref()
-                .is_some_and(|e| is_const_expr(e, &known_consts))
-        {
-            known_consts.insert(f.name.to_string());
-            constants.push(MirConst {
-                name: f.name,
-                ty: f.return_ty,
-                value: f.return_expr.unwrap(),
-            });
-        } else {
-            promoted_functions.push(f);
+    let mut promoted_const_names: HashSet<String> = HashSet::new();
+    let mut remaining_functions = functions;
+    loop {
+        let mut made_progress = false;
+        let mut next_functions = Vec::new();
+
+        for f in remaining_functions.drain(..) {
+            if f.params.is_empty()
+                && f.body.is_empty()
+                && f.return_ty != MirType::Unit
+                && f.return_expr
+                    .as_ref()
+                    .is_some_and(|e| is_const_expr(e, &known_consts))
+            {
+                known_consts.insert(f.name.to_string());
+                promoted_const_names.insert(f.name.to_string());
+                constants.push(MirConst {
+                    name: f.name,
+                    ty: f.return_ty,
+                    value: f.return_expr.unwrap(),
+                });
+                made_progress = true;
+            } else {
+                next_functions.push(f);
+            }
+        }
+
+        remaining_functions = next_functions;
+        if !made_progress {
+            break;
         }
     }
-    let functions = promoted_functions;
+    let functions = remaining_functions;
 
     if errors.is_empty() {
-        Ok(MirProgram {
+        let mut program = MirProgram {
             structs,
             globals,
             functions,
             entry_points,
             constants,
-        })
+        };
+        rewrite_promoted_const_refs_in_program(&mut program, &promoted_const_names, arena);
+        Ok(program)
     } else {
         Err(errors)
     }
@@ -2124,12 +2139,173 @@ fn is_const_expr(expr: &MirExpr, known_consts: &HashSet<String>) -> bool {
         MirExpr::UnaryOp(_, operand, _) => is_const_expr(operand, known_consts),
         MirExpr::Cast(inner, _) => is_const_expr(inner, known_consts),
         MirExpr::Call(name, args, _) => {
-            is_wgsl_const_builtin(name) && args.iter().all(|a| is_const_expr(a, known_consts))
+            (args.is_empty() && known_consts.contains(*name))
+                || (is_wgsl_const_builtin(name)
+                    && args.iter().all(|a| is_const_expr(a, known_consts)))
         }
         // Struct construction, field access, index — not const-evaluable in WGSL
         MirExpr::ConstructStruct(_, _)
         | MirExpr::FieldAccess(_, _, _)
         | MirExpr::Index(_, _, _) => false,
+    }
+}
+
+fn rewrite_promoted_const_refs_in_program<'a>(
+    program: &mut MirProgram<'a>,
+    promoted_const_names: &HashSet<String>,
+    arena: &'a Allocator,
+) {
+    for c in &mut program.constants {
+        c.value = rewrite_promoted_const_refs_in_expr(c.value.clone(), promoted_const_names, arena);
+    }
+
+    for f in &mut program.functions {
+        rewrite_promoted_const_refs_in_stmts(&mut f.body, promoted_const_names, arena);
+        if let Some(expr) = &mut f.return_expr {
+            *expr = rewrite_promoted_const_refs_in_expr(expr.clone(), promoted_const_names, arena);
+        }
+    }
+
+    for ep in &mut program.entry_points {
+        rewrite_promoted_const_refs_in_stmts(&mut ep.body, promoted_const_names, arena);
+        if let Some(expr) = &mut ep.return_expr {
+            *expr = rewrite_promoted_const_refs_in_expr(expr.clone(), promoted_const_names, arena);
+        }
+    }
+}
+
+fn rewrite_promoted_const_refs_in_stmts<'a>(
+    stmts: &mut [MirStmt<'a>],
+    promoted_const_names: &HashSet<String>,
+    arena: &'a Allocator,
+) {
+    for stmt in stmts {
+        match stmt {
+            MirStmt::Let(_, _, expr)
+            | MirStmt::Var(_, _, expr)
+            | MirStmt::Assign(_, expr)
+            | MirStmt::Return(expr) => {
+                *expr =
+                    rewrite_promoted_const_refs_in_expr(expr.clone(), promoted_const_names, arena);
+            }
+            MirStmt::IndexAssign(base, index, value) => {
+                *base =
+                    rewrite_promoted_const_refs_in_expr(base.clone(), promoted_const_names, arena);
+                *index =
+                    rewrite_promoted_const_refs_in_expr(index.clone(), promoted_const_names, arena);
+                *value =
+                    rewrite_promoted_const_refs_in_expr(value.clone(), promoted_const_names, arena);
+            }
+            MirStmt::If(cond, then_stmts, else_stmts) => {
+                *cond =
+                    rewrite_promoted_const_refs_in_expr(cond.clone(), promoted_const_names, arena);
+                rewrite_promoted_const_refs_in_stmts(then_stmts, promoted_const_names, arena);
+                rewrite_promoted_const_refs_in_stmts(else_stmts, promoted_const_names, arena);
+            }
+            MirStmt::Block(stmts) | MirStmt::Loop(stmts) => {
+                rewrite_promoted_const_refs_in_stmts(stmts, promoted_const_names, arena);
+            }
+            MirStmt::Switch(expr, cases, default) => {
+                *expr =
+                    rewrite_promoted_const_refs_in_expr(expr.clone(), promoted_const_names, arena);
+                for case in cases {
+                    rewrite_promoted_const_refs_in_stmts(
+                        &mut case.body,
+                        promoted_const_names,
+                        arena,
+                    );
+                }
+                rewrite_promoted_const_refs_in_stmts(default, promoted_const_names, arena);
+            }
+            MirStmt::Break | MirStmt::Continue => {}
+        }
+    }
+}
+
+fn rewrite_promoted_const_refs_in_expr<'a>(
+    expr: MirExpr<'a>,
+    promoted_const_names: &HashSet<String>,
+    arena: &'a Allocator,
+) -> MirExpr<'a> {
+    match expr {
+        MirExpr::Lit(_) | MirExpr::Var(_, _) => expr,
+        MirExpr::BinOp(op, lhs, rhs, ty) => MirExpr::BinOp(
+            op,
+            arena.alloc(rewrite_promoted_const_refs_in_expr(
+                (*lhs).clone(),
+                promoted_const_names,
+                arena,
+            )),
+            arena.alloc(rewrite_promoted_const_refs_in_expr(
+                (*rhs).clone(),
+                promoted_const_names,
+                arena,
+            )),
+            ty,
+        ),
+        MirExpr::UnaryOp(op, operand, ty) => MirExpr::UnaryOp(
+            op,
+            arena.alloc(rewrite_promoted_const_refs_in_expr(
+                (*operand).clone(),
+                promoted_const_names,
+                arena,
+            )),
+            ty,
+        ),
+        MirExpr::Call(name, args, ty) => {
+            if args.is_empty() && promoted_const_names.contains(name) {
+                MirExpr::Var(arena.alloc_str(name), ty)
+            } else {
+                MirExpr::Call(
+                    name,
+                    args.into_iter()
+                        .map(|arg| {
+                            rewrite_promoted_const_refs_in_expr(arg, promoted_const_names, arena)
+                        })
+                        .collect(),
+                    ty,
+                )
+            }
+        }
+        MirExpr::ConstructStruct(name, fields) => MirExpr::ConstructStruct(
+            name,
+            fields
+                .into_iter()
+                .map(|field| {
+                    rewrite_promoted_const_refs_in_expr(field, promoted_const_names, arena)
+                })
+                .collect(),
+        ),
+        MirExpr::FieldAccess(base, field, ty) => MirExpr::FieldAccess(
+            arena.alloc(rewrite_promoted_const_refs_in_expr(
+                (*base).clone(),
+                promoted_const_names,
+                arena,
+            )),
+            field,
+            ty,
+        ),
+        MirExpr::Index(base, index, ty) => MirExpr::Index(
+            arena.alloc(rewrite_promoted_const_refs_in_expr(
+                (*base).clone(),
+                promoted_const_names,
+                arena,
+            )),
+            arena.alloc(rewrite_promoted_const_refs_in_expr(
+                (*index).clone(),
+                promoted_const_names,
+                arena,
+            )),
+            ty,
+        ),
+        MirExpr::Cast(inner, ty) => MirExpr::Cast(
+            arena.alloc(rewrite_promoted_const_refs_in_expr(
+                (*inner).clone(),
+                promoted_const_names,
+                arena,
+            )),
+            ty,
+        ),
     }
 }
 
@@ -2370,6 +2546,59 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_param_const_depending_on_promoted_const_is_promoted() {
+        let arena = Allocator::new();
+        let hir = HirProgram {
+            functions: vec![
+                HirFunction {
+                    name: "base".into(),
+                    params: vec![],
+                    return_ty: Ty::i32(),
+                    body: HirExpr::Lit(HirLit::Int(4), Ty::i32(), span()),
+                    span: span(),
+                    comments: vec![],
+                },
+                HirFunction {
+                    name: "derived".into(),
+                    params: vec![],
+                    return_ty: Ty::i32(),
+                    body: HirExpr::BinOp(
+                        BinOp::Add,
+                        Box::new(HirExpr::Var("base".into(), Ty::i32(), span())),
+                        Box::new(HirExpr::Lit(HirLit::Int(2), Ty::i32(), span())),
+                        Ty::i32(),
+                        span(),
+                    ),
+                    span: span(),
+                    comments: vec![],
+                },
+            ],
+            data_types: vec![],
+            entry_points: vec![],
+            bindings: vec![],
+            bitfields: vec![],
+            constants: vec![],
+        };
+
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
+        assert_eq!(mir.functions.len(), 0);
+        let derived = mir
+            .constants
+            .iter()
+            .find(|c| c.name == "derived")
+            .expect("derived should be promoted");
+        assert_eq!(
+            derived.value,
+            MirExpr::BinOp(
+                MirBinOp::Add,
+                arena.alloc(MirExpr::Var("base", MirType::I32)),
+                arena.alloc(MirExpr::Lit(MirLit::I32(2))),
+                MirType::I32,
+            )
+        );
+    }
+
+    #[test]
     fn test_zero_param_with_let_body_not_promoted() {
         let arena = Allocator::new();
         // f = let x = 42 in x + 1  →  should stay as function (has statements)
@@ -2470,6 +2699,58 @@ mod tests {
         );
         assert_eq!(mir.constants.len(), 1);
         assert_eq!(mir.constants[0].name, "neg1");
+    }
+
+    #[test]
+    fn test_references_to_promoted_consts_become_vars() {
+        let arena = Allocator::new();
+        let hir = HirProgram {
+            functions: vec![
+                HirFunction {
+                    name: "maxLights".into(),
+                    params: vec![],
+                    return_ty: Ty::i32(),
+                    body: HirExpr::Lit(HirLit::Int(64), Ty::i32(), span()),
+                    span: span(),
+                    comments: vec![],
+                },
+                HirFunction {
+                    name: "useMax".into(),
+                    params: vec![("x".into(), Ty::i32())],
+                    return_ty: Ty::i32(),
+                    body: HirExpr::BinOp(
+                        BinOp::Add,
+                        Box::new(HirExpr::Var("maxLights".into(), Ty::i32(), span())),
+                        Box::new(HirExpr::Var("x".into(), Ty::i32(), span())),
+                        Ty::i32(),
+                        span(),
+                    ),
+                    span: span(),
+                    comments: vec![],
+                },
+            ],
+            data_types: vec![],
+            entry_points: vec![],
+            bindings: vec![],
+            bitfields: vec![],
+            constants: vec![],
+        };
+
+        let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
+        let use_max = mir
+            .functions
+            .iter()
+            .find(|c| c.name == "useMax")
+            .expect("useMax should remain a function");
+        assert_eq!(
+            use_max.return_expr,
+            Some(MirExpr::BinOp(
+                MirBinOp::Add,
+                arena.alloc(MirExpr::Var("maxLights", MirType::I32)),
+                arena.alloc(MirExpr::Var("x", MirType::I32)),
+                MirType::I32,
+            ))
+        );
     }
 
     #[test]

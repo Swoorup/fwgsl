@@ -801,8 +801,11 @@ impl<'a> IndexBuilder<'a> {
                 {
                     if let Some(name_span) = self.last_name_span_before(field_name, *span, span.end)
                     {
-                        self.index
-                            .push_occurrence(*symbol_id, name_span, OccurrenceRole::Reference);
+                        self.index.push_occurrence(
+                            *symbol_id,
+                            name_span,
+                            OccurrenceRole::Reference,
+                        );
                     }
                 }
             }
@@ -976,7 +979,9 @@ impl<'a> IndexBuilder<'a> {
                             visible_from,
                             container: frames[depth].container.clone(),
                         });
-                        frames[depth].value_defs.insert(field_name.clone(), symbol_id);
+                        frames[depth]
+                            .value_defs
+                            .insert(field_name.clone(), symbol_id);
                         if let Some(&field_symbol_id) = self.field_symbols.get(field_name) {
                             self.index.push_occurrence(
                                 field_symbol_id,
@@ -1105,10 +1110,7 @@ pub fn build_completions(source: &str, pos: Position) -> Vec<CompletionItem> {
                     .env
                     .lookup(mangled_name)
                     .map(|scheme| {
-                        format!(
-                            "method : {}",
-                            format_scheme(&state.analyzer.engine, scheme)
-                        )
+                        format!("method : {}", format_scheme(&state.analyzer.engine, scheme))
                     })
                     .unwrap_or_else(|| "method".to_owned());
                 items.push(CompletionItem {
@@ -1812,7 +1814,13 @@ fn format_scheme(engine: &InferEngine, scheme: &Scheme) -> String {
     let constraints = scheme
         .constraints
         .iter()
-        .map(|predicate| format!("{} {}", predicate.trait_name, engine.finalize(&predicate.ty)))
+        .map(|predicate| {
+            format!(
+                "{} {}",
+                predicate.trait_name,
+                engine.finalize(&predicate.ty)
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let mut rendered = if scheme.vars.is_empty() {
@@ -1867,12 +1875,7 @@ fn collect_symbol_types(program: &Program, analyzer: &SemanticAnalyzer) -> HashM
                     let mut cursor = analyzer.engine.finalize(&scheme.ty);
                     for pat in params {
                         if let shadml_typechecker::Ty::Arrow(from, to) = cursor {
-                            collect_pattern_types(
-                                pat,
-                                from.as_ref(),
-                                analyzer,
-                                &mut types,
-                            );
+                            collect_pattern_types(pat, from.as_ref(), analyzer, &mut types);
                             cursor = (*to).clone();
                         } else {
                             let _ = span;
@@ -1893,12 +1896,7 @@ fn collect_symbol_types(program: &Program, analyzer: &SemanticAnalyzer) -> HashM
                         let mut cursor = analyzer.engine.finalize(&scheme.ty);
                         for pat in &method.params {
                             if let shadml_typechecker::Ty::Arrow(from, to) = cursor {
-                                collect_pattern_types(
-                                    pat,
-                                    from.as_ref(),
-                                    analyzer,
-                                    &mut types,
-                                );
+                                collect_pattern_types(pat, from.as_ref(), analyzer, &mut types);
                                 cursor = (*to).clone();
                             } else {
                                 break;
@@ -1933,9 +1931,11 @@ fn collect_pattern_types(
         }
         Pat::Record(con_name, fields, _, _) => {
             if let Some(con_info) = analyzer.constructors.get(con_name) {
-                if let shadml_typechecker::ConstructorFields::Record(con_fields) = &con_info.fields {
+                if let shadml_typechecker::ConstructorFields::Record(con_fields) = &con_info.fields
+                {
                     for (field_name, maybe_pat) in fields {
-                        if let Some((_, field_ty)) = con_fields.iter().find(|(n, _)| n == field_name)
+                        if let Some((_, field_ty)) =
+                            con_fields.iter().find(|(n, _)| n == field_name)
                         {
                             if let Some(pat) = maybe_pat {
                                 collect_pattern_types(pat, field_ty, analyzer, types);

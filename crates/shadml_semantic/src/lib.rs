@@ -1923,7 +1923,10 @@ mod tests {
         };
         with_prelude(&mut program);
         sa.analyze(&program);
-        assert!(sa.has_errors(), "undeclared type constructors should be rejected");
+        assert!(
+            sa.has_errors(),
+            "undeclared type constructors should be rejected"
+        );
         assert!(sa
             .diagnostics()
             .iter()
@@ -2091,11 +2094,13 @@ f particle = match particle
 
         let mut sa = SemanticAnalyzer::new();
         sa.analyze(&program);
-        assert!(sa.has_errors(), "unknown record-pattern fields should be rejected");
-        assert!(sa
-            .diagnostics()
-            .iter()
-            .any(|diag| diag.message.contains("no field `lif` on constructor `Active`")));
+        assert!(
+            sa.has_errors(),
+            "unknown record-pattern fields should be rejected"
+        );
+        assert!(sa.diagnostics().iter().any(|diag| diag
+            .message
+            .contains("no field `lif` on constructor `Active`")));
     }
 
     #[test]

@@ -11,6 +11,7 @@
 
 pub mod lower;
 pub mod reachability;
+pub mod validate;
 
 use std::fmt;
 

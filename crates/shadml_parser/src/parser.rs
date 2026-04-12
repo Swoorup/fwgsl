@@ -1124,10 +1124,7 @@ impl Parser {
                 _ => {
                     self.diagnostics.push(
                         Diagnostic::error("expected trait constraint before `=>`")
-                            .with_label(Label::primary(
-                                ty.span(),
-                                "expected `TraitName typeVar`",
-                            ))
+                            .with_label(Label::primary(ty.span(), "expected `TraitName typeVar`"))
                             .with_help("write constraints like `Light a => a -> a`"),
                     );
                     None
@@ -2459,7 +2456,9 @@ impl Parser {
             }
 
             // Index access: expr[expr]
-            if op_kind == SyntaxKind::LBracket && min_bp <= 21 && self.postfix_is_adjacent(lhs.span())
+            if op_kind == SyntaxKind::LBracket
+                && min_bp <= 21
+                && self.postfix_is_adjacent(lhs.span())
             {
                 self.skip_trivia();
                 self.bump();

@@ -321,11 +321,7 @@ impl Scheme {
         }
     }
 
-    pub fn poly_with_constraints(
-        constraints: Vec<Predicate>,
-        vars: Vec<TyVarId>,
-        ty: Ty,
-    ) -> Self {
+    pub fn poly_with_constraints(constraints: Vec<Predicate>, vars: Vec<TyVarId>, ty: Ty) -> Self {
         Scheme {
             constraints,
             vars,

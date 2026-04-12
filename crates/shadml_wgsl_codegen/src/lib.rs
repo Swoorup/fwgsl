@@ -694,11 +694,23 @@ fn is_type_constructor_call(name: &str, ty: &MirType) -> bool {
 
 /// Convenience function to emit a [`MirProgram`] as WGSL source text.
 pub fn emit_wgsl(program: &MirProgram) -> String {
+    if let Err(errors) = shadml_mir::validate::validate_program(program) {
+        panic!(
+            "attempted to emit invalid MIR as WGSL:\n{}",
+            errors.join("\n")
+        );
+    }
     WgslEmitter::new().emit_program(program)
 }
 
 /// Emit a [`MirProgram`] as WGSL, preserving source comments.
 pub fn emit_wgsl_with_comments(program: &MirProgram) -> String {
+    if let Err(errors) = shadml_mir::validate::validate_program(program) {
+        panic!(
+            "attempted to emit invalid MIR as WGSL:\n{}",
+            errors.join("\n")
+        );
+    }
     WgslEmitter::with_comments().emit_program(program)
 }
 

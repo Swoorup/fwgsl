@@ -210,6 +210,13 @@ fn cmd_compile(file: &str, emit_ast: bool, preserve_comments: bool, feature_flag
     // Dead code elimination
     let mir = shadml_mir::reachability::eliminate_dead_code(&mir);
 
+    if let Err(errors) = shadml_mir::validate::validate_program(&mir) {
+        for e in &errors {
+            eprintln!("error: {}", e);
+        }
+        process::exit(1);
+    }
+
     // MIR -> WGSL codegen
     let wgsl = if preserve_comments {
         shadml_wgsl_codegen::emit_wgsl_with_comments(&mir)

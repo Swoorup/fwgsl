@@ -228,7 +228,25 @@ pub fn compile(source: &str) -> String {
             match shadml_mir::lower::lower_hir_to_mir(&arena, &hir) {
                 Ok(mir) => {
                     let mir = shadml_mir::reachability::eliminate_dead_code(&mir);
-                    shadml_wgsl_codegen::emit_wgsl(&mir)
+                    match shadml_mir::validate::validate_program(&mir) {
+                        Ok(()) => shadml_wgsl_codegen::emit_wgsl(&mir),
+                        Err(errors) => {
+                            for error in errors {
+                                diagnostics.push(DiagnosticOutput {
+                                    severity: "error".into(),
+                                    message: error,
+                                    code: None,
+                                    help: None,
+                                    note: None,
+                                    line: 0,
+                                    col: 0,
+                                    end_line: 0,
+                                    end_col: 0,
+                                });
+                            }
+                            "// MIR validation failed.".to_string()
+                        }
+                    }
                 }
                 Err(errors) => {
                     format!("// MIR lowering failed: {}", errors.join(", "))
