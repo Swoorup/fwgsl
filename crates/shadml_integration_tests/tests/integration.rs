@@ -18,7 +18,6 @@ use shadml_parser::parser::{Decl, Expr, Parser, Program};
 use shadml_parser::resolve_layout;
 use shadml_semantic::SemanticAnalyzer;
 use shadml_syntax::SyntaxKind;
-use shadml_typechecker::Ty;
 use shadml_wgsl_codegen::emit_wgsl;
 
 // =========================================================================
@@ -1573,37 +1572,13 @@ mod pipeline_tests {
         let mut sa = SemanticAnalyzer::new();
         sa.analyze(&program);
         assert!(
-            !sa.has_errors(),
-            "semantic analysis should not produce errors"
+            sa.has_errors(),
+            "top-level constrained bindings should require explicit signatures"
         );
-
-        let add_scheme = sa
-            .env
-            .lookup("add")
-            .expect("add should be in the environment");
-        assert_eq!(
-            add_scheme.vars.len(),
-            1,
-            "add should be generalized over one type variable"
-        );
-        match &add_scheme.ty {
-            Ty::Arrow(lhs, rhs) => match rhs.as_ref() {
-                Ty::Arrow(mid, ret) => {
-                    assert_eq!(
-                        lhs.as_ref(),
-                        mid.as_ref(),
-                        "add should use one shared argument type"
-                    );
-                    assert_eq!(
-                        lhs.as_ref(),
-                        ret.as_ref(),
-                        "add should return the shared argument type"
-                    );
-                }
-                other => panic!("expected add result to be a curried arrow, got {:?}", other),
-            },
-            other => panic!("expected add to have a function type, got {:?}", other),
-        }
+        assert!(sa.diagnostics().iter().any(|diag| {
+            diag.message
+                .contains("requires an explicit constrained type signature")
+        }));
     }
 
     #[test]
@@ -2001,8 +1976,9 @@ double x = x * 2
 
     #[test]
     fn test_full_pipeline_generic_function_not_emitted_without_specialization() {
-        let source = "add x y = x + y";
-        let wgsl = compile_to_wgsl(source).expect("generic definition should compile");
+        let source = "add : Add a b c => a -> b -> c\nadd x y = x + y";
+        let wgsl =
+            compile_to_wgsl(source).expect("generic definition with a signature should compile");
         assert!(
             !wgsl.contains("fn add("),
             "unspecialized generic template should not be emitted as WGSL, got: {}",
@@ -2018,6 +1994,7 @@ double x = x * 2
     #[test]
     fn test_full_pipeline_generic_function_specializes_at_concrete_call_site() {
         let source = r#"
+add : Add a b c => a -> b -> c
 add x y = x + y
 
 result : I32
@@ -2159,10 +2136,10 @@ mod trait_tests {
         assert_eq!(program.decls.len(), 1);
         match &program.decls[0] {
             Decl::TraitDecl {
-                name, var, methods, ..
+                name, vars, methods, ..
             } => {
                 assert_eq!(name, "Num");
-                assert_eq!(var, "a");
+                assert_eq!(vars, &vec!["a".to_string()]);
                 assert_eq!(methods.len(), 2);
                 assert_eq!(methods[0].name, "add");
                 assert_eq!(methods[1].name, "sub");
@@ -2882,7 +2859,7 @@ mod bitwise_tests {
         let source = r#"
 data Mask = Mask { bits : U32 }
 
-impl BitAnd Mask where
+impl BitAnd Mask Mask Mask where
   (&) a b = Mask { bits = a.bits & b.bits }
 
 andMask : Mask -> Mask -> Mask
@@ -2890,13 +2867,13 @@ andMask a b = a & b
 "#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
-            wgsl.contains("fn bitand_Mask("),
+            wgsl.contains("fn bitand_Mask__Mask__Mask("),
             "WGSL should contain mangled bitand impl, got: {}",
             wgsl
         );
         assert!(
-            wgsl.contains("bitand_Mask(a, b)"),
-            "WGSL should dispatch & to bitand_Mask, got: {}",
+            wgsl.contains("bitand_Mask__Mask__Mask(a, b)"),
+            "WGSL should dispatch & to the mangled BitAnd impl, got: {}",
             wgsl
         );
     }
@@ -2906,7 +2883,7 @@ andMask a b = a & b
         let source = r#"
 data Mask = Mask { bits : U32 }
 
-impl BitXor Mask where
+impl BitXor Mask Mask Mask where
   (^) a b = Mask { bits = a.bits ^ b.bits }
 
 xorMask : Mask -> Mask -> Mask
@@ -2914,13 +2891,13 @@ xorMask a b = a ^ b
 "#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
-            wgsl.contains("fn bitxor_Mask("),
+            wgsl.contains("fn bitxor_Mask__Mask__Mask("),
             "WGSL should contain mangled bitxor impl, got: {}",
             wgsl
         );
         assert!(
-            wgsl.contains("bitxor_Mask(a, b)"),
-            "WGSL should dispatch ^ to bitxor_Mask, got: {}",
+            wgsl.contains("bitxor_Mask__Mask__Mask(a, b)"),
+            "WGSL should dispatch ^ to the mangled BitXor impl, got: {}",
             wgsl
         );
     }
@@ -2930,7 +2907,7 @@ xorMask a b = a ^ b
         let source = r#"
 data Mask = Mask { bits : U32 }
 
-impl Shl Mask where
+impl Shl Mask Mask Mask where
   (<<) a b = Mask { bits = a.bits << b.bits }
 
 shlMask : Mask -> Mask -> Mask
@@ -2938,13 +2915,13 @@ shlMask a b = a << b
 "#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
-            wgsl.contains("fn shl_Mask("),
+            wgsl.contains("fn shl_Mask__Mask__Mask("),
             "WGSL should contain mangled shl impl, got: {}",
             wgsl
         );
         assert!(
-            wgsl.contains("shl_Mask(a, b)"),
-            "WGSL should dispatch << to shl_Mask, got: {}",
+            wgsl.contains("shl_Mask__Mask__Mask(a, b)"),
+            "WGSL should dispatch << to the mangled Shl impl, got: {}",
             wgsl
         );
     }
@@ -2954,7 +2931,7 @@ shlMask a b = a << b
         let source = r#"
 data Mask = Mask { bits : U32 }
 
-impl Shr Mask where
+impl Shr Mask Mask Mask where
   shr a b = Mask { bits = shr a.bits b.bits }
 
 shrMask : Mask -> Mask -> Mask
@@ -2962,13 +2939,13 @@ shrMask a b = shr a b
 "#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
-            wgsl.contains("fn shr_Mask("),
+            wgsl.contains("fn shr_Mask__Mask__Mask("),
             "WGSL should contain mangled shr impl, got: {}",
             wgsl
         );
         assert!(
-            wgsl.contains("shr_Mask(a, b)"),
-            "WGSL should dispatch shr to shr_Mask, got: {}",
+            wgsl.contains("shr_Mask__Mask__Mask(a, b)"),
+            "WGSL should dispatch shr to the mangled Shr impl, got: {}",
             wgsl
         );
     }
@@ -3218,7 +3195,7 @@ mod naga_validation {
 
     #[test]
     fn naga_simple_function() {
-        let source = "add x y = x + y";
+        let source = "add : I32 -> I32 -> I32\nadd x y = x + y";
         compile_and_validate(source).expect("simple function should produce valid WGSL");
     }
 

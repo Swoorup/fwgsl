@@ -360,13 +360,20 @@ impl AstLowering {
                 }
                 Decl::ImplDecl {
                     trait_name,
-                    ty,
+                    tys,
                     methods,
                     span: _,
                     comments,
                 } => {
-                    let impl_ty_scheme = self.convert_syntax_type_scheme(ty);
-                    let type_suffix = shadml_semantic::format_type_suffix(&impl_ty_scheme.ty);
+                    let impl_tys: Vec<Ty> = tys
+                        .iter()
+                        .map(|ty| self.convert_syntax_type_scheme(ty).ty)
+                        .collect();
+                    let type_suffix = impl_tys
+                        .iter()
+                        .map(shadml_semantic::format_type_suffix)
+                        .collect::<Vec<_>>()
+                        .join("__");
 
                     if let Some(tname) = trait_name {
                         // Trait impl: look up trait method types
@@ -377,10 +384,10 @@ impl AstLowering {
                                     shadml_semantic::mangle_instance_method(&m.name, &type_suffix);
                                 for (tmethod_name, tmethod_ty) in &trait_info.methods {
                                     if tmethod_name == &m.name {
-                                        let concrete_ty = shadml_semantic::replace_trait_var(
+                                        let concrete_ty = shadml_semantic::replace_trait_vars(
                                             tmethod_ty,
-                                            trait_info.var_id,
-                                            &impl_ty_scheme.ty,
+                                            &trait_info.var_ids,
+                                            &impl_tys,
                                         );
                                         method_info.push((mangled.clone(), concrete_ty));
                                     }
@@ -428,7 +435,7 @@ impl AstLowering {
                                     &mangled,
                                     &m.params,
                                     &m.body,
-                                    &impl_ty_scheme.ty,
+                                    &impl_tys[0],
                                     m.span,
                                     comments.clone(),
                                 )
@@ -1350,6 +1357,9 @@ impl AstLowering {
                     // Get operator type and unify
                     let op_ty = if let Some(scheme) = env.lookup(op) {
                         self.engine.instantiate(scheme)
+                    } else if op == ">>" {
+                        let a = self.engine.fresh_var();
+                        Ty::arrow(a.clone(), Ty::arrow(a.clone(), a))
                     } else {
                         Ty::Error
                     };
@@ -1373,6 +1383,9 @@ impl AstLowering {
                     // Desugar as function application: (op lhs) rhs
                     let op_ty = if let Some(scheme) = env.lookup(op) {
                         self.engine.instantiate(scheme)
+                    } else if op == ">>" {
+                        let a = self.engine.fresh_var();
+                        Ty::arrow(a.clone(), Ty::arrow(a.clone(), a))
                     } else {
                         Ty::Error
                     };
@@ -2164,12 +2177,13 @@ impl AstLowering {
         let predicates = constraints
             .iter()
             .map(|constraint| {
-                let var = *scope
-                    .entry(constraint.type_var.clone())
-                    .or_insert_with(|| fresh_var_id(&mut self.engine));
                 Predicate {
                     trait_name: constraint.trait_name.clone(),
-                    ty: Ty::Var(var),
+                    tys: constraint
+                        .tys
+                        .iter()
+                        .map(|ty| self.convert_syntax_type_with_scope(ty, &mut scope))
+                        .collect(),
                 }
             })
             .collect();
@@ -2577,7 +2591,9 @@ impl AstLowering {
                 // Check if there's a trait instance for this operator on the lhs type.
                 // Built-in operator-to-trait mapping: + → Add, - → Sub, * → Mul, / → Div, etc.
                 let op_str = op.to_str();
-                if let Some(mangled) = self.resolve_operator_trait(op_str, &lhs_ty) {
+                if let Some(mangled) =
+                    self.resolve_binary_operator_trait(op_str, &lhs_ty, final_rhs.ty(), &final_ty)
+                {
                     // Rewrite BinOp → App(App(Var(mangled), lhs), rhs)
                     let method_ty =
                         Ty::arrow(lhs_ty, Ty::arrow(final_rhs.ty().clone(), final_ty.clone()));
@@ -2615,7 +2631,7 @@ impl AstLowering {
                 let final_inner = self.finalize_expr(*inner);
                 let final_ty = self.engine.finalize(&ty);
                 let inner_ty = final_inner.ty().clone();
-                if let Some(mangled) = self.resolve_operator_trait("negate", &inner_ty) {
+                if let Some(mangled) = self.resolve_unary_operator_trait("negate", &inner_ty) {
                     let method_ty = Ty::arrow(inner_ty, final_ty.clone());
                     let var_expr = HirExpr::Var(mangled, method_ty, span);
                     HirExpr::App(Box::new(var_expr), Box::new(final_inner), final_ty, span)
@@ -2632,7 +2648,7 @@ impl AstLowering {
                 let final_inner = self.finalize_expr(*inner);
                 let final_ty = self.engine.finalize(&ty);
                 let inner_ty = final_inner.ty().clone();
-                if let Some(mangled) = self.resolve_operator_trait("bitnot", &inner_ty) {
+                if let Some(mangled) = self.resolve_unary_operator_trait("bitnot", &inner_ty) {
                     let method_ty = Ty::arrow(inner_ty, final_ty.clone());
                     let var_expr = HirExpr::Var(mangled, method_ty, span);
                     HirExpr::App(Box::new(var_expr), Box::new(final_inner), final_ty, span)
@@ -2693,13 +2709,42 @@ impl AstLowering {
         None
     }
 
-    fn resolve_operator_trait(&self, op: &str, operand_ty: &Ty) -> Option<String> {
+    fn resolve_binary_operator_trait(
+        &self,
+        op: &str,
+        lhs_ty: &Ty,
+        rhs_ty: &Ty,
+        result_ty: &Ty,
+    ) -> Option<String> {
         for trait_info in self.traits.values() {
             for (method_name, _) in &trait_info.methods {
                 if method_name == op {
                     for inst in &self.impls {
                         if inst.trait_name.as_deref() == Some(trait_info.name.as_str())
-                            && inst.ty == *operand_ty
+                            && inst.tys.len() == 3
+                            && inst.tys[0] == *lhs_ty
+                            && inst.tys[1] == *rhs_ty
+                            && inst.tys[2] == *result_ty
+                        {
+                            if let Some(mangled) = inst.methods.get(op) {
+                                return Some(mangled.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn resolve_unary_operator_trait(&self, op: &str, operand_ty: &Ty) -> Option<String> {
+        for trait_info in self.traits.values() {
+            for (method_name, _) in &trait_info.methods {
+                if method_name == op {
+                    for inst in &self.impls {
+                        if inst.trait_name.as_deref() == Some(trait_info.name.as_str())
+                            && inst.tys.len() == 1
+                            && inst.tys[0] == *operand_ty
                         {
                             if let Some(mangled) = inst.methods.get(op) {
                                 return Some(mangled.clone());
@@ -2721,9 +2766,23 @@ impl AstLowering {
                 if method_name == name {
                     let concrete = extract_first_arg_type(ty);
                     if let Some(concrete_ty) = concrete {
+                        let mut matches = self.impls.iter().filter(|inst| {
+                            inst.trait_name.as_deref() == Some(trait_info.name.as_str())
+                                && !inst.tys.is_empty()
+                                && inst.tys[0] == concrete_ty
+                                && inst.methods.contains_key(name)
+                        });
+                        if let Some(inst) = matches.next() {
+                            if matches.next().is_none() {
+                                if let Some(mangled) = inst.methods.get(name) {
+                                    return mangled.clone();
+                                }
+                            }
+                        }
                         for inst in &self.impls {
                             if inst.trait_name.as_deref() == Some(trait_info.name.as_str())
-                                && inst.ty == concrete_ty
+                                && inst.tys.len() == 1
+                                && inst.tys[0] == concrete_ty
                             {
                                 if let Some(mangled) = inst.methods.get(name) {
                                     return mangled.clone();
@@ -2756,7 +2815,7 @@ impl AstLowering {
         let concrete = extract_first_arg_type(ty);
         if let Some(concrete_ty) = concrete {
             for inst in &self.impls {
-                if inst.trait_name.is_none() && inst.ty == concrete_ty {
+                if inst.trait_name.is_none() && inst.tys.len() == 1 && inst.tys[0] == concrete_ty {
                     if let Some(mangled) = inst.methods.get(name) {
                         return mangled.clone();
                     }

@@ -420,14 +420,18 @@ impl<'a> IndexBuilder<'a> {
                 }
                 Decl::ImplDecl {
                     trait_name,
-                    ty,
+                    tys,
                     methods,
                     span,
                     ..
                 } => {
                     let container = match trait_name {
-                        Some(trait_name) => format!("impl {} {}", trait_name, format_type(ty)),
-                        None => format!("impl {}", format_type(ty)),
+                        Some(trait_name) => format!(
+                            "impl {} {}",
+                            trait_name,
+                            tys.iter().map(format_type).collect::<Vec<_>>().join(" ")
+                        ),
+                        None => format!("impl {}", format_type(&tys[0])),
                     };
                     for m in methods {
                         let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
@@ -622,8 +626,10 @@ impl<'a> IndexBuilder<'a> {
                     self.walk_type(&m.ty, frames);
                 }
             }
-            Decl::ImplDecl { ty, methods, .. } => {
-                self.walk_type(ty, frames);
+            Decl::ImplDecl { tys, methods, .. } => {
+                for ty in tys {
+                    self.walk_type(ty, frames);
+                }
                 for m in methods {
                     if let Some(method_ty) = &m.ty {
                         self.walk_type(method_ty, frames);
@@ -1818,7 +1824,12 @@ fn format_scheme(engine: &InferEngine, scheme: &Scheme) -> String {
             format!(
                 "{} {}",
                 predicate.trait_name,
-                engine.finalize(&predicate.ty)
+                predicate
+                    .tys
+                    .iter()
+                    .map(|ty| engine.finalize(ty).to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             )
         })
         .collect::<Vec<_>>()

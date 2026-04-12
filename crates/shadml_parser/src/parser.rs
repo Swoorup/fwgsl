@@ -180,8 +180,8 @@ pub enum Decl {
     /// Trait declaration: `trait Num a where (+) : a -> a -> a ...`
     TraitDecl {
         name: String,
-        /// Type variable the trait is parameterised over.
-        var: String,
+        /// Type variables the trait is parameterised over.
+        vars: Vec<String>,
         methods: Vec<TraitMethod>,
         span: Span,
         comments: Vec<String>,
@@ -192,8 +192,8 @@ pub enum Decl {
     ImplDecl {
         /// None for standalone impls.
         trait_name: Option<String>,
-        /// The concrete type this impl is for.
-        ty: Type,
+        /// The concrete types this impl is for. Standalone impls contain one type.
+        tys: Vec<Type>,
         methods: Vec<ImplMethod>,
         span: Span,
         comments: Vec<String>,
@@ -438,7 +438,7 @@ pub enum Type {
 #[derive(Debug, Clone)]
 pub struct TypeConstraint {
     pub trait_name: String,
-    pub type_var: String,
+    pub tys: Vec<Type>,
     pub span: Span,
 }
 
@@ -1114,28 +1114,30 @@ impl Parser {
     }
 
     fn type_to_constraint(&mut self, ty: &Type) -> Option<TypeConstraint> {
-        match ty {
-            Type::App(f, arg, span) => match (f.as_ref(), arg.as_ref()) {
-                (Type::Con(trait_name, _), Type::Var(type_var, _)) => Some(TypeConstraint {
-                    trait_name: trait_name.clone(),
-                    type_var: type_var.clone(),
-                    span: *span,
-                }),
-                _ => {
-                    self.diagnostics.push(
-                        Diagnostic::error("expected trait constraint before `=>`")
-                            .with_label(Label::primary(ty.span(), "expected `TraitName typeVar`"))
-                            .with_help("write constraints like `Light a => a -> a`"),
-                    );
-                    None
+        fn flatten_type_app<'a>(ty: &'a Type, out: &mut Vec<&'a Type>) {
+            match ty {
+                Type::App(f, arg, _) => {
+                    flatten_type_app(f, out);
+                    out.push(arg);
                 }
-            },
-            Type::Paren(inner, _) => self.type_to_constraint(inner),
+                Type::Paren(inner, _) => flatten_type_app(inner, out),
+                other => out.push(other),
+            }
+        }
+
+        let mut parts = Vec::new();
+        flatten_type_app(ty, &mut parts);
+        match parts.split_first() {
+            Some((Type::Con(trait_name, _), tys)) if !tys.is_empty() => Some(TypeConstraint {
+                trait_name: trait_name.clone(),
+                tys: tys.iter().map(|ty| (*ty).clone()).collect(),
+                span: ty.span(),
+            }),
             _ => {
                 self.diagnostics.push(
                     Diagnostic::error("expected trait constraint before `=>`")
-                        .with_label(Label::primary(ty.span(), "expected `TraitName typeVar`"))
-                        .with_help("write constraints like `Light a => a -> a`"),
+                        .with_label(Label::primary(ty.span(), "expected `TraitName t1 ... tn`"))
+                        .with_help("write constraints like `Mul a b c => ...`"),
                 );
                 None
             }
@@ -2142,7 +2144,7 @@ impl Parser {
         }
     }
 
-    /// Parse `class Name var where method1 : Type ... methodN : Type`
+    /// Parse `trait Name a b c where method1 : Type ... methodN : Type`
     fn parse_trait_decl(&mut self) -> Decl {
         let start = self.current_span().start;
         self.expect(SyntaxKind::KwTrait);
@@ -2152,9 +2154,12 @@ impl Parser {
         let name = self.text_of(&name_tok).to_owned();
         self.skip_trivia();
 
-        let var_tok = self.expect(SyntaxKind::Ident);
-        let var = self.text_of(&var_tok).to_owned();
-        self.skip_trivia();
+        let mut vars = Vec::new();
+        while self.at(SyntaxKind::Ident) {
+            let tok = self.bump();
+            vars.push(self.text_of(&tok).to_owned());
+            self.skip_trivia();
+        }
 
         self.expect(SyntaxKind::KwWhere);
         self.skip_trivia();
@@ -2192,7 +2197,7 @@ impl Parser {
         let span = self.span_from(start);
         Decl::TraitDecl {
             name,
-            var,
+            vars,
             methods,
             span,
             comments: vec![],
@@ -2211,8 +2216,8 @@ impl Parser {
 
         // If `where` follows immediately, this is a standalone impl (no trait).
         // Otherwise, the first type was the trait name and we parse a second type.
-        let (trait_name, ty) = if self.at(SyntaxKind::KwWhere) {
-            (None, first_ty)
+        let (trait_name, tys) = if self.at(SyntaxKind::KwWhere) {
+            (None, vec![first_ty])
         } else {
             // first_ty should be a simple Con (the trait name)
             let tname = match &first_ty {
@@ -2226,9 +2231,12 @@ impl Parser {
                     "_unknown_".to_string()
                 }
             };
-            let second_ty = self.parse_type_atom();
-            self.skip_trivia();
-            (Some(tname), second_ty)
+            let mut tys = Vec::new();
+            while !self.at(SyntaxKind::KwWhere) && !self.at_end() && self.consume_fuel() {
+                tys.push(self.parse_type_atom());
+                self.skip_trivia();
+            }
+            (Some(tname), tys)
         };
 
         self.expect(SyntaxKind::KwWhere);
@@ -2302,7 +2310,7 @@ impl Parser {
         let span = self.span_from(start);
         Decl::ImplDecl {
             trait_name,
-            ty,
+            tys,
             methods,
             span,
             comments: vec![],
@@ -3786,7 +3794,8 @@ mod tests {
                 assert_eq!(name, "lighting");
                 assert_eq!(constraints.len(), 1);
                 assert_eq!(constraints[0].trait_name, "Light");
-                assert_eq!(constraints[0].type_var, "a");
+                assert_eq!(constraints[0].tys.len(), 1);
+                assert!(matches!(&constraints[0].tys[0], Type::Var(name, _) if name == "a"));
                 assert!(matches!(ty, Type::Arrow(_, _, _)));
             }
             other => panic!("expected TypeSig, got {:?}", other),

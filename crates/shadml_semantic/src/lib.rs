@@ -15,10 +15,10 @@ use shadml_typechecker::*;
 #[derive(Debug, Clone)]
 pub struct TraitInfo {
     pub name: String,
-    /// The type variable the trait is parameterised over.
-    pub var: String,
-    pub var_id: TyVarId,
-    /// Method signatures: method_name → type (with `var` as a free type variable).
+    /// The type variables the trait is parameterised over.
+    pub vars: Vec<String>,
+    pub var_ids: Vec<TyVarId>,
+    /// Method signatures: method_name → type (with trait vars as free type variables).
     pub methods: Vec<(String, Ty)>,
 }
 
@@ -27,8 +27,8 @@ pub struct TraitInfo {
 pub struct ImplInfo {
     /// None for standalone impls.
     pub trait_name: Option<String>,
-    /// The concrete type this impl is for.
-    pub ty: Ty,
+    /// The concrete types this impl is for. Standalone impls contain one type.
+    pub tys: Vec<Ty>,
     /// Method implementations: method_name → mangled function name.
     pub methods: HashMap<String, String>,
 }
@@ -46,6 +46,8 @@ pub struct SemanticAnalyzer {
     pub traits: HashMap<String, TraitInfo>,
     /// Trait impls.
     pub impls: Vec<ImplInfo>,
+    /// Predicates inferred while typing the current binding.
+    inferred_predicates: Vec<Predicate>,
     /// Bitfield field names: bitfield_type_name → list of field names.
     pub bitfield_field_names: HashMap<String, Vec<String>>,
 }
@@ -68,6 +70,7 @@ impl SemanticAnalyzer {
             type_aliases: HashMap::new(),
             traits: HashMap::new(),
             impls: Vec::new(),
+            inferred_predicates: Vec::new(),
             bitfield_field_names: HashMap::new(),
         }
     }
@@ -183,20 +186,25 @@ impl SemanticAnalyzer {
         // Pass 2b: collect trait declarations
         for decl in &all_decls {
             if let Decl::TraitDecl {
-                name, var, methods, ..
+                name, vars, methods, ..
             } = decl
             {
-                // Build a type variable scope seeded with the trait variable
-                let var_id = fresh_var_id(&mut self.engine);
+                let var_ids: Vec<TyVarId> = vars
+                    .iter()
+                    .map(|_| fresh_var_id(&mut self.engine))
+                    .collect();
                 let mut trait_methods = Vec::new();
                 for m in methods {
-                    let mut scope = HashMap::new();
-                    scope.insert(var.clone(), var_id);
+                    let mut scope: HashMap<String, TyVarId> = vars
+                        .iter()
+                        .cloned()
+                        .zip(var_ids.iter().copied())
+                        .collect();
                     let method_ty = self.convert_syntax_type_with_scope(&m.ty, &mut scope);
                     let scheme = Scheme::poly_with_constraints(
                         vec![Predicate {
                             trait_name: name.clone(),
-                            ty: Ty::Var(var_id),
+                            tys: var_ids.iter().copied().map(Ty::Var).collect(),
                         }],
                         scope_vars(&scope),
                         method_ty.clone(),
@@ -210,8 +218,8 @@ impl SemanticAnalyzer {
                     name.clone(),
                     TraitInfo {
                         name: name.clone(),
-                        var: var.clone(),
-                        var_id,
+                        vars: vars.clone(),
+                        var_ids,
                         methods: trait_methods,
                     },
                 );
@@ -222,14 +230,21 @@ impl SemanticAnalyzer {
         for decl in &all_decls {
             if let Decl::ImplDecl {
                 trait_name,
-                ty,
+                tys,
                 methods,
                 span,
                 ..
             } = decl
             {
-                let impl_ty_scheme = self.convert_syntax_type(ty);
-                let type_suffix = format_type_suffix(&impl_ty_scheme.ty);
+                let impl_tys: Vec<Ty> = tys
+                    .iter()
+                    .map(|ty| self.convert_syntax_type(ty).ty)
+                    .collect();
+                let type_suffix = impl_tys
+                    .iter()
+                    .map(format_type_suffix)
+                    .collect::<Vec<_>>()
+                    .join("__");
                 let mut impl_methods = HashMap::new();
                 for m in methods {
                     let mangled = mangle_instance_method(&m.name, &type_suffix);
@@ -240,11 +255,8 @@ impl SemanticAnalyzer {
                         if let Some(trait_info) = self.traits.get(tname).cloned() {
                             for (tmethod_name, tmethod_ty) in trait_info.methods {
                                 if tmethod_name == m.name {
-                                    let concrete_ty = replace_trait_var(
-                                        &tmethod_ty,
-                                        trait_info.var_id,
-                                        &impl_ty_scheme.ty,
-                                    );
+                                    let concrete_ty =
+                                        replace_trait_vars(&tmethod_ty, &trait_info.var_ids, &impl_tys);
                                     if let Some(method_ty) = &m.ty {
                                         let declared_scheme = self.convert_syntax_type(method_ty);
                                         let declared_ty = self.engine.instantiate(&declared_scheme);
@@ -268,18 +280,18 @@ impl SemanticAnalyzer {
                             let scheme = self.convert_syntax_type(method_ty);
                             let declared_ty = self.engine.instantiate(&scheme);
                             let expected_scheme = self
-                                .standalone_impl_method_scheme(&impl_ty_scheme.ty, m.params.len());
+                                .standalone_impl_method_scheme(&impl_tys[0], m.params.len());
                             let expected_ty = self.engine.instantiate(&expected_scheme);
                             self.engine.unify(&declared_ty, &expected_ty, m.span);
                             scheme
                         } else {
-                            self.standalone_impl_method_scheme(&impl_ty_scheme.ty, m.params.len())
+                            self.standalone_impl_method_scheme(&impl_tys[0], m.params.len())
                         };
                         self.env.insert(mangled.clone(), scheme);
                     }
                 }
                 if let Some(tname) = trait_name {
-                    if !impl_ty_scheme.ty.free_vars().is_empty() {
+                    if impl_tys.iter().any(|ty| !ty.free_vars().is_empty()) {
                         self.engine.diagnostics.push(
                             Diagnostic::error(format!(
                                 "Trait impl heads must be concrete: blanket impls like `impl {} ...` are not supported",
@@ -293,6 +305,17 @@ impl SemanticAnalyzer {
                     }
 
                     if let Some(trait_info) = self.traits.get(tname).cloned() {
+                        if trait_info.var_ids.len() != impl_tys.len() {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "Trait '{}' expects {} type argument(s), found {}",
+                                    tname,
+                                    trait_info.var_ids.len(),
+                                    impl_tys.len()
+                                ))
+                                .with_label(Label::primary(*span, "wrong impl head arity")),
+                            );
+                        }
                         let missing_methods: Vec<String> = trait_info
                             .methods
                             .iter()
@@ -306,7 +329,7 @@ impl SemanticAnalyzer {
                                 Diagnostic::error(format!(
                                     "Incomplete implementation of trait '{}' for type '{}': missing method(s): {}",
                                     tname,
-                                    impl_ty_scheme.ty,
+                                    format_impl_head(&impl_tys),
                                     missing_methods.join(", ")
                                 ))
                                 .with_label(Label::primary(*span, "incomplete impl"))
@@ -317,29 +340,13 @@ impl SemanticAnalyzer {
 
                     if self.impls.iter().any(|existing| {
                         existing.trait_name.as_deref() == Some(tname.as_str())
-                            && existing.ty != impl_ty_scheme.ty
-                            && impl_heads_overlap(&existing.ty, &impl_ty_scheme.ty)
-                    }) {
-                        self.engine.diagnostics.push(
-                            Diagnostic::error(format!(
-                                "Overlapping implementation of trait '{}' for type '{}'",
-                                tname, impl_ty_scheme.ty
-                            ))
-                            .with_label(Label::primary(*span, "overlapping impl"))
-                            .with_help(
-                                "make impl heads disjoint; use a distinct wrapper type or separate trait",
-                            ),
-                        );
-                    }
-
-                    if self.impls.iter().any(|existing| {
-                        existing.trait_name.as_deref() == Some(tname.as_str())
-                            && existing.ty == impl_ty_scheme.ty
+                            && existing.tys == impl_tys
                     }) {
                         self.engine.diagnostics.push(
                             Diagnostic::error(format!(
                                 "Duplicate implementation of trait '{}' for type '{}'",
-                                tname, impl_ty_scheme.ty
+                                tname,
+                                format_impl_head(&impl_tys)
                             ))
                             .with_label(Label::primary(*span, "duplicate impl"))
                             .with_help("each trait can only be implemented once per type"),
@@ -348,7 +355,7 @@ impl SemanticAnalyzer {
                 }
                 self.impls.push(ImplInfo {
                     trait_name: trait_name.clone(),
-                    ty: impl_ty_scheme.ty,
+                    tys: impl_tys,
                     methods: impl_methods,
                 });
             }
@@ -378,14 +385,21 @@ impl SemanticAnalyzer {
                 }
                 Decl::ImplDecl {
                     trait_name,
-                    ty,
+                    tys,
                     methods,
                     ..
                 } => {
                     // Type-check impl method bodies
+                    let impl_tys: Vec<Ty> = tys
+                        .iter()
+                        .map(|ty| self.convert_syntax_type(ty).ty)
+                        .collect();
                     for m in methods {
-                        let impl_ty = self.convert_syntax_type(ty);
-                        let type_suffix = format_type_suffix(&impl_ty.ty);
+                        let type_suffix = impl_tys
+                            .iter()
+                            .map(format_type_suffix)
+                            .collect::<Vec<_>>()
+                            .join("__");
                         let mangled = mangle_instance_method(&m.name, &type_suffix);
                         let scheme = if trait_name.is_some() {
                             let Some(scheme) = self.env.lookup(&mangled).cloned() else {
@@ -395,7 +409,7 @@ impl SemanticAnalyzer {
                         } else if let Some(method_ty) = &m.ty {
                             self.convert_syntax_type(method_ty)
                         } else {
-                            self.standalone_impl_method_scheme(&impl_ty.ty, m.params.len())
+                            self.standalone_impl_method_scheme(&impl_tys[0], m.params.len())
                         };
                         self.check_impl_method(
                             &m.name,
@@ -510,12 +524,13 @@ impl SemanticAnalyzer {
         let predicates = constraints
             .iter()
             .map(|constraint| {
-                let var = *scope
-                    .entry(constraint.type_var.clone())
-                    .or_insert_with(|| fresh_var_id(&mut self.engine));
                 Predicate {
                     trait_name: constraint.trait_name.clone(),
-                    ty: Ty::Var(var),
+                    tys: constraint
+                        .tys
+                        .iter()
+                        .map(|ty| self.convert_syntax_type_with_scope(ty, &mut scope))
+                        .collect(),
                 }
             })
             .collect();
@@ -646,6 +661,7 @@ impl SemanticAnalyzer {
         span: Span,
     ) {
         let mut local_env = self.env.clone();
+        let has_explicit_signature = self.env.lookup(name).is_some();
         let mut declared = self
             .env
             .lookup(name)
@@ -690,6 +706,7 @@ impl SemanticAnalyzer {
 
         // Infer body type. `where` is desugared to a local `let`.
         let body = desugar_where(body, where_binds, span);
+        let predicate_start = self.inferred_predicates.len();
         let body_ty = self.infer_expr(&body, &mut local_env, &active_constraints);
 
         // Build function type: p1 -> p2 -> ... -> body_ty
@@ -701,9 +718,46 @@ impl SemanticAnalyzer {
         // If there's a declared type, unify with it
         if let Some(qualified) = declared.take() {
             self.engine.unify(&fun_ty, &qualified.ty, span);
+            let inferred_constraints =
+                self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
+            for predicate in inferred_constraints {
+                self.engine.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "missing trait constraint `{}`",
+                        format_predicate(&predicate)
+                    ))
+                    .with_label(Label::primary(span, "trait use requires a declared constraint"))
+                    .with_help(format!(
+                        "add a type signature like `{} : {} => ...`",
+                        name,
+                        format_predicate(&predicate)
+                    )),
+                );
+            }
         } else {
+            let inferred_constraints =
+                self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
             // Add inferred type
-            let scheme = self.engine.generalize(&self.env, &fun_ty);
+            let scheme = self
+                .engine
+                .generalize_with_constraints(&self.env, &fun_ty, &inferred_constraints);
+            if has_explicit_signature {
+                self.env.insert(name.to_string(), scheme);
+                return;
+            }
+            if !scheme.constraints.is_empty() {
+                self.engine.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "top-level binding `{}` requires an explicit constrained type signature",
+                        name
+                    ))
+                    .with_label(Label::primary(
+                        span,
+                        "constrained top-level binding needs a type signature",
+                    ))
+                    .with_help(format!("write `{} : {} => ...`", name, format_constraints(&scheme.constraints))),
+                );
+            }
             self.env.insert(name.to_string(), scheme);
         }
     }
@@ -749,6 +803,7 @@ impl SemanticAnalyzer {
             }
         }
 
+        let predicate_start = self.inferred_predicates.len();
         let body_ty = self.infer_expr(body, &mut local_env, &active_constraints);
 
         let mut fun_ty = body_ty;
@@ -757,6 +812,96 @@ impl SemanticAnalyzer {
         }
 
         self.engine.unify(&fun_ty, &declared.ty, span);
+        let inferred_constraints =
+            self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
+        for predicate in inferred_constraints {
+            self.engine.diagnostics.push(
+                Diagnostic::error(format!(
+                    "missing trait constraint `{}`",
+                    format_predicate(&predicate)
+                ))
+                .with_label(Label::primary(span, "trait use requires a declared constraint"))
+                .with_help("add the corresponding constraint to the method signature"),
+            );
+        }
+    }
+
+    fn resolve_inferred_predicates(
+        &mut self,
+        start: usize,
+        active_constraints: &[Predicate],
+        span: Span,
+    ) -> Vec<Predicate> {
+        let pending: Vec<Predicate> = self.inferred_predicates.drain(start..).collect();
+        let mut retained = Vec::new();
+        let subst = self.engine.subst.clone();
+        for predicate in pending.into_iter().map(|predicate| predicate.apply_subst(&subst)) {
+            self.try_improve_predicate(&predicate, span);
+            let predicate = predicate.apply_subst(&self.engine.subst);
+            if retained.iter().any(|existing| existing == &predicate) {
+                continue;
+            }
+            if active_constraints.iter().any(|active| {
+                active.apply_subst(&self.engine.subst) == predicate
+            }) {
+                continue;
+            }
+            if predicate.tys.iter().all(|ty| ty.free_vars().is_empty()) {
+                if self.has_impl_for_predicate(&predicate) {
+                    continue;
+                }
+                self.engine.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "type `{}` does not implement trait `{}`",
+                        format_impl_head(&predicate.tys),
+                        predicate.trait_name
+                    ))
+                    .with_label(Label::primary(span, "missing trait implementation"))
+                    .with_help(format!(
+                        "define `impl {} {} where ...`",
+                        predicate.trait_name,
+                        format_impl_head(&predicate.tys)
+                    )),
+                );
+                continue;
+            }
+            retained.push(predicate);
+        }
+        retained
+    }
+
+    fn has_impl_for_predicate(&self, predicate: &Predicate) -> bool {
+        self.impls.iter().any(|inst| {
+            inst.trait_name.as_deref() == Some(predicate.trait_name.as_str())
+                && inst.tys == predicate.tys
+        }) || builtin_trait_impl_exists(predicate)
+    }
+
+    fn try_improve_predicate(&mut self, predicate: &Predicate, span: Span) {
+        let predicate = predicate.apply_subst(&self.engine.subst);
+
+        if predicate.tys.iter().any(|ty| ty.free_vars().is_empty()) {
+            let candidates: Vec<Vec<Ty>> = self
+                .impls
+                .iter()
+                .filter(|inst| inst.trait_name.as_deref() == Some(predicate.trait_name.as_str()))
+                .filter(|inst| inst.tys.len() == predicate.tys.len())
+                .filter(|inst| predicate_matches_head(&predicate, &inst.tys))
+                .map(|inst| inst.tys.clone())
+                .collect();
+            if candidates.len() == 1 {
+                for (actual, expected) in predicate.tys.iter().zip(candidates[0].iter()) {
+                    self.engine.unify(actual, expected, span);
+                }
+                return;
+            }
+        }
+
+        if let Some(head) = builtin_head_for_predicate(&predicate) {
+            for (actual, expected) in predicate.tys.iter().zip(head.iter()) {
+                self.engine.unify(actual, expected, span);
+            }
+        }
     }
 
     fn bind_pattern(&mut self, pat: &Pat, ty: &Ty, env: &mut TypeEnv) {
@@ -887,7 +1032,10 @@ impl SemanticAnalyzer {
                     return Ty::Error;
                 }
                 if let Some(scheme) = env.lookup(name) {
-                    self.engine.instantiate(scheme)
+                    let qualified = self.engine.instantiate_qualified(scheme);
+                    self.inferred_predicates
+                        .extend(qualified.constraints.iter().cloned());
+                    qualified.ty
                 } else {
                     self.engine.diagnostics.push(
                         Diagnostic::error(format!("Unbound variable: {}", name))
@@ -916,26 +1064,6 @@ impl SemanticAnalyzer {
             }
 
             Expr::App(func, arg, span) => {
-                if let Some((trait_name, method_ty)) = self.lookup_trait_method_expr(func) {
-                    if should_enforce_explicit_trait_constraint(&trait_name) {
-                        let arg_ty = self.infer_expr(arg, env, active_constraints);
-                        self.require_trait_receiver(
-                            &trait_name,
-                            &arg_ty,
-                            active_constraints,
-                            *span,
-                        );
-                        let method_ty = replace_trait_receiver(
-                            &method_ty,
-                            self.trait_var_id(&trait_name),
-                            &arg_ty,
-                        );
-                        let ret_ty = self.engine.fresh_var();
-                        let expected = Ty::arrow(arg_ty, ret_ty.clone());
-                        self.engine.unify(&method_ty, &expected, *span);
-                        return ret_ty;
-                    }
-                }
                 let func_ty = self.infer_expr(func, env, active_constraints);
                 // Flatten tuple arguments: f (a, b, c) => f a b c
                 if let Expr::Tuple(elems, _) = arg.as_ref() {
@@ -960,13 +1088,11 @@ impl SemanticAnalyzer {
 
             Expr::Infix(lhs, op, rhs, span) => {
                 let op_ty = if let Some(scheme) = env.lookup(op) {
-                    self.engine.instantiate(scheme)
-                } else if matches!(
-                    op.as_str(),
-                    "+" | "-" | "*" | "/" | "%" | "&" | "^" | "|" | "<<" | ">>"
-                ) {
-                    // Built-in operator not declared in prelude (e.g. `>>`) —
-                    // give it the generic type `a -> a -> a`
+                    let qualified = self.engine.instantiate_qualified(scheme);
+                    self.inferred_predicates
+                        .extend(qualified.constraints.iter().cloned());
+                    qualified.ty
+                } else if op == ">>" {
                     let a = self.engine.fresh_var();
                     Ty::arrow(a.clone(), Ty::arrow(a.clone(), a))
                 } else {
@@ -1007,8 +1133,13 @@ impl SemanticAnalyzer {
             Expr::Let(binds, body, _span) => {
                 let mut local_env = env.clone();
                 for (name, expr) in binds {
+                    let predicate_start = self.inferred_predicates.len();
                     let ty = self.infer_expr(expr, &mut local_env, active_constraints);
-                    let scheme = self.engine.generalize(&local_env, &ty);
+                    let inferred_constraints =
+                        self.resolve_inferred_predicates(predicate_start, active_constraints, expr.span());
+                    let scheme = self
+                        .engine
+                        .generalize_with_constraints(&local_env, &ty, &inferred_constraints);
                     local_env.insert(name.clone(), scheme);
                 }
                 self.infer_expr(body, &mut local_env, active_constraints)
@@ -1118,30 +1249,13 @@ impl SemanticAnalyzer {
                     }
                 }
 
-                if let Some((trait_name, method_ty)) = self.lookup_trait_method_name(field) {
-                    if should_enforce_explicit_trait_constraint(&trait_name) {
-                        self.require_trait_receiver(
-                            &trait_name,
-                            &base_ty,
-                            active_constraints,
-                            *span,
-                        );
-                        let func_ty = replace_trait_receiver(
-                            &method_ty,
-                            self.trait_var_id(&trait_name),
-                            &base_ty,
-                        );
-                        let ret_ty = self.engine.fresh_var();
-                        let expected = Ty::arrow(base_ty.clone(), ret_ty.clone());
-                        self.engine.unify(&func_ty, &expected, *span);
-                        return ret_ty;
-                    }
-                }
-
                 // Method-call syntax sugar: `x.method` → `method x`
                 if let Some(name) = resolve_dot_call_target(env, &self.impls, field, &base_ty) {
                     if let Some(scheme) = env.lookup(&name) {
-                        let func_ty = self.engine.instantiate(scheme);
+                        let qualified = self.engine.instantiate_qualified(scheme);
+                        self.inferred_predicates
+                            .extend(qualified.constraints.iter().cloned());
+                        let func_ty = qualified.ty;
                         let ret_ty = self.engine.fresh_var();
                         let expected = Ty::arrow(base_ty.clone(), ret_ty.clone());
                         self.engine.unify(&func_ty, &expected, *span);
@@ -1358,74 +1472,6 @@ impl SemanticAnalyzer {
         &self.engine.diagnostics
     }
 
-    fn lookup_trait_method_name(&self, name: &str) -> Option<(String, Ty)> {
-        self.traits.values().find_map(|trait_info| {
-            trait_info
-                .methods
-                .iter()
-                .find_map(|(method_name, method_ty)| {
-                    (method_name == name).then_some((trait_info.name.clone(), method_ty.clone()))
-                })
-        })
-    }
-
-    fn lookup_trait_method_expr(&self, expr: &Expr) -> Option<(String, Ty)> {
-        match expr {
-            Expr::Var(name, _) => self.lookup_trait_method_name(name),
-            Expr::Paren(inner, _) => self.lookup_trait_method_expr(inner),
-            _ => None,
-        }
-    }
-
-    fn trait_var_id(&self, trait_name: &str) -> TyVarId {
-        self.traits
-            .get(trait_name)
-            .map(|info| info.var_id)
-            .expect("trait should be registered before use")
-    }
-
-    fn require_trait_receiver(
-        &mut self,
-        trait_name: &str,
-        receiver_ty: &Ty,
-        active_constraints: &[Predicate],
-        span: Span,
-    ) {
-        let receiver_ty = self.engine.finalize(receiver_ty);
-        if active_constraints
-            .iter()
-            .any(|predicate| predicate.trait_name == trait_name && predicate.ty == receiver_ty)
-        {
-            return;
-        }
-        if self
-            .impls
-            .iter()
-            .any(|inst| inst.trait_name.as_deref() == Some(trait_name) && inst.ty == receiver_ty)
-        {
-            return;
-        }
-
-        let diagnostic = if receiver_ty.free_vars().is_empty() {
-            Diagnostic::error(format!(
-                "type `{}` does not implement trait `{}`",
-                receiver_ty, trait_name
-            ))
-            .with_label(Label::primary(span, "missing trait implementation"))
-            .with_help(format!(
-                "define `impl {} {} where ...`",
-                trait_name, receiver_ty
-            ))
-        } else {
-            Diagnostic::error(format!("missing trait constraint `{}`", trait_name))
-                .with_label(Label::primary(span, "trait method requires a constraint"))
-                .with_help(format!(
-                    "add a type signature like `name : {} {} => ...`",
-                    trait_name, receiver_ty
-                ))
-        };
-        self.engine.diagnostics.push(diagnostic);
-    }
 }
 
 fn desugar_where(body: &Expr, where_binds: &[(String, Expr)], span: Span) -> Expr {
@@ -1485,7 +1531,7 @@ pub fn mangle_instance_method(method_name: &str, type_suffix: &str) -> String {
 fn resolve_impl_method_name(impls: &[ImplInfo], name: &str, receiver_ty: &Ty) -> Option<String> {
     impls
         .iter()
-        .filter(|inst| inst.ty == *receiver_ty)
+        .filter(|inst| inst.tys.len() == 1 && inst.tys[0] == *receiver_ty)
         .find_map(|inst| inst.methods.get(name).cloned())
 }
 
@@ -1504,12 +1550,6 @@ fn resolve_unique_standalone_impl_method_name(impls: &[ImplInfo], name: &str) ->
     matches.next().is_none().then_some(first)
 }
 
-fn impl_heads_overlap(a: &Ty, b: &Ty) -> bool {
-    let mut engine = InferEngine::new();
-    engine.unify(a, b, Span::new(0, 0));
-    !engine.diagnostics.has_errors()
-}
-
 /// Resolve the callable target for dot-call syntax.
 ///
 /// Matching impl methods win when the receiver type is already concrete.
@@ -1526,54 +1566,236 @@ pub fn resolve_dot_call_target(
         .or_else(|| env.lookup(name).map(|_| name.to_string()))
 }
 
-/// Replace all `Ty::Var(_)` occurrences in a type with a concrete type.
-/// Used for building concrete instance method types from trait method types
-/// that have a single polymorphic type variable (the class parameter).
-pub fn replace_trait_var(ty: &Ty, trait_var: TyVarId, replacement: &Ty) -> Ty {
+fn format_predicate(predicate: &Predicate) -> String {
+    format!("{} {}", predicate.trait_name, format_impl_head(&predicate.tys))
+}
+
+fn format_constraints(predicates: &[Predicate]) -> String {
+    predicates
+        .iter()
+        .map(format_predicate)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_impl_head(tys: &[Ty]) -> String {
+    tys.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn predicate_matches_head(predicate: &Predicate, head: &[Ty]) -> bool {
+    predicate.tys.len() == head.len()
+        && predicate.tys.iter().zip(head.iter()).all(|(actual, expected)| {
+            let actual = normalize_type_aliases(actual);
+            let expected = normalize_type_aliases(expected);
+            actual == expected || !actual.free_vars().is_empty()
+        })
+}
+
+fn builtin_trait_impl_exists(predicate: &Predicate) -> bool {
+    use shadml_typechecker::ty_name;
+
+    fn is_scalar_numeric(ty: &Ty) -> bool {
+        matches!(
+            ty,
+            Ty::Con(name)
+                if matches!(name.as_str(), ty_name::F32 | ty_name::I32 | ty_name::U32)
+        )
+    }
+
+    fn same_vec_elem_dims(a: &Ty, b: &Ty) -> bool {
+        extract_vec_type(a) == extract_vec_type(b)
+    }
+
+    fn same_mat_dims(a: &Ty, b: &Ty) -> bool {
+        extract_mat_type(a) == extract_mat_type(b)
+    }
+
+    match (predicate.trait_name.as_str(), predicate.tys.as_slice()) {
+        ("Neg", [a]) | ("BitNot", [a]) => {
+            is_scalar_numeric(a) || extract_vec_type(a).is_some() || extract_mat_type(a).is_some()
+        }
+        ("Add", [a, b, c])
+        | ("Sub", [a, b, c])
+        | ("Div", [a, b, c])
+        | ("Mod", [a, b, c])
+        | ("BitAnd", [a, b, c])
+        | ("BitXor", [a, b, c]) => {
+            (a == b && b == c && (is_scalar_numeric(a) || extract_vec_type(a).is_some()))
+                || (predicate.trait_name == "Div"
+                    && a == b
+                    && b == c
+                    && extract_mat_type(a).is_some())
+        }
+        ("Mul", [a, b, c]) => {
+            (a == b && b == c
+                && (is_scalar_numeric(a)
+                    || extract_vec_type(a).is_some()
+                    || extract_mat_type(a).is_some()))
+                || (same_vec_elem_dims(a, c) && is_scalar_numeric(b))
+                || (same_vec_elem_dims(b, c) && is_scalar_numeric(a))
+                || (same_mat_dims(a, c) && is_scalar_numeric(b))
+                || (same_mat_dims(b, c) && is_scalar_numeric(a))
+                || matches!(
+                    (extract_mat_type(a), extract_vec_type(b), extract_vec_type(c)),
+                    (Some((rows, cols, elem_a)), Some((cols_b, elem_b)), Some((rows_c, elem_c)))
+                        if cols == cols_b && rows == rows_c && elem_a == elem_b && elem_b == elem_c
+                )
+        }
+        ("Shl", [a, b, c]) | ("Shr", [a, b, c]) => {
+            a == c && is_scalar_numeric(a) && is_scalar_numeric(b)
+        }
+        _ => false,
+    }
+}
+
+fn builtin_head_for_predicate(predicate: &Predicate) -> Option<Vec<Ty>> {
+    use shadml_typechecker::ty_name;
+
+    fn scalar_numeric_name(ty: &Ty) -> Option<&str> {
+        match ty {
+            Ty::Con(name) if matches!(name.as_str(), ty_name::F32 | ty_name::I32 | ty_name::U32) => {
+                Some(name.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn same_or_var(a: &Ty, b: &Ty) -> bool {
+        normalize_type_aliases(a) == normalize_type_aliases(b)
+            || !a.free_vars().is_empty()
+            || !b.free_vars().is_empty()
+    }
+
+    fn first_concrete(tys: &[&Ty]) -> Option<Ty> {
+        tys.iter()
+            .find(|ty| ty.free_vars().is_empty())
+            .map(|ty| normalize_type_aliases(ty))
+    }
+
+    if !predicate.tys.iter().any(|ty| ty.free_vars().is_empty()) {
+        return None;
+    }
+
+    match (predicate.trait_name.as_str(), predicate.tys.as_slice()) {
+        ("Add", [a, b, c])
+        | ("Sub", [a, b, c])
+        | ("Div", [a, b, c])
+        | ("Mod", [a, b, c])
+        | ("BitAnd", [a, b, c])
+        | ("BitXor", [a, b, c]) => {
+            for candidate in [Ty::f32(), Ty::i32(), Ty::u32()] {
+                if same_or_var(a, &candidate) && same_or_var(b, &candidate) && same_or_var(c, &candidate) {
+                    return Some(vec![candidate.clone(), candidate.clone(), candidate]);
+                }
+            }
+            if same_or_var(a, b) && same_or_var(b, c) {
+                if let Some(vec_ty) = a
+                    .free_vars()
+                    .is_empty()
+                    .then(|| normalize_type_aliases(a))
+                    .or_else(|| b.free_vars().is_empty().then(|| normalize_type_aliases(b)))
+                    .or_else(|| c.free_vars().is_empty().then(|| normalize_type_aliases(c)))
+                {
+                    if extract_vec_type(&vec_ty).is_some() || extract_mat_type(&vec_ty).is_some() {
+                        return Some(vec![vec_ty.clone(), vec_ty.clone(), vec_ty]);
+                    }
+                }
+            }
+            None
+        }
+        ("Mul", [a, b, c]) => {
+            for candidate in [Ty::f32(), Ty::i32(), Ty::u32()] {
+                if same_or_var(a, &candidate) && same_or_var(b, &candidate) && same_or_var(c, &candidate) {
+                    return Some(vec![candidate.clone(), candidate.clone(), candidate]);
+                }
+            }
+            if let Some(lhs) = first_concrete(&[a, b, c]) {
+                if same_or_var(&lhs, b) && same_or_var(&lhs, c) && (extract_vec_type(&lhs).is_some() || extract_mat_type(&lhs).is_some()) {
+                    return Some(vec![lhs.clone(), lhs.clone(), lhs]);
+                }
+            }
+            if let Some((_, elem)) = extract_vec_type(a) {
+                if scalar_numeric_name(b) == scalar_numeric_name(&elem) && same_or_var(a, c) {
+                    return Some(vec![normalize_type_aliases(a), elem.clone(), normalize_type_aliases(c)]);
+                }
+            }
+            if let Some((_, elem)) = extract_vec_type(b) {
+                if scalar_numeric_name(a) == scalar_numeric_name(&elem) && same_or_var(b, c) {
+                    return Some(vec![elem.clone(), normalize_type_aliases(b), normalize_type_aliases(c)]);
+                }
+            }
+            if let Some((_, _, elem)) = extract_mat_type(a) {
+                if scalar_numeric_name(b) == scalar_numeric_name(&elem) && same_or_var(a, c) {
+                    return Some(vec![normalize_type_aliases(a), elem.clone(), normalize_type_aliases(c)]);
+                }
+            }
+            if let Some((_, _, elem)) = extract_mat_type(b) {
+                if scalar_numeric_name(a) == scalar_numeric_name(&elem) && same_or_var(b, c) {
+                    return Some(vec![elem.clone(), normalize_type_aliases(b), normalize_type_aliases(c)]);
+                }
+            }
+            if let (Some((rows, cols, elem_a)), Some((cols_b, elem_b)), Some((rows_c, elem_c))) =
+                (extract_mat_type(a), extract_vec_type(b), extract_vec_type(c))
+            {
+                if cols == cols_b && rows == rows_c && elem_a == elem_b && elem_b == elem_c {
+                    return Some(vec![normalize_type_aliases(a), normalize_type_aliases(b), normalize_type_aliases(c)]);
+                }
+            }
+            None
+        }
+        ("Shl", [a, b, c]) | ("Shr", [a, b, c]) => {
+            for lhs in [Ty::i32(), Ty::u32()] {
+                for rhs in [Ty::i32(), Ty::u32()] {
+                    if same_or_var(a, &lhs) && same_or_var(b, &rhs) && same_or_var(c, &lhs) {
+                        return Some(vec![lhs.clone(), rhs.clone(), lhs]);
+                    }
+                }
+            }
+            None
+        }
+        ("Neg", [a]) | ("BitNot", [a]) => {
+            for candidate in [Ty::f32(), Ty::i32(), Ty::u32()] {
+                if same_or_var(a, &candidate) {
+                    return Some(vec![candidate]);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+pub fn replace_trait_vars(ty: &Ty, trait_vars: &[TyVarId], replacements: &[Ty]) -> Ty {
     match ty {
-        Ty::Var(var) if *var == trait_var => replacement.clone(),
-        Ty::Var(_) => ty.clone(),
+        Ty::Var(var) => trait_vars
+            .iter()
+            .position(|trait_var| trait_var == var)
+            .and_then(|idx| replacements.get(idx))
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
         Ty::Con(_) | Ty::Nat(_) | Ty::Error => ty.clone(),
         Ty::App(f, a) => Ty::App(
-            Box::new(replace_trait_var(f, trait_var, replacement)),
-            Box::new(replace_trait_var(a, trait_var, replacement)),
+            Box::new(replace_trait_vars(f, trait_vars, replacements)),
+            Box::new(replace_trait_vars(a, trait_vars, replacements)),
         ),
         Ty::Arrow(a, b) => Ty::Arrow(
-            Box::new(replace_trait_var(a, trait_var, replacement)),
-            Box::new(replace_trait_var(b, trait_var, replacement)),
+            Box::new(replace_trait_vars(a, trait_vars, replacements)),
+            Box::new(replace_trait_vars(b, trait_vars, replacements)),
         ),
         Ty::Tuple(elems) => Ty::Tuple(
             elems
                 .iter()
-                .map(|e| replace_trait_var(e, trait_var, replacement))
+                .map(|e| replace_trait_vars(e, trait_vars, replacements))
                 .collect(),
         ),
         Ty::Forall(vars, body) => Ty::Forall(
             vars.clone(),
-            Box::new(replace_trait_var(body, trait_var, replacement)),
+            Box::new(replace_trait_vars(body, trait_vars, replacements)),
         ),
     }
-}
-
-pub fn replace_trait_receiver(ty: &Ty, trait_var: TyVarId, receiver_ty: &Ty) -> Ty {
-    replace_trait_var(ty, trait_var, receiver_ty)
-}
-
-fn should_enforce_explicit_trait_constraint(trait_name: &str) -> bool {
-    !matches!(
-        trait_name,
-        "Add"
-            | "Sub"
-            | "Mul"
-            | "Div"
-            | "Mod"
-            | "BitAnd"
-            | "BitXor"
-            | "Shl"
-            | "Shr"
-            | "BitNot"
-            | "Neg"
-    )
 }
 
 fn fresh_var_id(engine: &mut InferEngine) -> TyVarId {
@@ -1640,6 +1862,26 @@ pub fn extract_vec_type(ty: &Ty) -> Option<(u8, Ty)> {
             if let (Ty::Con(name), Ty::Nat(n)) = (con.as_ref(), nat.as_ref()) {
                 if name == ty_name::VEC {
                     return Some((*n as u8, scalar.as_ref().clone()));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract Mat type info: Mat r c T -> Some((r, c, T))
+pub fn extract_mat_type(ty: &Ty) -> Option<(u8, u8, Ty)> {
+    let ty = normalize_type_aliases(ty);
+
+    if let Ty::App(f, scalar) = &ty {
+        if let Ty::App(g, cols) = f.as_ref() {
+            if let Ty::App(con, rows) = g.as_ref() {
+                if let (Ty::Con(name), Ty::Nat(r), Ty::Nat(c)) =
+                    (con.as_ref(), rows.as_ref(), cols.as_ref())
+                {
+                    if name == ty_name::MAT {
+                        return Some((*r as u8, *c as u8, scalar.as_ref().clone()));
+                    }
                 }
             }
         }
@@ -1874,7 +2116,7 @@ mod tests {
         let mut program = Program {
             decls: vec![Decl::ImplDecl {
                 trait_name: None,
-                ty: Type::Con("F32".into(), span()),
+                tys: vec![Type::Con("F32".into(), span())],
                 methods: vec![ImplMethod {
                     name: "half".into(),
                     ty: Some(Type::Arrow(
@@ -1939,7 +2181,7 @@ mod tests {
         let mut program = Program {
             decls: vec![Decl::ImplDecl {
                 trait_name: None,
-                ty: Type::Con("ParticleState".into(), span()),
+                tys: vec![Type::Con("ParticleState".into(), span())],
                 methods: vec![ImplMethod {
                     name: "sex".into(),
                     ty: Some(Type::Arrow(
@@ -2018,7 +2260,7 @@ mod tests {
             decls: vec![
                 Decl::ImplDecl {
                     trait_name: None,
-                    ty: Type::Con("F32".into(), span()),
+                    tys: vec![Type::Con("F32".into(), span())],
                     methods: vec![ImplMethod {
                         name: "half".into(),
                         ty: Some(Type::Arrow(
@@ -2110,7 +2352,7 @@ f particle = match particle
             decls: vec![
                 Decl::ImplDecl {
                     trait_name: None,
-                    ty: Type::Con("F32".into(), span()),
+                    tys: vec![Type::Con("F32".into(), span())],
                     methods: vec![ImplMethod {
                         name: "half".into(),
                         ty: Some(Type::Arrow(
@@ -2375,9 +2617,10 @@ impl Convert (Vec<3, F32>) where
         sa.analyze(&program);
 
         assert!(sa.has_errors());
-        assert!(sa.diagnostics().iter().any(|diag| diag
-            .message
-            .contains("Overlapping implementation of trait 'Convert'")));
+        assert!(sa.diagnostics().iter().any(|diag| {
+            diag.message.contains("Trait impl heads must be concrete")
+                && diag.message.contains("blanket impls")
+        }));
     }
 
     #[test]

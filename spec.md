@@ -289,14 +289,16 @@ Trait-constrained generic functions use `=>` before the main type:
 lighting : Light a => a -> Vec<3, F32> -> Vec<3, F32>
 ```
 
-When a function body uses trait methods on a type variable, the corresponding
-constraint must be declared explicitly. Unconstrained uses are rejected.
+The constraint head may contain multiple type arguments:
 
-Current implementation note: this explicit-constraint check is applied to
-user/non-operator trait methods. Built-in operator traits (`Add`, `Sub`,
-`Mul`, `Div`, `Mod`, `BitAnd`, `BitXor`, `Shl`, `Shr`, `BitNot`, `Neg`)
-still use the existing operator/native lowering path so built-in forms such as
-vector negation continue to work without the new diagnostic.
+```
+scale : Mul (Vec 3 F32) F32 (Vec 3 F32) => Vec 3 F32 -> F32 -> Vec 3 F32
+```
+
+Trait-origin calls participate in ordinary type inference. If a top-level
+binding generalizes to a constrained type, the binding must carry an explicit
+type signature spelling out those constraints. Local `let` / `where` bindings
+may retain inferred constrained types without an explicit signature.
 
 ### 4.2 Function Declarations
 
@@ -763,7 +765,7 @@ a.collapse      -- desugars to: collapse a
 
 Any in-scope callable may be used with dot syntax. If a matching `impl` provides the method for the resolved receiver type, that impl method takes priority over a plain function with the same name.
 
-Dot syntax is defined as **receiver-first call sugar**, not as a separate dispatch mechanism. This is important for future trait evolution: if shadml adopts multi-parameter operator or method traits, expressions such as `x.method y` will still desugar to `method x y`, and ordinary type inference / constraint solving will resolve the call. Dot syntax itself does not privilege receiver-only lookup beyond the surface-level priority rules below.
+Dot syntax is defined as **receiver-first call sugar**, not as a separate dispatch mechanism. This remains true with multi-parameter traits: expressions such as `x.method y` desugar to `method x y`, and ordinary type inference / constraint solving resolves the call. Dot syntax itself does not privilege receiver-only lookup beyond the surface-level priority rules below.
 
 Priority: **swizzle** > **matching impl method** > **in-scope function call** > **struct field access**.
 
@@ -1018,7 +1020,7 @@ data Point = Point { x : F32, y : F32 }
 ### 9.1 Trait Declaration
 
 ```
-trait TraitName typeVar where
+trait TraitName t1 ... tn where
   methodName : type
   ...
 ```
@@ -1026,15 +1028,15 @@ trait TraitName typeVar where
 Traits define interfaces with method signatures:
 
 ```
-trait Add a where
-  (+) : a -> a -> a
+trait Add a b c where
+  (+) : a -> b -> c
 ```
 
 ### 9.2 Trait Implementation
 
 ```
-impl TraitName ConcreteType where
-  methodName : ConcreteType -> ...
+impl TraitName T1 ... Tn where
+  methodName : T1 -> ...
   methodName args = body
   ...
 ```
@@ -1042,7 +1044,7 @@ impl TraitName ConcreteType where
 Example:
 
 ```
-impl Add Fp64 where
+impl Add Fp64 Fp64 Fp64 where
   (+) a b =
     let s = twoSum a.high b.high
     in quickTwoSum (s.high, s.low + a.low + b.low)
@@ -1072,14 +1074,14 @@ Impl-local method type signatures are optional, but when present they are checke
 For trait `impl` blocks, the implementation must define every method declared
 by the trait. Omitting any required method is a compile-time error.
 
-For a given trait and concrete type, at most one trait impl is allowed. Writing
-two `impl Trait Type where ...` blocks for the same pair is a compile-time
-error.
+For a given trait and concrete impl head, at most one trait impl is allowed.
+Writing two `impl Trait T1 ... Tn where ...` blocks for the same full head is a
+compile-time error.
 
-Trait impl selection is exact-match only. The language does not currently
-support trait impl specialization, blanket impls, or overlapping impls. Generic
-function specialization during lowering is a separate mechanism and does not
-affect trait impl selection.
+Trait impl selection is exact-match only over the **full impl head**. The
+language does not currently support trait impl specialization, blanket impls,
+or overlapping impls. Generic function specialization during lowering is a
+separate mechanism and does not affect trait impl selection.
 
 Concretely, a trait impl head may not contain free type variables. For example,
 this is rejected:
@@ -1104,12 +1106,12 @@ Trait impl heads must be concrete: blanket impls like `impl Convert ...` are not
 Operators on primitive types (I32, U32, F32) use native WGSL operators. Operators on user-defined types dispatch through trait implementations:
 
 ```
-impl Add Fp64 where
+impl Add Fp64 Fp64 Fp64 where
   (+) a b = ...
 
 -- Now x + y where x, y : Fp64 calls the trait method
 
-impl BitAnd Mask where
+impl BitAnd Mask Mask Mask where
   (&) a b = Mask { bits = a.bits & b.bits }
 
 -- Now a & b where a, b : Mask calls bitand_Mask
@@ -1127,7 +1129,8 @@ impl Neg Wrapper where
 
 The operator method syntax uses parenthesized operator names: `(+)`, `(-)`, `(*)`, `(&)`, `(^)`, `(<<)`, etc. Non-operator trait methods like `shr`, `bitnot`, and `negate` use plain names.
 
-**Current language status:** the working implementation models these operator traits as **single-parameter homogeneous traits**. That means the trait form can directly express operators whose two operands and result have the same type, but it does **not** yet provide a principled language-level account of heterogeneous operators such as:
+The working implementation models binary operator traits as **multi-parameter
+traits**. This allows the language to express heterogeneous relations such as:
 
 ```
 Vec<n, a> * a -> Vec<n, a>
@@ -1135,51 +1138,63 @@ a * Vec<n, a> -> Vec<n, a>
 Mat<r, c, a> * Vec<c, a> -> Vec<r, a>
 ```
 
-WGSL supports several such heterogeneous arithmetic forms, but shadml should not specify them merely as backend magic. The intended direction is to extend traits so operators can be described coherently at the language level first, and only then mapped to builtin / intrinsic lowering.
+WGSL supports several such heterogeneous arithmetic forms, but shadml
+describes them at the trait level first and only then lowers resolved builtin
+cases to WGSL operators or helper expansion.
 
-One plausible future direction is a multi-parameter form in the spirit of:
+The operator traits have the shape:
 
 ```
-trait Mul a b c where
-  (*) : a -> b -> c
+trait Add a b c where (+) : a -> b -> c
+trait Sub a b c where (-) : a -> b -> c
+trait Mul a b c where (*) : a -> b -> c
+trait Div a b c where (/) : a -> b -> c
+trait Mod a b c where (%) : a -> b -> c
+trait BitAnd a b c where (&) : a -> b -> c
+trait BitXor a b c where (^) : a -> b -> c
+trait Shl a b c where (<<) : a -> b -> c
+trait Shr a b c where shr : a -> b -> c
 ```
-
-This is a **design direction**, not yet part of the implemented language.
 
 ### 9.5 Dispatch Mechanism
 
-Generic functions that use non-operator trait methods must declare an explicit
-constraint:
+Generic functions that use trait-dispatched operations may infer predicates
+during expression typing. For example:
+
+```
+add x y = x + y
+```
+
+infers a constrained type in the shape:
+
+```
+add : Add a b c => a -> b -> c
+```
+
+For top-level bindings, such constrained types must be written explicitly:
+
+```
+add : Add a b c => a -> b -> c
+add x y = x + y
+```
+
+The same rule applies to ordinary trait methods:
 
 ```
 lighting : Light a => a -> Vec<3, F32> -> Vec<3, F32>
-lighting light worldPos =
-  position light - worldPos
+lighting light = position light
 ```
 
-Omitting the constraint is a type error:
-
-```
-lighting : a -> Vec<3, F32> -> Vec<3, F32>   -- rejected
-```
-
-Current implementation note: the explicit-constraint enforcement above does
-not yet apply to the built-in operator traits (`Add`, `Sub`, `Mul`, `Div`,
-`Mod`, `BitAnd`, `BitXor`, `Shl`, `Shr`, `BitNot`, `Neg`). Those operators
-continue to resolve through the existing WGSL/native operator path in places,
-which preserves behavior such as vector negation. This is transitional
-implementation behavior rather than the final intended language design.
+Omitting the constraint on a constrained top-level binding is a type error.
+Local `let` / `where` bindings may retain inferred constrained schemes without
+an explicit signature in the current design.
 
 Trait dispatch is **fully static** — no vtables or runtime dispatch. Impl methods are compiled as regular functions with mangled names (e.g., `add_Fp64`). At trait resolution time, `Var(method)` is rewritten to `Var(mangled_name)` based on the resolved type of the operands.
 
-Trait impl resolution in the current implementation uses the fully resolved
-concrete receiver type and requires an exact match on the impl head. There is
-no partial-ordering rule between impls because specialized or overlapping
-trait impls are not part of the current language.
-
-If shadml adopts multi-parameter traits, the same non-overlapping principle
-should continue to apply to the **full impl head**, not just the receiver
-position.
+Trait impl resolution uses the fully resolved concrete **full impl head** and
+requires an exact match. There is no partial-ordering rule between impls
+because specialized or overlapping trait impls are not part of the current
+language.
 
 If two impl heads for the same trait would both match the same concrete type,
 the program is rejected with a diagnostic in the spirit of:
@@ -1511,34 +1526,6 @@ data Pair a b = Pair a b
 
 **Arithmetic:**
 ```
-trait Add a where (+) : a -> a -> a
-trait Sub a where (-) : a -> a -> a
-trait Mul a where (*) : a -> a -> a
-trait Div a where (/) : a -> a -> a
-trait Mod a where (%) : a -> a -> a
-```
-
-**Bitwise:**
-```
-trait BitAnd a where (&) : a -> a -> a
-trait BitXor a where (^) : a -> a -> a
-trait Shl a where (<<) : a -> a -> a
-trait Shr a where shr : a -> a -> a
-trait BitNot a where bitnot : a -> a
-trait Neg a where negate : a -> a
-```
-
-These are the **current prelude-facing homogeneous forms**.
-
-They are sufficient for same-type operators and unary operators, but they do
-not yet express heterogeneous numeric relationships such as vector-scalar,
-scalar-vector, matrix-scalar, or matrix-vector arithmetic in a language-native
-way.
-
-The intended evolution is toward operator traits whose operand and result
-types are explicit in the trait head, for example:
-
-```
 trait Add a b c where (+) : a -> b -> c
 trait Sub a b c where (-) : a -> b -> c
 trait Mul a b c where (*) : a -> b -> c
@@ -1546,9 +1533,19 @@ trait Div a b c where (/) : a -> b -> c
 trait Mod a b c where (%) : a -> b -> c
 ```
 
-shadml should adopt such forms only alongside corresponding trait-resolution
-and constraint-solving support; they are not implied by the current
-implementation.
+**Bitwise:**
+```
+trait BitAnd a b c where (&) : a -> b -> c
+trait BitXor a b c where (^) : a -> b -> c
+trait Shl a b c where (<<) : a -> b -> c
+trait Shr a b c where shr : a -> b -> c
+trait BitNot a where bitnot : a -> a
+trait Neg a where negate : a -> a
+```
+
+These are the current prelude-facing forms. They allow the semantic layer to
+represent heterogeneous operator relations before lowering them to builtin
+WGSL arithmetic or user-defined impl calls.
 
 ### 14.3 Arithmetic Operators
 
@@ -1560,9 +1557,9 @@ extern (/) : a -> a -> a
 extern (%) : a -> a -> a
 ```
 
-These declarations describe the current surface model, but they are likewise
-homogeneous. They should be revised when the trait system grows first-class
-support for heterogeneous operator constraints.
+These declarations provide the surface operator names used during parsing and
+inference. The actual trait constraints that arise from use may be
+heterogeneous, depending on the resolved operator relation.
 
 ### 14.4 Comparison Operators
 

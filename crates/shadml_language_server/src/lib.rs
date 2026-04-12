@@ -728,7 +728,12 @@ fn format_scheme(engine: &InferEngine, scheme: &Scheme) -> String {
             format!(
                 "{} {}",
                 predicate.trait_name,
-                engine.finalize(&predicate.ty)
+                predicate
+                    .tys
+                    .iter()
+                    .map(|ty| engine.finalize(ty).to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             )
         })
         .collect::<Vec<_>>()
@@ -1355,14 +1360,18 @@ fn build_document_symbols(source: &str) -> Vec<DocumentSymbol> {
             }
             shadml_parser::parser::Decl::ImplDecl {
                 trait_name,
-                ty,
+                tys,
                 methods,
                 span,
                 ..
             } => {
                 let impl_name = match trait_name {
-                    Some(t) => format!("impl {} {}", t, format_type(ty)),
-                    None => format!("impl {}", format_type(ty)),
+                    Some(t) => format!(
+                        "impl {} {}",
+                        t,
+                        tys.iter().map(format_type).collect::<Vec<_>>().join(" ")
+                    ),
+                    None => format!("impl {}", format_type(&tys[0])),
                 };
                 let children: Vec<DocumentSymbol> = methods
                     .iter()

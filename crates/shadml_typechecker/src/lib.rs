@@ -37,15 +37,25 @@ pub type TyVarId = u32;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Predicate {
     pub trait_name: String,
-    pub ty: Ty,
+    pub tys: Vec<Ty>,
 }
 
 impl Predicate {
     pub fn apply_subst(&self, subst: &Substitution) -> Predicate {
         Predicate {
             trait_name: self.trait_name.clone(),
-            ty: self.ty.apply_subst(subst),
+            tys: self.tys.iter().map(|ty| ty.apply_subst(subst)).collect(),
         }
+    }
+
+    pub fn free_vars(&self) -> Vec<TyVarId> {
+        let mut vars = Vec::new();
+        for ty in &self.tys {
+            vars.extend(ty.free_vars());
+        }
+        vars.sort();
+        vars.dedup();
+        vars
     }
 }
 
@@ -370,7 +380,7 @@ impl TypeEnv {
                 }
             }
             for predicate in &scheme.constraints {
-                for v in predicate.ty.free_vars() {
+                for v in predicate.free_vars() {
                     if !scheme.vars.contains(&v) {
                         vars.push(v);
                     }
@@ -389,7 +399,7 @@ impl TypeEnv {
                 let mut vars = scheme.vars.clone();
                 vars.extend(scheme.ty.free_vars());
                 for predicate in &scheme.constraints {
-                    vars.extend(predicate.ty.free_vars());
+                    vars.extend(predicate.free_vars());
                 }
                 vars
             })
@@ -496,14 +506,37 @@ impl InferEngine {
 
     /// Generalize a type over variables not free in the environment.
     pub fn generalize(&self, env: &TypeEnv, ty: &Ty) -> Scheme {
+        self.generalize_with_constraints(env, ty, &[])
+    }
+
+    pub fn generalize_with_constraints(
+        &self,
+        env: &TypeEnv,
+        ty: &Ty,
+        constraints: &[Predicate],
+    ) -> Scheme {
         let ty = ty.apply_subst(&self.subst);
+        let constraints: Vec<Predicate> = constraints
+            .iter()
+            .map(|predicate| predicate.apply_subst(&self.subst))
+            .collect();
         let env_vars = env.free_vars();
         let ty_vars = ty.free_vars();
-        let gen_vars: Vec<TyVarId> = ty_vars
+        let mut constrained_vars = Vec::new();
+        for predicate in &constraints {
+            constrained_vars.extend(predicate.free_vars());
+        }
+        constrained_vars.sort();
+        constrained_vars.dedup();
+        let mut all_vars = ty_vars;
+        all_vars.extend(constrained_vars);
+        all_vars.sort();
+        all_vars.dedup();
+        let gen_vars: Vec<TyVarId> = all_vars
             .into_iter()
             .filter(|v| !env_vars.contains(v))
             .collect();
-        Scheme::poly(gen_vars, ty)
+        Scheme::poly_with_constraints(constraints, gen_vars, ty)
     }
 
     /// Finalize a type by applying all accumulated substitutions.

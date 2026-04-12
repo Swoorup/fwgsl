@@ -15,32 +15,32 @@ data Pair a b = Pair a b
 -- no impl blocks needed here. Users can write impls
 -- for their own types to enable operator overloading.
 
-trait Add a where
-  (+) : a -> a -> a
+trait Add a b c where
+  (+) : a -> b -> c
 
-trait Sub a where
-  (-) : a -> a -> a
+trait Sub a b c where
+  (-) : a -> b -> c
 
-trait Mul a where
-  (*) : a -> a -> a
+trait Mul a b c where
+  (*) : a -> b -> c
 
-trait Div a where
-  (/) : a -> a -> a
+trait Div a b c where
+  (/) : a -> b -> c
 
-trait Mod a where
-  (%) : a -> a -> a
+trait Mod a b c where
+  (%) : a -> b -> c
 
-trait BitAnd a where
-  (&) : a -> a -> a
+trait BitAnd a b c where
+  (&) : a -> b -> c
 
-trait BitXor a where
-  (^) : a -> a -> a
+trait BitXor a b c where
+  (^) : a -> b -> c
 
-trait Shl a where
-  (<<) : a -> a -> a
+trait Shl a b c where
+  (<<) : a -> b -> c
 
-trait Shr a where
-  shr : a -> a -> a
+trait Shr a b c where
+  shr : a -> b -> c
 
 trait BitNot a where
   bitnot : a -> a
