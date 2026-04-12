@@ -7,7 +7,6 @@
 --   >>    shift right (infix, two adjacent > with no space)
 --   ~     bitwise NOT (prefix)
 --   bor   bitwise OR (function, since | is used for pattern matching)
---   shr   shift right (function alternative)
 
 -- Basic bitwise operations on U32
 testAnd : U32 -> U32 -> U32

@@ -1815,14 +1815,24 @@ mod full_pipeline_tests {
         sa.analyze(&program);
 
         if sa.has_errors() {
-            return Err("semantic error".into());
+            return Err(sa
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let mut lowering = AstLowering::new(&sa);
         let hir = lowering.lower_program(&program);
 
         if lowering.has_errors() {
-            return Err("HIR lowering error".into());
+            return Err(lowering
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let arena = shadml_allocator::Allocator::new();
@@ -1887,7 +1897,7 @@ impl ParticleState where
 
     #[test]
     fn test_full_pipeline_double_function() {
-        let source = "double x = x * 2";
+        let source = "double : I32 -> I32\ndouble x = x * 2";
         let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
         assert!(
             wgsl.contains("fn double("),
@@ -2002,13 +2012,14 @@ result = add 1 2
 "#;
         let wgsl = compile_to_wgsl(source).expect("generic call should specialize");
         assert!(
-            wgsl.contains("fn add_i32("),
-            "WGSL should contain the specialized add_i32 function, got: {}",
+            wgsl.contains("fn add_i32_i32_i32("),
+            "WGSL should contain the specialized add_i32_i32_i32 function, got: {}",
             wgsl
         );
         assert!(
-            wgsl.contains("fn result() -> i32") && wgsl.contains("return add_i32(1i, 2i);"),
-            "WGSL should call the specialized add_i32 helper from result, got: {}",
+            wgsl.contains("fn result() -> i32")
+                && wgsl.contains("return add_i32_i32_i32(1i, 2i);"),
+            "WGSL should call the specialized add_i32_i32_i32 helper from result, got: {}",
             wgsl
         );
     }
@@ -2111,14 +2122,24 @@ mod trait_tests {
         sa.analyze(&program);
 
         if sa.has_errors() {
-            return Err("semantic error".into());
+            return Err(sa
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let mut lowering = AstLowering::new(&sa);
         let hir = lowering.lower_program(&program);
 
         if lowering.has_errors() {
-            return Err("HIR lowering error".into());
+            return Err(lowering
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let arena = shadml_allocator::Allocator::new();
@@ -2521,14 +2542,24 @@ mod const_promotion_tests {
         sa.analyze(&program);
 
         if sa.has_errors() {
-            return Err("semantic error".into());
+            return Err(sa
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let mut lowering = AstLowering::new(&sa);
         let hir = lowering.lower_program(&program);
 
         if lowering.has_errors() {
-            return Err("HIR lowering error".into());
+            return Err(lowering
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let arena = shadml_allocator::Allocator::new();
@@ -2737,14 +2768,24 @@ mod bitwise_tests {
         sa.analyze(&program);
 
         if sa.has_errors() {
-            return Err("semantic error".into());
+            return Err(sa
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let mut lowering = AstLowering::new(&sa);
         let hir = lowering.lower_program(&program);
 
         if lowering.has_errors() {
-            return Err("HIR lowering error".into());
+            return Err(lowering
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let arena = shadml_allocator::Allocator::new();
@@ -2799,12 +2840,17 @@ mod bitwise_tests {
     }
 
     #[test]
-    fn test_shift_right_builtin() {
-        let source = "testShr : U32 -> U32 -> U32\ntestShr x y = shr x y";
+    fn test_user_builtin_extern_is_legal() {
+        let source = r#"
+builtin extern wave : F32 -> F32 = intrinsic(sin)
+
+testWave : F32 -> F32
+testWave x = wave x
+"#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
-            wgsl.contains("x >> y"),
-            "WGSL should contain shift right via shr, got: {}",
+            wgsl.contains("sin(x)"),
+            "WGSL should contain the user-declared builtin extern lowering, got: {}",
             wgsl
         );
     }
@@ -2932,10 +2978,10 @@ shlMask a b = a << b
 data Mask = Mask { bits : U32 }
 
 impl Shr Mask Mask Mask where
-  shr a b = Mask { bits = shr a.bits b.bits }
+  (>>) a b = Mask { bits = a.bits >> b.bits }
 
 shrMask : Mask -> Mask -> Mask
-shrMask a b = shr a b
+shrMask a b = a >> b
 "#;
         let wgsl = compile_to_wgsl(source).expect("should compile");
         assert!(
@@ -2945,7 +2991,7 @@ shrMask a b = shr a b
         );
         assert!(
             wgsl.contains("shr_Mask__Mask__Mask(a, b)"),
-            "WGSL should dispatch shr to the mangled Shr impl, got: {}",
+            "WGSL should dispatch >> to the mangled Shr impl, got: {}",
             wgsl
         );
     }
@@ -2956,7 +3002,7 @@ shrMask a b = shr a b
 data Mask = Mask { bits : U32 }
 
 impl BitNot Mask where
-  bitnot a = Mask { bits = ~a.bits }
+  (~) a = Mask { bits = ~a.bits }
 
 notMask : Mask -> Mask
 notMask a = ~a
@@ -2980,7 +3026,7 @@ notMask a = ~a
 data Wrapper = Wrapper { val : F32 }
 
 impl Neg Wrapper where
-  negate a = Wrapper { val = -a.val }
+  (-) a = Wrapper { val = -a.val }
 
 negWrapper : Wrapper -> Wrapper
 negWrapper a = -a
@@ -3016,14 +3062,24 @@ mod fold_range_tests {
         sa.analyze(&program);
 
         if sa.has_errors() {
-            return Err("semantic error".into());
+            return Err(sa
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let mut lowering = AstLowering::new(&sa);
         let hir = lowering.lower_program(&program);
 
         if lowering.has_errors() {
-            return Err("HIR lowering error".into());
+            return Err(lowering
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let arena = shadml_allocator::Allocator::new();
@@ -3158,14 +3214,24 @@ mod naga_validation {
         sa.analyze(&program);
 
         if sa.has_errors() {
-            return Err("semantic error".into());
+            return Err(sa
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let mut lowering = AstLowering::new(&sa);
         let hir = lowering.lower_program(&program);
 
         if lowering.has_errors() {
-            return Err("HIR lowering error".into());
+            return Err(lowering
+                .diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
 
         let arena = shadml_allocator::Allocator::new();

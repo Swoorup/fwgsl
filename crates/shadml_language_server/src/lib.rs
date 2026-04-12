@@ -5,13 +5,16 @@
 //! (`shadml_parser`, `shadml_semantic`, `shadml_typechecker`).
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use dashmap::DashMap;
 use shadml_ide::{
-    all_completion_specs, build_completions as ide_build_completions,
-    build_goto_definition as ide_build_goto_definition, build_hover as ide_build_hover,
-    build_references as ide_build_references, completion_item_from_spec, lookup_completion_spec,
-    spec_matches_context, CompletionContext, CompletionSpec,
+    all_completion_specs, build_completions_with_prelude_flag as ide_build_completions_with_prelude_flag,
+    build_goto_definition_with_prelude_flag as ide_build_goto_definition_with_prelude_flag,
+    build_hover_with_prelude_flag as ide_build_hover_with_prelude_flag,
+    build_references_with_prelude_flag as ide_build_references_with_prelude_flag,
+    completion_item_from_spec, lookup_completion_spec, spec_matches_context, CompletionContext,
+    CompletionSpec,
 };
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -26,8 +29,19 @@ use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
 use shadml_typechecker::{InferEngine, Scheme};
 
+/// Check whether the URI points at the compiler prelude file.
+fn is_compiler_prelude_uri(uri: &Url) -> bool {
+    let Ok(path) = uri.to_file_path() else {
+        return false;
+    };
+    path.ends_with(Path::new("prelude").join("prelude.shadml"))
+}
+
 /// Prepend prelude declarations to a parsed program.
-fn with_prelude(program: &mut Program) {
+fn with_prelude(program: &mut Program, is_compiler_prelude: bool) {
+    if is_compiler_prelude {
+        return;
+    }
     let prelude = shadml_parser::prelude_program();
     let mut combined = prelude.decls.clone();
     combined.append(&mut program.decls);
@@ -131,6 +145,7 @@ impl ShadmlBackend {
     /// diagnostics back to the client.
     async fn run_diagnostics(&self, uri: Url, text: &str) {
         let mut all_diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = Vec::new();
+        let is_compiler_prelude = is_compiler_prelude_uri(&uri);
 
         // Phase 1: Parse
         let mut parser = Parser::new(text);
@@ -195,7 +210,7 @@ impl ShadmlBackend {
         };
 
         // Prepend prelude
-        with_prelude(&mut program);
+        with_prelude(&mut program, is_compiler_prelude);
 
         // Phase 3: Semantic analysis
         let mut analyzer = SemanticAnalyzer::new();
@@ -303,7 +318,7 @@ impl LanguageServer for ShadmlBackend {
             None => return Ok(None),
         };
 
-        let items = ide_build_completions(&text, pos);
+        let items = ide_build_completions_with_prelude_flag(&text, pos, is_compiler_prelude_uri(uri));
         Ok(Some(CompletionResponse::Array(items)))
     }
 
@@ -318,7 +333,11 @@ impl LanguageServer for ShadmlBackend {
             None => return Ok(None),
         };
 
-        Ok(ide_build_hover(&text, pos))
+        Ok(ide_build_hover_with_prelude_flag(
+            &text,
+            pos,
+            is_compiler_prelude_uri(uri),
+        ))
     }
 
     // -- Go to definition ---------------------------------------------------
@@ -339,7 +358,12 @@ impl LanguageServer for ShadmlBackend {
         let name = ident_at_position(&text, pos);
 
         // Try local goto-definition first.
-        if let Some(result) = ide_build_goto_definition(uri, &text, pos) {
+        if let Some(result) = ide_build_goto_definition_with_prelude_flag(
+            uri,
+            &text,
+            pos,
+            is_compiler_prelude_uri(uri),
+        ) {
             // Verify the result actually points to a definition of the same name
             // in the current file. The IDE index can produce spurious results for
             // names imported from other modules.
@@ -416,11 +440,12 @@ impl LanguageServer for ShadmlBackend {
             None => return Ok(None),
         };
 
-        Ok(ide_build_references(
+        Ok(ide_build_references_with_prelude_flag(
             uri,
             &text,
             pos,
             params.context.include_declaration,
+            is_compiler_prelude_uri(uri),
         ))
     }
 
@@ -553,7 +578,7 @@ pub fn build_completions(source: &str, pos: Position) -> Vec<CompletionItem> {
 
     let mut parser = Parser::new(source);
     let mut program = parser.parse_program();
-    with_prelude(&mut program);
+    with_prelude(&mut program, false);
     let mut analyzer = SemanticAnalyzer::new();
     analyzer.analyze(&program);
     let mut document_seen = HashSet::new();
@@ -787,7 +812,7 @@ pub fn build_hover(source: &str, pos: Position) -> Option<Hover> {
 
             let mut parser = Parser::new(source);
             let mut program = parser.parse_program();
-            with_prelude(&mut program);
+            with_prelude(&mut program, false);
             let mut analyzer = SemanticAnalyzer::new();
             analyzer.analyze(&program);
 
@@ -1063,7 +1088,7 @@ fn build_document_symbols(source: &str) -> Vec<DocumentSymbol> {
 
     // Also run semantic analysis so we can show type info in details
     let mut full_program = program.clone();
-    with_prelude(&mut full_program);
+    with_prelude(&mut full_program, false);
     let mut analyzer = SemanticAnalyzer::new();
     analyzer.analyze(&full_program);
 
@@ -2402,6 +2427,15 @@ mod tests {
         // Position on "=" sign
         let result = build_goto_definition(&uri, source, Position::new(0, 6));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detects_compiler_prelude_uri_by_path() {
+        let uri = Url::parse("file:///workspace/prelude/prelude.shadml").unwrap();
+        assert!(is_compiler_prelude_uri(&uri));
+
+        let other = Url::parse("file:///workspace/src/main.shadml").unwrap();
+        assert!(!is_compiler_prelude_uri(&other));
     }
 
     // -- Diagnostics conversion tests ---------------------------------------

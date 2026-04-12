@@ -769,8 +769,9 @@ fn decl_name_and_kind(decl: &Decl) -> Option<(String, &'static str)> {
         Decl::DataDecl { name, .. } => Some((name.clone(), "type")),
         Decl::TypeAlias { name, .. } => Some((name.clone(), "type alias")),
         Decl::TraitDecl { name, .. } => Some((name.clone(), "trait")),
-        Decl::ImplDecl { .. } => None, // impls don't introduce names
+        Decl::ImplDecl { .. } | Decl::BuiltinImplDecl { .. } => None, // impls don't introduce names
         Decl::ExternDecl { name, .. } => Some((name.clone(), "extern")),
+        Decl::BuiltinExternDecl { name, .. } => Some((name.clone(), "builtin extern")),
         Decl::ConstDecl { name, .. } => Some((name.clone(), "constant")),
         Decl::EntryPoint { name, .. } => Some((name.clone(), "entry point")),
         Decl::BindingDecl { .. } => None, // bindings are addressed by group/binding, not by name collision

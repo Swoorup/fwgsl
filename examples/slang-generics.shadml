@@ -38,7 +38,7 @@ impl Light SpotLight where
   illumination light worldPos normal =
     let lightDir   = normalize (light.lightPosition - worldPos)
         dist       = distance light.lightPosition worldPos
-        cosAngle   = dot (negate lightDir) (normalize light.lightDirection)
+        cosAngle   = dot (-lightDir) (normalize light.lightDirection)
         spotFactor = pow (max (cosAngle - cos light.cutoffAngle) 0.0) light.falloffExponent
         atten      = (light.intensity * spotFactor) / (dist * dist)
         lambert    = max (dot normal lightDir) 0.0

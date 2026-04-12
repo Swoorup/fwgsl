@@ -9,11 +9,10 @@ data Option a = Some a | None
 data Result a = Ok a | Err String
 data Pair a b = Pair a b
 
--- Operator overloading traits (declarations only)
+-- Operator overloading traits
 --
--- Primitive types (I32, U32, F32) use native BinOp —
--- no impl blocks needed here. Users can write impls
--- for their own types to enable operator overloading.
+-- Concrete builtin operator support is declared below through `builtin impl`
+-- entries. Users can write ordinary `impl` blocks for their own types.
 
 trait Add a b c where
   (+) : a -> b -> c
@@ -40,22 +39,26 @@ trait Shl a b c where
   (<<) : a -> b -> c
 
 trait Shr a b c where
-  shr : a -> b -> c
+  (>>) : a -> b -> c
 
 trait BitNot a where
-  bitnot : a -> a
+  (~) : a -> a
 
 trait Neg a where
-  negate : a -> a
+  (-) : a -> a
 
--- Operators (primitive types use native BinOp; these
--- signatures provide the polymorphic type environment)
+alias Vec2f = Vec<2, F32>
+alias Vec3f = Vec<3, F32>
+alias Vec4f = Vec<4, F32>
+alias Vec2i = Vec<2, I32>
+alias Vec3i = Vec<3, I32>
+alias Vec4i = Vec<4, I32>
+alias Vec2u = Vec<2, U32>
+alias Vec3u = Vec<3, U32>
+alias Vec4u = Vec<4, U32>
 
-extern (+)  : a -> a -> a
-extern (-)  : a -> a -> a
-extern (*)  : a -> a -> a
-extern (/)  : a -> a -> a
-extern (%)  : a -> a -> a
+-- Comparison and boolean operators remain ordinary externs because they do not
+-- dispatch through the operator-trait system yet.
 
 extern (==) : a -> a -> Bool
 extern (/=) : a -> a -> Bool
@@ -67,17 +70,361 @@ extern (>=) : a -> a -> Bool
 extern (&&) : Bool -> Bool -> Bool
 extern (||) : Bool -> Bool -> Bool
 
--- Bitwise operators
--- `&`, `^`, `<<` are infix operators; `~` is a prefix operator.
--- `|` conflicts with pattern matching syntax, so bitwise OR uses `bor`.
--- `>>` conflicts with generic type closers, so right-shift uses `shr`
--- (or write `x >> y` with no spaces between the `>`s in expression context).
+-- `bor` remains a direct builtin because `|` is reserved for pattern syntax.
+extern bor : a -> a -> a
 
-extern (&)  : a -> a -> a
-extern (^)  : a -> a -> a
-extern (<<) : a -> a -> a
-extern bor  : a -> a -> a
-extern shr  : a -> a -> a
+-- | Add two f32 scalars with the native `+` operator.
+builtin impl Add F32 F32 F32 where
+  (+) = native_binop (+)
+
+builtin impl Add I32 I32 I32 where
+  (+) = native_binop (+)
+
+builtin impl Add U32 U32 U32 where
+  (+) = native_binop (+)
+
+builtin impl Add Vec2f Vec2f Vec2f where
+  (+) = native_binop (+)
+
+builtin impl Add Vec3f Vec3f Vec3f where
+  (+) = native_binop (+)
+
+builtin impl Add Vec4f Vec4f Vec4f where
+  (+) = native_binop (+)
+
+builtin impl Add Vec2i Vec2i Vec2i where
+  (+) = native_binop (+)
+
+builtin impl Add Vec3i Vec3i Vec3i where
+  (+) = native_binop (+)
+
+builtin impl Add Vec4i Vec4i Vec4i where
+  (+) = native_binop (+)
+
+builtin impl Add Vec2u Vec2u Vec2u where
+  (+) = native_binop (+)
+
+builtin impl Add Vec3u Vec3u Vec3u where
+  (+) = native_binop (+)
+
+builtin impl Add Vec4u Vec4u Vec4u where
+  (+) = native_binop (+)
+
+-- | Subtract values with the native `-` operator.
+builtin impl Sub F32 F32 F32 where
+  (-) = native_binop (-)
+
+builtin impl Sub I32 I32 I32 where
+  (-) = native_binop (-)
+
+builtin impl Sub U32 U32 U32 where
+  (-) = native_binop (-)
+
+builtin impl Sub Vec2f Vec2f Vec2f where
+  (-) = native_binop (-)
+
+builtin impl Sub Vec3f Vec3f Vec3f where
+  (-) = native_binop (-)
+
+builtin impl Sub Vec4f Vec4f Vec4f where
+  (-) = native_binop (-)
+
+builtin impl Sub Vec2i Vec2i Vec2i where
+  (-) = native_binop (-)
+
+builtin impl Sub Vec3i Vec3i Vec3i where
+  (-) = native_binop (-)
+
+builtin impl Sub Vec4i Vec4i Vec4i where
+  (-) = native_binop (-)
+
+builtin impl Sub Vec2u Vec2u Vec2u where
+  (-) = native_binop (-)
+
+builtin impl Sub Vec3u Vec3u Vec3u where
+  (-) = native_binop (-)
+
+builtin impl Sub Vec4u Vec4u Vec4u where
+  (-) = native_binop (-)
+
+-- | Multiply values with the native `*` operator.
+builtin impl Mul F32 F32 F32 where
+  (*) = native_binop (*)
+
+builtin impl Mul I32 I32 I32 where
+  (*) = native_binop (*)
+
+builtin impl Mul U32 U32 U32 where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec2f Vec2f Vec2f where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec3f Vec3f Vec3f where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec4f Vec4f Vec4f where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec2i Vec2i Vec2i where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec3i Vec3i Vec3i where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec4i Vec4i Vec4i where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec2u Vec2u Vec2u where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec3u Vec3u Vec3u where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec4u Vec4u Vec4u where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec2f F32 Vec2f where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec3f F32 Vec3f where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec4f F32 Vec4f where
+  (*) = native_binop (*)
+
+builtin impl Mul F32 Vec2f Vec2f where
+  (*) = native_binop (*)
+
+builtin impl Mul F32 Vec3f Vec3f where
+  (*) = native_binop (*)
+
+builtin impl Mul F32 Vec4f Vec4f where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec2i I32 Vec2i where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec3i I32 Vec3i where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec4i I32 Vec4i where
+  (*) = native_binop (*)
+
+builtin impl Mul I32 Vec2i Vec2i where
+  (*) = native_binop (*)
+
+builtin impl Mul I32 Vec3i Vec3i where
+  (*) = native_binop (*)
+
+builtin impl Mul I32 Vec4i Vec4i where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec2u U32 Vec2u where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec3u U32 Vec3u where
+  (*) = native_binop (*)
+
+builtin impl Mul Vec4u U32 Vec4u where
+  (*) = native_binop (*)
+
+builtin impl Mul U32 Vec2u Vec2u where
+  (*) = native_binop (*)
+
+builtin impl Mul U32 Vec3u Vec3u where
+  (*) = native_binop (*)
+
+builtin impl Mul U32 Vec4u Vec4u where
+  (*) = native_binop (*)
+
+-- | Divide values with the native `/` operator.
+builtin impl Div F32 F32 F32 where
+  (/) = native_binop (/)
+
+builtin impl Div I32 I32 I32 where
+  (/) = native_binop (/)
+
+builtin impl Div U32 U32 U32 where
+  (/) = native_binop (/)
+
+builtin impl Div Vec2f Vec2f Vec2f where
+  (/) = native_binop (/)
+
+builtin impl Div Vec3f Vec3f Vec3f where
+  (/) = native_binop (/)
+
+builtin impl Div Vec4f Vec4f Vec4f where
+  (/) = native_binop (/)
+
+builtin impl Div Vec2i Vec2i Vec2i where
+  (/) = native_binop (/)
+
+builtin impl Div Vec3i Vec3i Vec3i where
+  (/) = native_binop (/)
+
+builtin impl Div Vec4i Vec4i Vec4i where
+  (/) = native_binop (/)
+
+builtin impl Div Vec2u Vec2u Vec2u where
+  (/) = native_binop (/)
+
+builtin impl Div Vec3u Vec3u Vec3u where
+  (/) = native_binop (/)
+
+builtin impl Div Vec4u Vec4u Vec4u where
+  (/) = native_binop (/)
+
+-- | Integer remainder with the native `%` operator.
+builtin impl Mod I32 I32 I32 where
+  (%) = native_binop (%)
+
+builtin impl Mod U32 U32 U32 where
+  (%) = native_binop (%)
+
+builtin impl Mod Vec2i Vec2i Vec2i where
+  (%) = native_binop (%)
+
+builtin impl Mod Vec3i Vec3i Vec3i where
+  (%) = native_binop (%)
+
+builtin impl Mod Vec4i Vec4i Vec4i where
+  (%) = native_binop (%)
+
+builtin impl Mod Vec2u Vec2u Vec2u where
+  (%) = native_binop (%)
+
+builtin impl Mod Vec3u Vec3u Vec3u where
+  (%) = native_binop (%)
+
+builtin impl Mod Vec4u Vec4u Vec4u where
+  (%) = native_binop (%)
+
+-- | Bitwise and with the native `&` operator.
+builtin impl BitAnd I32 I32 I32 where
+  (&) = native_binop (&)
+
+builtin impl BitAnd U32 U32 U32 where
+  (&) = native_binop (&)
+
+builtin impl BitAnd Vec2i Vec2i Vec2i where
+  (&) = native_binop (&)
+
+builtin impl BitAnd Vec3i Vec3i Vec3i where
+  (&) = native_binop (&)
+
+builtin impl BitAnd Vec4i Vec4i Vec4i where
+  (&) = native_binop (&)
+
+builtin impl BitAnd Vec2u Vec2u Vec2u where
+  (&) = native_binop (&)
+
+builtin impl BitAnd Vec3u Vec3u Vec3u where
+  (&) = native_binop (&)
+
+builtin impl BitAnd Vec4u Vec4u Vec4u where
+  (&) = native_binop (&)
+
+-- | Bitwise xor with the native `^` operator.
+builtin impl BitXor I32 I32 I32 where
+  (^) = native_binop (^)
+
+builtin impl BitXor U32 U32 U32 where
+  (^) = native_binop (^)
+
+builtin impl BitXor Vec2i Vec2i Vec2i where
+  (^) = native_binop (^)
+
+builtin impl BitXor Vec3i Vec3i Vec3i where
+  (^) = native_binop (^)
+
+builtin impl BitXor Vec4i Vec4i Vec4i where
+  (^) = native_binop (^)
+
+builtin impl BitXor Vec2u Vec2u Vec2u where
+  (^) = native_binop (^)
+
+builtin impl BitXor Vec3u Vec3u Vec3u where
+  (^) = native_binop (^)
+
+builtin impl BitXor Vec4u Vec4u Vec4u where
+  (^) = native_binop (^)
+
+-- | Shift-left with the native `<<` operator.
+builtin impl Shl I32 I32 I32 where
+  (<<) = native_binop (<<)
+
+builtin impl Shl I32 U32 I32 where
+  (<<) = native_binop (<<)
+
+builtin impl Shl U32 I32 U32 where
+  (<<) = native_binop (<<)
+
+builtin impl Shl U32 U32 U32 where
+  (<<) = native_binop (<<)
+
+-- | Shift-right with the native `>>` operator.
+builtin impl Shr I32 I32 I32 where
+  (>>) = native_binop (>>)
+
+builtin impl Shr I32 U32 I32 where
+  (>>) = native_binop (>>)
+
+builtin impl Shr U32 I32 U32 where
+  (>>) = native_binop (>>)
+
+builtin impl Shr U32 U32 U32 where
+  (>>) = native_binop (>>)
+
+-- | Unary numeric negation with the native `-` operator.
+builtin impl Neg F32 where
+  (-) = native_unary (-)
+
+builtin impl Neg I32 where
+  (-) = native_unary (-)
+
+builtin impl Neg Vec2f where
+  (-) = native_unary (-)
+
+builtin impl Neg Vec3f where
+  (-) = native_unary (-)
+
+builtin impl Neg Vec4f where
+  (-) = native_unary (-)
+
+builtin impl Neg Vec2i where
+  (-) = native_unary (-)
+
+builtin impl Neg Vec3i where
+  (-) = native_unary (-)
+
+builtin impl Neg Vec4i where
+  (-) = native_unary (-)
+
+-- | Bitwise complement with the native `~` operator.
+builtin impl BitNot I32 where
+  (~) = native_unary (~)
+
+builtin impl BitNot U32 where
+  (~) = native_unary (~)
+
+builtin impl BitNot Vec2i where
+  (~) = native_unary (~)
+
+builtin impl BitNot Vec3i where
+  (~) = native_unary (~)
+
+builtin impl BitNot Vec4i where
+  (~) = native_unary (~)
+
+builtin impl BitNot Vec2u where
+  (~) = native_unary (~)
+
+builtin impl BitNot Vec3u where
+  (~) = native_unary (~)
+
+builtin impl BitNot Vec4u where
+  (~) = native_unary (~)
 
 -- WGSL math — unary (a -> a)
 
@@ -96,7 +443,6 @@ extern exp2  : a -> a
 extern ceil  : a -> a
 extern round : a -> a
 extern trunc : a -> a
-extern negate : a -> a
 extern saturate : a -> a
 extern inverseSqrt : a -> a
 

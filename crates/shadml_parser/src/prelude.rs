@@ -9,7 +9,7 @@ static PRELUDE: OnceLock<Program> = OnceLock::new();
 /// Returns the parsed prelude program (cached after first call).
 pub fn prelude_program() -> &'static Program {
     PRELUDE.get_or_init(|| {
-        let mut parser = Parser::new(PRELUDE_SOURCE);
+        let mut parser = Parser::with_builtin_decls(PRELUDE_SOURCE, true);
         let program = parser.parse_program();
         assert!(
             !parser.diagnostics().has_errors(),
@@ -18,4 +18,8 @@ pub fn prelude_program() -> &'static Program {
         );
         program
     })
+}
+
+pub fn prelude_source() -> &'static str {
+    PRELUDE_SOURCE
 }

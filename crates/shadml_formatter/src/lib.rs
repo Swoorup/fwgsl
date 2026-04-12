@@ -290,7 +290,10 @@ impl<'a> FormatEngine<'a> {
         // No space between attribute/function name and `(` — e.g. `@builtin(...)`,
         // `@workgroup_size(...)`, `@location(0)`, `@interpolate(flat)`
         if kind == SyntaxKind::LParen
-            && matches!(prev, Some(SyntaxKind::Ident | SyntaxKind::UpperIdent))
+            && matches!(
+                prev,
+                Some(SyntaxKind::Ident | SyntaxKind::UpperIdent | SyntaxKind::KwBuiltin)
+            )
             && self.is_prev_attribute_name()
         {
             return;
@@ -399,7 +402,7 @@ impl<'a> FormatEngine<'a> {
             if k.is_trivia() {
                 continue;
             }
-            if k == SyntaxKind::Ident || k == SyntaxKind::UpperIdent {
+            if matches!(k, SyntaxKind::Ident | SyntaxKind::UpperIdent | SyntaxKind::KwBuiltin) {
                 // Now check if the token before this ident is `@`
                 for j in (0..i).rev() {
                     let k2 = self.tokens[j].kind;

@@ -233,7 +233,7 @@ impl<'a> IndexBuilder<'a> {
                     });
                     self.index.add_definition_span(symbol_id, name_span);
                 }
-                Decl::FunDecl { name, span, .. } => {
+                Decl::FunDecl { name, span, .. } | Decl::BuiltinExternDecl { name, span, .. } => {
                     let name_span = self.first_name_span(name, *span).unwrap_or(*span);
                     let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
                         let id = self.index.push_symbol(NewSymbol {
@@ -451,6 +451,36 @@ impl<'a> IndexBuilder<'a> {
                             .push(mid);
                     }
                 }
+                Decl::BuiltinImplDecl {
+                    trait_name,
+                    tys,
+                    methods,
+                    span,
+                    ..
+                } => {
+                    let container = format!(
+                        "builtin impl {} {}",
+                        trait_name,
+                        tys.iter().map(format_type).collect::<Vec<_>>().join(" ")
+                    );
+                    for m in methods {
+                        let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
+                        let mid = self.index.push_symbol(NewSymbol {
+                            name: m.name.clone(),
+                            namespace: Namespace::Value,
+                            kind: SymbolKind::Function,
+                            span: mspan,
+                            scope_span: *span,
+                            scope_depth: 0,
+                            visible_from: 0,
+                            container: Some(container.clone()),
+                        });
+                        self.impl_method_symbols
+                            .entry(m.name.clone())
+                            .or_default()
+                            .push(mid);
+                    }
+                }
                 Decl::ExternDecl { .. } => {
                     // Extern declarations are type-level only.
                 }
@@ -637,7 +667,12 @@ impl<'a> IndexBuilder<'a> {
                     self.walk_callable(&m.name, &m.params, &m.body, &[], m.span, frames);
                 }
             }
-            Decl::ExternDecl { ty, .. } => {
+            Decl::BuiltinImplDecl { tys, .. } => {
+                for ty in tys {
+                    self.walk_type(ty, frames);
+                }
+            }
+            Decl::ExternDecl { ty, .. } | Decl::BuiltinExternDecl { ty, .. } => {
                 self.walk_type(ty, frames);
             }
             Decl::ModuleDecl { .. } | Decl::ImportDecl { .. } => {}
@@ -1066,11 +1101,19 @@ impl<'a> IndexBuilder<'a> {
 }
 
 pub fn build_completions(source: &str, pos: Position) -> Vec<CompletionItem> {
+    build_completions_with_prelude_flag(source, pos, false)
+}
+
+pub fn build_completions_with_prelude_flag(
+    source: &str,
+    pos: Position,
+    is_compiler_prelude: bool,
+) -> Vec<CompletionItem> {
     let prefix = completion_prefix(source, pos);
     let context = completion_context(source, pos, &prefix);
     let is_member_context = is_member_completion_context(source, pos, &prefix);
     let offset = position_to_offset(source, pos).unwrap_or(source.len()) as u32;
-    let state = build_ide_state(source);
+    let state = build_ide_state(source, is_compiler_prelude);
 
     let mut items = Vec::new();
     let mut seen = HashSet::new();
@@ -1184,6 +1227,14 @@ pub fn build_completions(source: &str, pos: Position) -> Vec<CompletionItem> {
 }
 
 pub fn build_hover(source: &str, pos: Position) -> Option<Hover> {
+    build_hover_with_prelude_flag(source, pos, false)
+}
+
+pub fn build_hover_with_prelude_flag(
+    source: &str,
+    pos: Position,
+    is_compiler_prelude: bool,
+) -> Option<Hover> {
     let offset = position_to_offset(source, pos)? as u32;
     let tokens = lex(source);
     let (tok_index, tok) = tokens
@@ -1191,7 +1242,7 @@ pub fn build_hover(source: &str, pos: Position) -> Option<Hover> {
         .enumerate()
         .find(|(_, token)| token.span.start <= offset && offset < token.span.end)?;
     let range = span_to_range(source, tok.span);
-    let state = build_ide_state(source);
+    let state = build_ide_state(source, is_compiler_prelude);
 
     match tok.kind {
         SyntaxKind::Ident | SyntaxKind::UpperIdent => {
@@ -1252,8 +1303,17 @@ pub fn build_goto_definition(
     source: &str,
     pos: Position,
 ) -> Option<GotoDefinitionResponse> {
+    build_goto_definition_with_prelude_flag(uri, source, pos, false)
+}
+
+pub fn build_goto_definition_with_prelude_flag(
+    uri: &Url,
+    source: &str,
+    pos: Position,
+    is_compiler_prelude: bool,
+) -> Option<GotoDefinitionResponse> {
     let offset = position_to_offset(source, pos)? as u32;
-    let state = build_ide_state(source);
+    let state = build_ide_state(source, is_compiler_prelude);
     let occurrence = state.index.symbol_at_offset(offset)?;
     let symbol = &state.index.symbols[occurrence.symbol_id];
     if occurrence.role == OccurrenceRole::Definition && symbol.kind == SymbolKind::PatternBinding {
@@ -1307,8 +1367,18 @@ pub fn build_references(
     pos: Position,
     include_declaration: bool,
 ) -> Option<Vec<Location>> {
+    build_references_with_prelude_flag(uri, source, pos, include_declaration, false)
+}
+
+pub fn build_references_with_prelude_flag(
+    uri: &Url,
+    source: &str,
+    pos: Position,
+    include_declaration: bool,
+    is_compiler_prelude: bool,
+) -> Option<Vec<Location>> {
     let offset = position_to_offset(source, pos)? as u32;
-    let state = build_ide_state(source);
+    let state = build_ide_state(source, is_compiler_prelude);
     let occurrence = state.index.symbol_at_offset(offset)?;
     let mut locations = state
         .index
@@ -1338,15 +1408,19 @@ pub fn build_references(
     }
 }
 
-fn build_ide_state(source: &str) -> IdeState<'_> {
+fn build_ide_state(source: &str, is_compiler_prelude: bool) -> IdeState<'_> {
     let mut parser = Parser::new(source);
     let user_program = parser.parse_program();
 
     // Prepend prelude declarations for type environment (semantic analysis only)
-    let prelude = shadml_parser::prelude_program();
-    let mut combined = prelude.decls.clone();
-    combined.extend(user_program.decls.iter().cloned());
-    let full_program = Program { decls: combined };
+    let full_program = if is_compiler_prelude || source == shadml_parser::prelude_source() {
+        user_program.clone()
+    } else {
+        let prelude = shadml_parser::prelude_program();
+        let mut combined = prelude.decls.clone();
+        combined.extend(user_program.decls.iter().cloned());
+        Program { decls: combined }
+    };
 
     let mut analyzer = SemanticAnalyzer::new();
     analyzer.analyze(&full_program);
@@ -1388,13 +1462,15 @@ fn extract_doc_comments(program: &Program) -> HashMap<String, String> {
                 | Decl::ConstDecl { name, .. }
                 | Decl::TraitDecl { name, .. }
                 | Decl::ExternDecl { name, .. }
+                | Decl::BuiltinExternDecl { name, .. }
                 | Decl::ModuleDecl { name, .. } => name.clone(),
                 Decl::ImplDecl { trait_name, .. } => trait_name.clone().unwrap_or_default(),
+                Decl::BuiltinImplDecl { trait_name, .. } => trait_name.clone(),
                 Decl::ImportDecl { module_path, .. } => module_path.clone(),
                 Decl::CfgDecl { .. } => continue,
             };
             if !name.is_empty() {
-                docs.insert(name, doc);
+                docs.entry(name).or_insert(doc);
             }
         }
 
@@ -1403,12 +1479,12 @@ fn extract_doc_comments(program: &Program) -> HashMap<String, String> {
             Decl::DataDecl { constructors, .. } => {
                 for con in constructors {
                     if let Some(doc) = &con.doc {
-                        docs.insert(con.name.clone(), doc.clone());
+                        docs.entry(con.name.clone()).or_insert(doc.clone());
                     }
                     if let ConFields::Record(fields) = &con.fields {
                         for field in fields {
                             if let Some(doc) = &field.doc {
-                                docs.insert(field.name.clone(), doc.clone());
+                                docs.entry(field.name.clone()).or_insert(doc.clone());
                             }
                         }
                     }
@@ -1417,14 +1493,21 @@ fn extract_doc_comments(program: &Program) -> HashMap<String, String> {
             Decl::BitfieldDecl { fields, .. } => {
                 for field in fields {
                     if let Some(doc) = &field.doc {
-                        docs.insert(field.name.clone(), doc.clone());
+                        docs.entry(field.name.clone()).or_insert(doc.clone());
                     }
                 }
             }
             Decl::TraitDecl { methods, .. } => {
                 for method in methods {
                     if let Some(doc) = &method.doc {
-                        docs.insert(method.name.clone(), doc.clone());
+                        docs.entry(method.name.clone()).or_insert(doc.clone());
+                    }
+                }
+            }
+            Decl::BuiltinImplDecl { methods, .. } => {
+                for method in methods {
+                    if let Some(doc) = &method.doc {
+                        docs.entry(method.name.clone()).or_insert(doc.clone());
                     }
                 }
             }
@@ -1916,6 +1999,7 @@ fn collect_symbol_types(program: &Program, analyzer: &SemanticAnalyzer) -> HashM
                     }
                 }
             }
+            Decl::BuiltinImplDecl { .. } => {}
             _ => {}
         }
     }

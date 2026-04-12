@@ -35,6 +35,8 @@ impl Decl {
             | Decl::ConstDecl { comments, .. }
             | Decl::TraitDecl { comments, .. }
             | Decl::ImplDecl { comments, .. }
+            | Decl::BuiltinExternDecl { comments, .. }
+            | Decl::BuiltinImplDecl { comments, .. }
             | Decl::ExternDecl { comments, .. }
             | Decl::ModuleDecl { comments, .. }
             | Decl::ImportDecl { comments, .. } => comments,
@@ -55,6 +57,8 @@ impl Decl {
             | Decl::ConstDecl { comments, .. }
             | Decl::TraitDecl { comments, .. }
             | Decl::ImplDecl { comments, .. }
+            | Decl::BuiltinExternDecl { comments, .. }
+            | Decl::BuiltinImplDecl { comments, .. }
             | Decl::ExternDecl { comments, .. }
             | Decl::ModuleDecl { comments, .. }
             | Decl::ImportDecl { comments, .. } => comments,
@@ -102,6 +106,8 @@ impl Decl {
             | Decl::ConstDecl { span, .. }
             | Decl::TraitDecl { span, .. }
             | Decl::ImplDecl { span, .. }
+            | Decl::BuiltinExternDecl { span, .. }
+            | Decl::BuiltinImplDecl { span, .. }
             | Decl::ExternDecl { span, .. }
             | Decl::ModuleDecl { span, .. }
             | Decl::ImportDecl { span, .. }
@@ -206,6 +212,22 @@ pub enum Decl {
         span: Span,
         comments: Vec<String>,
     },
+    /// Builtin extern declaration: `builtin extern sin : F32 -> F32 = intrinsic(sin)`.
+    BuiltinExternDecl {
+        name: String,
+        ty: Type,
+        lowering: BuiltinLowering,
+        span: Span,
+        comments: Vec<String>,
+    },
+    /// Builtin trait impl declaration.
+    BuiltinImplDecl {
+        trait_name: String,
+        tys: Vec<Type>,
+        methods: Vec<BuiltinImplMethod>,
+        span: Span,
+        comments: Vec<String>,
+    },
     /// Module header (optional): `module Math.Fp64`
     /// If absent, the module name is derived from the file path.
     ModuleDecl {
@@ -295,6 +317,21 @@ pub struct ImplMethod {
     pub params: Vec<Pat>,
     pub body: Expr,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct BuiltinImplMethod {
+    pub name: String,
+    pub lowering: BuiltinLowering,
+    pub span: Span,
+    pub doc: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BuiltinLowering {
+    Intrinsic(String),
+    NativeBinOp(String),
+    NativeUnary(String),
 }
 
 /// The type and bit-width specification for a bitfield field.
@@ -525,6 +562,10 @@ const MAX_FUEL: u32 = 10_000;
 impl Parser {
     /// Create a new parser from source text. Lexes and resolves layout.
     pub fn new(source: &str) -> Self {
+        Self::with_builtin_decls(source, true)
+    }
+
+    pub fn with_builtin_decls(source: &str, _allow_builtin_decls: bool) -> Self {
         let raw_tokens = lex(source);
         let tokens = resolve_layout(raw_tokens, source);
         Self {
@@ -869,6 +910,11 @@ impl Parser {
                         method.doc = self.find_leading_doc(method.span.start);
                     }
                 }
+                Decl::BuiltinImplDecl { methods, .. } => {
+                    for method in methods.iter_mut() {
+                        method.doc = self.find_leading_doc(method.span.start);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1056,6 +1102,7 @@ impl Parser {
             SyntaxKind::KwImport => Some(self.parse_import_decl()),
             SyntaxKind::KwData => Some(self.parse_data_decl()),
             SyntaxKind::KwAlias => Some(self.parse_alias_decl()),
+            SyntaxKind::KwBuiltin => Some(self.parse_builtin_decl()),
             SyntaxKind::KwExtern => Some(self.parse_extern_decl()),
             SyntaxKind::KwUniform | SyntaxKind::KwStorage => {
                 // Bare `uniform`/`storage` without `@group(...)` — parse as binding
@@ -1927,6 +1974,135 @@ impl Parser {
         }
     }
 
+    fn parse_builtin_decl(&mut self) -> Decl {
+        let start = self.current_span().start;
+        self.expect(SyntaxKind::KwBuiltin);
+        self.skip_trivia();
+
+        match self.peek_non_trivia() {
+            SyntaxKind::KwExtern => self.parse_builtin_extern_decl(start),
+            SyntaxKind::KwImpl => self.parse_builtin_impl_decl(start),
+            _ => {
+                self.diagnostics.push(
+                    Diagnostic::error("expected `extern` or `impl` after `builtin`")
+                        .with_label(Label::primary(self.current_span(), "expected builtin declaration kind")),
+                );
+                Decl::ExternDecl {
+                    name: "__error__".into(),
+                    ty: Type::Con("__error__".into(), self.span_from(start)),
+                    span: self.span_from(start),
+                    comments: vec![],
+                }
+            }
+        }
+    }
+
+    fn parse_builtin_extern_decl(&mut self, start: u32) -> Decl {
+        self.expect(SyntaxKind::KwExtern);
+        self.skip_trivia();
+        let name = self.parse_value_decl_name();
+        self.skip_trivia();
+        self.expect(SyntaxKind::Colon);
+        self.skip_trivia();
+        let ty = self.parse_type();
+        self.skip_trivia();
+        self.expect(SyntaxKind::Equals);
+        self.skip_trivia();
+        let lowering = self.parse_builtin_lowering_spec();
+        let span = self.span_from(start);
+        Decl::BuiltinExternDecl {
+            name,
+            ty,
+            lowering,
+            span,
+            comments: vec![],
+        }
+    }
+
+    fn parse_builtin_impl_decl(&mut self, start: u32) -> Decl {
+        self.expect(SyntaxKind::KwImpl);
+        self.skip_trivia();
+        let trait_name_tok = self.expect(SyntaxKind::UpperIdent);
+        let trait_name = self.text_of(&trait_name_tok).to_owned();
+        self.skip_trivia();
+
+        let mut tys = Vec::new();
+        while !self.at(SyntaxKind::KwWhere) && !self.at_end() && self.consume_fuel() {
+            tys.push(self.parse_type_atom());
+            self.skip_trivia();
+        }
+
+        self.expect(SyntaxKind::KwWhere);
+        self.skip_trivia();
+        self.eat(SyntaxKind::LayoutBraceOpen);
+        self.skip_trivia();
+
+        let mut methods = Vec::new();
+        while !self.at_layout_end() && !self.at_end() && self.consume_fuel() {
+            self.eat_layout_semi();
+            self.skip_trivia();
+            if self.at_layout_end() || self.at_end() {
+                break;
+            }
+            let mstart = self.current_span().start;
+            let method_name = self.parse_method_name();
+            self.skip_trivia();
+            self.expect(SyntaxKind::Equals);
+            self.skip_trivia();
+            let lowering = self.parse_builtin_lowering_spec();
+            let mspan = self.span_from(mstart);
+            methods.push(BuiltinImplMethod {
+                name: method_name,
+                lowering,
+                span: mspan,
+                doc: None,
+            });
+            self.eat_layout_semi();
+        }
+        self.eat_layout_close();
+
+        let span = self.span_from(start);
+        Decl::BuiltinImplDecl {
+            trait_name,
+            tys,
+            methods,
+            span,
+            comments: vec![],
+        }
+    }
+
+    fn parse_value_decl_name(&mut self) -> String {
+        if self.at(SyntaxKind::LParen) {
+            self.parse_parenthesized_operator_name()
+        } else {
+            let name_tok = self.expect(SyntaxKind::Ident);
+            self.text_of(&name_tok).to_owned()
+        }
+    }
+
+    fn parse_builtin_lowering_spec(&mut self) -> BuiltinLowering {
+        let kind_tok = self.expect(SyntaxKind::Ident);
+        let kind = self.text_of(&kind_tok).to_owned();
+        self.skip_trivia();
+        self.expect(SyntaxKind::LParen);
+        self.skip_trivia();
+        let arg = self.parse_builtin_lowering_arg();
+        self.skip_trivia();
+        self.expect(SyntaxKind::RParen);
+        match kind.as_str() {
+            "intrinsic" => BuiltinLowering::Intrinsic(arg),
+            "native_binop" => BuiltinLowering::NativeBinOp(arg),
+            "native_unary" => BuiltinLowering::NativeUnary(arg),
+            _ => {
+                self.diagnostics.push(
+                    Diagnostic::error(format!("unknown builtin lowering kind `{}`", kind))
+                        .with_label(Label::primary(kind_tok.span, "unknown lowering kind")),
+                );
+                BuiltinLowering::Intrinsic(arg)
+            }
+        }
+    }
+
     /// Parse a single binding declaration after `@group(N) @binding(N)` have been consumed.
     /// Expects: `uniform name : Type` or `storage name : Type` or `storage(read_write) name : Type`
     fn parse_binding_body(&mut self, start: u32, group: u32, binding: u32) -> Decl {
@@ -2319,17 +2495,42 @@ impl Parser {
 
     fn parse_method_name(&mut self) -> String {
         if self.at(SyntaxKind::LParen) {
-            self.bump();
-            self.skip_trivia();
-            let op_tok = self.bump();
-            let op_name = self.text_of(&op_tok).to_owned();
-            self.skip_trivia();
-            self.expect(SyntaxKind::RParen);
-            op_name
+            self.parse_parenthesized_operator_name()
         } else {
             let tok = self.expect(SyntaxKind::Ident);
             self.text_of(&tok).to_owned()
         }
+    }
+
+    fn parse_parenthesized_operator_name(&mut self) -> String {
+        self.expect(SyntaxKind::LParen);
+        self.skip_trivia();
+        let name = self.parse_operator_token_text();
+        self.skip_trivia();
+        self.expect(SyntaxKind::RParen);
+        name
+    }
+
+    fn parse_builtin_lowering_arg(&mut self) -> String {
+        match self.peek_non_trivia() {
+            SyntaxKind::Ident => {
+                self.skip_trivia();
+                let tok = self.bump();
+                self.text_of(&tok).to_owned()
+            }
+            _ => self.parse_operator_token_text(),
+        }
+    }
+
+    fn parse_operator_token_text(&mut self) -> String {
+        self.skip_trivia();
+        let first = self.bump();
+        if first.kind == SyntaxKind::Greater && self.peek_non_trivia() == SyntaxKind::Greater {
+            self.skip_trivia();
+            let second = self.bump();
+            return format!("{}{}", self.text_of(&first), self.text_of(&second));
+        }
+        self.text_of(&first).to_owned()
     }
 
     fn parse_attribute(&mut self) -> Attribute {
@@ -2337,8 +2538,9 @@ impl Parser {
         self.expect(SyntaxKind::At);
         self.skip_trivia();
 
-        // Attribute name: could be Ident or UpperIdent
-        let name_tok = if self.at(SyntaxKind::Ident) {
+        // Attribute name: could be Ident, UpperIdent, or a reserved keyword
+        // that is valid in attribute position such as `builtin`.
+        let name_tok = if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::KwBuiltin) {
             self.bump()
         } else {
             self.expect(SyntaxKind::UpperIdent)
@@ -2771,13 +2973,25 @@ impl Parser {
 
         // Operator section `(+)`, `(-)`, etc.
         // Special case: `(-expr)` is negation in parens, not an operator section.
-        if is_operator_token(self.peek()) {
+        let is_shift_right_section = self.at(SyntaxKind::Greater)
+            && {
+                let next_idx = self.pos + 1;
+                next_idx < self.tokens.len()
+                    && self.tokens[next_idx].kind == SyntaxKind::Greater
+                    && self.tokens[self.pos].span.end == self.tokens[next_idx].span.start
+            };
+        if is_operator_token(self.peek()) || is_shift_right_section {
+            let current_op = if is_shift_right_section {
+                ">>".to_owned()
+            } else {
+                self.text_of(self.current_token()).to_owned()
+            };
             let is_prefix_unary = self.peek() == SyntaxKind::Minus
                 || self.peek() == SyntaxKind::Bang
                 || self.peek() == SyntaxKind::Tilde;
             // Peek ahead past operator + trivia to see if it's `(op)`
             let next_non_trivia = {
-                let mut i = self.pos + 1;
+                let mut i = self.pos + if is_shift_right_section { 2 } else { 1 };
                 while i < self.tokens.len() && self.tokens[i].kind.is_trivia() {
                     i += 1;
                 }
@@ -2792,22 +3006,30 @@ impl Parser {
                 // (the prefix operator will be handled by parse_expr)
             } else if next_non_trivia == SyntaxKind::RParen {
                 // `(op)` — operator section
-                let op_tok = self.bump();
+                if is_shift_right_section {
+                    self.bump();
+                    self.bump();
+                } else {
+                    self.bump();
+                }
                 self.skip_trivia();
                 self.bump(); // consume `)`
-                let op = self.text_of(&op_tok).to_owned();
                 let span = self.span_from(start);
-                return Expr::OpSection(op, span);
+                return Expr::OpSection(current_op, span);
             } else {
                 // `(op expr)` — not a simple section, treat as error
-                let op_tok = self.bump();
-                let op = self.text_of(&op_tok).to_owned();
+                if is_shift_right_section {
+                    self.bump();
+                    self.bump();
+                } else {
+                    self.bump();
+                }
                 while !self.at(SyntaxKind::RParen) && !self.at_end() && self.consume_fuel() {
                     self.bump();
                 }
                 self.eat(SyntaxKind::RParen);
                 let span = self.span_from(start);
-                return Expr::OpSection(op, span);
+                return Expr::OpSection(current_op, span);
             }
         }
 

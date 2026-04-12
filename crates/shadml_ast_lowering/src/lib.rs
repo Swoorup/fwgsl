@@ -30,6 +30,8 @@ pub struct AstLowering {
     pub type_aliases: HashMap<String, Ty>,
     pub traits: HashMap<String, shadml_semantic::TraitInfo>,
     pub impls: Vec<shadml_semantic::ImplInfo>,
+    pub builtin_externs: HashMap<String, Vec<shadml_semantic::BuiltinExternInfo>>,
+    pub builtin_impls: Vec<shadml_semantic::BuiltinImplInfo>,
     /// Map from bitfield type name → ordered list of (field_name, meta).
     /// Populated during `lower_program` before expressions are lowered.
     pub bitfield_fields: HashMap<String, Vec<(String, BitfieldFieldMeta)>>,
@@ -57,6 +59,8 @@ impl AstLowering {
             type_aliases: sa.type_aliases.clone(),
             traits: sa.traits.clone(),
             impls: sa.impls.clone(),
+            builtin_externs: sa.builtin_externs.clone(),
+            builtin_impls: sa.builtin_impls.clone(),
             bitfield_fields: HashMap::new(),
         }
     }
@@ -128,7 +132,7 @@ impl AstLowering {
                 let inferred_ty = self.convert_syntax_type_scheme(ty);
                 self.env.insert(name.clone(), inferred_ty);
             }
-            if let Decl::ExternDecl { name, ty, .. } = decl {
+            if let Decl::ExternDecl { name, ty, .. } | Decl::BuiltinExternDecl { name, ty, .. } = decl {
                 let inferred_ty = self.convert_syntax_type_scheme(ty);
                 let flattened = Scheme {
                     constraints: inferred_ty.constraints.clone(),
@@ -348,7 +352,11 @@ impl AstLowering {
                         span: *span,
                     });
                 }
-                Decl::TypeSig { .. } | Decl::TypeAlias { .. } | Decl::ExternDecl { .. } => {}
+                Decl::TypeSig { .. }
+                | Decl::TypeAlias { .. }
+                | Decl::ExternDecl { .. }
+                | Decl::BuiltinExternDecl { .. }
+                | Decl::BuiltinImplDecl { .. } => {}
                 Decl::ModuleDecl { .. } | Decl::ImportDecl { .. } => {
                     // Module/import declarations are handled at the module resolution level.
                 }
@@ -380,10 +388,16 @@ impl AstLowering {
                         let mut method_info: Vec<(String, Ty)> = Vec::new();
                         if let Some(trait_info) = self.traits.get(tname) {
                             for m in methods {
+                                let logical_name = match (tname.as_str(), m.name.as_str()) {
+                                    ("Neg", "-") => "negate".to_owned(),
+                                    ("BitNot", "~") => "bitnot".to_owned(),
+                                    ("Shr", ">>") => "shr".to_owned(),
+                                    _ => m.name.clone(),
+                                };
                                 let mangled =
-                                    shadml_semantic::mangle_instance_method(&m.name, &type_suffix);
+                                    shadml_semantic::mangle_instance_method(&logical_name, &type_suffix);
                                 for (tmethod_name, tmethod_ty) in &trait_info.methods {
-                                    if tmethod_name == &m.name {
+                                    if tmethod_name == &logical_name {
                                         let concrete_ty = shadml_semantic::replace_trait_vars(
                                             tmethod_ty,
                                             &trait_info.var_ids,
@@ -396,8 +410,14 @@ impl AstLowering {
                         }
                         for (i, m) in methods.iter().enumerate() {
                             if let Some((mangled, concrete_ty)) = method_info.get(i) {
+                                let logical_name = match (tname.as_str(), m.name.as_str()) {
+                                    ("Neg", "-") => "negate".to_owned(),
+                                    ("BitNot", "~") => "bitnot".to_owned(),
+                                    ("Shr", ">>") => "shr".to_owned(),
+                                    _ => m.name.clone(),
+                                };
                                 if let Some(f) = self.lower_impl_method(
-                                    &m.name,
+                                    &logical_name,
                                     mangled,
                                     &m.params,
                                     &m.body,
@@ -2548,12 +2568,18 @@ impl AstLowering {
                 let resolved_name = self.resolve_trait_method_or_diag(&name, &final_ty, span);
                 HirExpr::Var(resolved_name, final_ty, span)
             }
-            HirExpr::App(func, arg, ty, span) => HirExpr::App(
-                Box::new(self.finalize_expr(*func)),
-                Box::new(self.finalize_expr(*arg)),
-                self.engine.finalize(&ty),
-                span,
-            ),
+            HirExpr::App(func, arg, ty, span) => {
+                let final_func = self.finalize_expr(*func);
+                let final_arg = self.finalize_expr(*arg);
+                let final_ty = self.engine.finalize(&ty);
+                let app = HirExpr::App(
+                    Box::new(final_func),
+                    Box::new(final_arg),
+                    final_ty.clone(),
+                    span,
+                );
+                self.finalize_builtin_extern_call(app, final_ty, span)
+            }
             HirExpr::Let(binds, body, ty, span) => HirExpr::Let(
                 binds
                     .into_iter()
@@ -2716,9 +2742,13 @@ impl AstLowering {
         rhs_ty: &Ty,
         result_ty: &Ty,
     ) -> Option<String> {
+        let logical_op = match op {
+            ">>" => "shr",
+            _ => op,
+        };
         for trait_info in self.traits.values() {
             for (method_name, _) in &trait_info.methods {
-                if method_name == op {
+                if method_name == logical_op {
                     for inst in &self.impls {
                         if inst.trait_name.as_deref() == Some(trait_info.name.as_str())
                             && inst.tys.len() == 3
@@ -2726,8 +2756,24 @@ impl AstLowering {
                             && inst.tys[1] == *rhs_ty
                             && inst.tys[2] == *result_ty
                         {
-                            if let Some(mangled) = inst.methods.get(op) {
+                            if let Some(mangled) = inst.methods.get(logical_op) {
                                 return Some(mangled.clone());
+                            }
+                        }
+                    }
+                    for inst in &self.builtin_impls {
+                        if inst.trait_name == trait_info.name
+                            && inst.tys.len() == 3
+                            && inst.tys[0] == *lhs_ty
+                            && inst.tys[1] == *rhs_ty
+                            && inst.tys[2] == *result_ty
+                        {
+                            if let Some(lowering) = inst.methods.get(logical_op) {
+                                return match lowering {
+                                    BuiltinLowering::Intrinsic(name) => Some(name.clone()),
+                                    BuiltinLowering::NativeBinOp(_) => None,
+                                    BuiltinLowering::NativeUnary(_) => None,
+                                };
                             }
                         }
                     }
@@ -2751,10 +2797,50 @@ impl AstLowering {
                             }
                         }
                     }
+                    for inst in &self.builtin_impls {
+                        if inst.trait_name == trait_info.name
+                            && inst.tys.len() == 1
+                            && inst.tys[0] == *operand_ty
+                        {
+                            if let Some(lowering) = inst.methods.get(op) {
+                                return match lowering {
+                                    BuiltinLowering::Intrinsic(name) => Some(name.clone()),
+                                    BuiltinLowering::NativeUnary(_) => None,
+                                    BuiltinLowering::NativeBinOp(_) => None,
+                                };
+                            }
+                        }
+                    }
                 }
             }
         }
         None
+    }
+
+    fn finalize_builtin_extern_call(&self, expr: HirExpr, result_ty: Ty, span: Span) -> HirExpr {
+        let (head, args) = collect_hir_app_args(&expr);
+        let HirExpr::Var(name, _, _) = head else {
+            return expr;
+        };
+        let Some(overloads) = self.builtin_externs.get(name) else {
+            return expr;
+        };
+
+        let mut full_ty = result_ty.clone();
+        for arg in args.iter().rev() {
+            full_ty = Ty::arrow(arg.ty().clone(), full_ty);
+        }
+        let final_full_ty = self.engine.finalize(&full_ty);
+
+        for overload in overloads {
+            if self.engine.finalize(&overload.ty) == final_full_ty {
+                if let BuiltinLowering::Intrinsic(target) = &overload.lowering {
+                    return rename_hir_app_head(expr, target, final_full_ty, span);
+                }
+            }
+        }
+
+        expr
     }
 
     /// Resolve a trait or standalone impl method name to a concrete mangled name,
