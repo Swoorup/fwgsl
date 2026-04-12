@@ -1,9 +1,11 @@
 # Fix Qualified Constraint Resolution in AST/HIR Lowering
 
+Created: 2026-04-14
+Progress: Completed
+
 ## Summary
 
-Fix the bug at the real source: AstLowering is discarding typeclass constraints when it instantiates schemes, so overloaded operator results can remain as unresolved types like Vec n a and leak into MIR. The
-fix should mirror semantic analysis, not patch MIR and not special-case length, Sub, or negate.
+Fix the bug at the real source: AstLowering is discarding typeclass constraints when it instantiates schemes, so overloaded operator results can remain as unresolved types like Vec n a and leak into MIR. The fix should mirror semantic analysis, not patch MIR and not special-case length, Sub, or negate.
 
 negate is not the current cause. Keep unary-negation behavior unchanged and cover it with regressions.
 
@@ -25,7 +27,7 @@ negate is not the current cause. Keep unary-negation behavior unchanged and cove
         - operator sections
         - any other expression-level callable lookup that currently pulls a scheme from env
 - Resolve pending predicates during AST/HIR lowering using the shared helper.
-    - Port the semantic-style “capture predicate start, infer/unify, then improve/resolve” flow into AST lowering.
+    - Port the semantic-style "capture predicate start, infer/unify, then improve/resolve" flow into AST lowering.
     - Apply it at the same boundaries where AST lowering is currently re-running inference:
         - function bodies
         - entry-point bodies

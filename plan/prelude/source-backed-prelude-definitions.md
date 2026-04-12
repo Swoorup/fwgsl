@@ -1,9 +1,11 @@
 # Source-Backed Prelude Definitions, Docs, and Go-To-Definition
 
+Created: 2026-04-14
+Progress: Completed
+
 ## Summary
 
-Make prelude/prelude.shadml the single source of truth for builtin symbols, documentation, and declaration locations. The implementation should stop treating prelude docs as a Rust-side catalog problem and
-instead treat the prelude as a real indexed document, with parser/semantic support for currently compiler-internal builtin type constructors.
+Make prelude/prelude.shadml the single source of truth for builtin symbols, documentation, and declaration locations. The implementation should stop treating prelude docs as a Rust-side catalog problem and instead treat the prelude as a real indexed document, with parser/semantic support for currently compiler-internal builtin type constructors.
 
 This plan covers both requested fixes:
 
@@ -14,8 +16,7 @@ This plan covers both requested fixes:
 
 - Extend the language surface so all builtin type constructors are declared in source.
     - Add a new declaration form: builtin type Name with optional arity, e.g. builtin type Vec 2, builtin type Mat 3, builtin type F32.
-    - Use this for compiler-internal type constructors that are currently only hard-coded in Rust: I32, U32, F32, Bool, String, Vec, Mat, Tensor, Scalar, and any other compiler-known type constructor that
-      currently has IDE docs or completion entries.
+    - Use this for compiler-internal type constructors that are currently only hard-coded in Rust: I32, U32, F32, Bool, String, Vec, Mat, Tensor, Scalar, and any other compiler-known type constructor that currently has IDE docs or completion entries.
     - Keep source aliases in prelude/prelude.shadml for surface synonyms that should remain user-visible, e.g. alias Vector = Vec, alias Matrix = Mat, alias Ten = Tensor, alias Sca = Scalar.
     - Add Haddock comments above every builtin declaration in the prelude, including existing data, alias, extern, and builtin impl entries.
 - Make semantic builtin registration derive from prelude declarations instead of a hard-coded whitelist.
@@ -42,7 +43,7 @@ This plan covers both requested fixes:
     - Parse builtin type Name and builtin type Name N in prelude/prelude.shadml.
 - Semantic
     - Add builtin type metadata keyed by source declaration, including arity.
-    - Replace the current hard-coded “known builtin type names” check with source-declared builtin types plus aliases.
+    - Replace the current hard-coded "known builtin type names" check with source-declared builtin types plus aliases.
 - IDE / LSP
     - Add a prelude-backed symbol/doc lookup path used by hover, completions, and go-to-definition.
     - Make definition results carry the prelude URI/range for source-backed builtin declarations.
@@ -64,6 +65,6 @@ This plan covers both requested fixes:
 
 ## Assumptions
 
-- “Function declaration in the prelude” means ordinary named builtin declarations should resolve to the declaration site in prelude/prelude.shadml, not to intrinsic/lowering metadata.
+- "Function declaration in the prelude" means ordinary named builtin declarations should resolve to the declaration site in prelude/prelude.shadml, not to intrinsic/lowering metadata.
 - Keyword and attribute documentation remain Rust-catalog-backed; only prelude-defined symbols move to source-backed docs.
 - The prelude file becomes the authoritative content source for builtin symbol docs, while Rust may still keep non-doc completion behavior such as sort groups or snippet templates.

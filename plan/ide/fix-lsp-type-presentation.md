@@ -1,5 +1,8 @@
 # Fix LSP Type Presentation and Operator Definition Resolution
 
+Created: 2026-04-14
+Progress: Completed
+
 ## Summary
 
 This is primarily an IDE/LSP correctness pass, not a compiler/codegen change. The existing slang-generics integration test already passes, so the plan should target three layers:
@@ -56,6 +59,6 @@ This is primarily an IDE/LSP correctness pass, not a compiler/codegen change. Th
 
 ## Assumptions
 
-- “Go to definition for operator” should prefer the concrete prelude builtin impl entry, not the trait declaration or generic extern signature, when that impl is uniquely determined.
+- "Go to definition for operator" should prefer the concrete prelude builtin impl entry, not the trait declaration or generic extern signature, when that impl is uniquely determined.
 - For inferred-only types with no authored source syntax, canonicalized pretty output is acceptable; exact original syntax preservation is only required for explicitly written signatures/types.
 - The scope of this fix is IDE/LSP behavior plus the parser span bug needed to support correct presentation; it should not alter WGSL generation or trait resolution semantics.

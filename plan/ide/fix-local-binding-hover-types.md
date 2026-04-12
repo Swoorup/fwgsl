@@ -1,10 +1,11 @@
 # Fix Local Binding Hover Types at the Source of Truth
 
+Created: 2026-04-14
+Progress: Completed
+
 ## Summary
 
-Replace the current IDE-side reconstruction of local binding types with first-class semantic metadata for local bindings. The bug is not just formatting: atten is being shown from initializer-expression
-state instead of the finalized binding scheme produced by local let inference. The correct fix is to carry exact local-binding declaration spans through the AST, record binding schemes during semantic
-analysis, and make hover/type hints read those schemes directly.
+Replace the current IDE-side reconstruction of local binding types with first-class semantic metadata for local bindings. The bug is not just formatting: atten is being shown from initializer-expression state instead of the finalized binding scheme produced by local let inference. The correct fix is to carry exact local-binding declaration spans through the AST, record binding schemes during semantic analysis, and make hover/type hints read those schemes directly.
 
 ## Key Changes
 
@@ -43,8 +44,7 @@ analysis, and make hover/type hints read those schemes directly.
     - Keep explicit-signature source-text preservation for top-level declarations as-is.
 - Update dependent consumers
     - Update ast_lowering and any parser/semantic tests that destructure tuple-shaped local bindings.
-    - HIR can remain tuple-shaped unless there is a separate need for declaration-span metadata there; the important change is that semantic analysis now owns the authoritative hover metadata before lowering
-      consumers erase source detail.
+    - HIR can remain tuple-shaped unless there is a separate need for declaration-span metadata there; the important change is that semantic analysis now owns the authoritative hover metadata before lowering consumers erase source detail.
 
 ## Test Plan
 
@@ -68,6 +68,5 @@ analysis, and make hover/type hints read those schemes directly.
 ## Assumptions
 
 - The desired behavior is to show the finalized local binding scheme at the declaration/reference site, not the raw initializer expression type before local generalization and later predicate improvement.
-- atten should ultimately be F32; if the new semantic binding-scheme test shows it remains constrained/generic, that is a separate semantic inference bug and should be fixed in semantic analysis rather than
-  masked in hover formatting.
+- atten should ultimately be F32; if the new semantic binding-scheme test shows it remains constrained/generic, that is a separate semantic inference bug and should be fixed in semantic analysis rather than masked in hover formatting.
 - This plan intentionally avoids span-reconstruction heuristics or name-based postprocessing in the IDE; the source of truth should live in parser + semantic metadata.
