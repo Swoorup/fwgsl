@@ -14,6 +14,9 @@ impl ParticleState where
       | Active { life, .. } -> life
       | Dead -> 0.0
 
+gravity : Vec3F
+gravity = vec3 0.0 -9.81 0.0
+
 stepParticle : F32 -> ParticleState -> ParticleState
 stepParticle dt particle =
   match particle

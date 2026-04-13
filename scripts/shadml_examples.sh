@@ -42,6 +42,10 @@ has_imports() {
   grep -qE '^\s*import ' "$1"
 }
 
+is_check_only() {
+  grep -q 'This file is intended for `shadml check`\.' "$1"
+}
+
 # Colours (disabled when stdout is not a terminal)
 if [[ -t 1 ]]; then
   RED='\033[0;31m'
@@ -127,12 +131,20 @@ mode_validate() {
       continue
     fi
 
+    # Skip source files explicitly marked as type-check-only examples.
+    if is_check_only "$path"; then
+      echo -e "  ${YELLOW}skip${RESET}  $file  (check-only)"
+      skipped=$((skipped + 1))
+      count=$((count + 1))
+      continue
+    fi
+
     # Format to a temp file
     local tmp_file="$tmpdir/$(basename "$file")"
     ( cd "$REPO_ROOT" && "${SHADML[@]}" fmt "$file" ) > "$tmp_file"
 
-    # Compile the formatted output
-    if ( cd "$REPO_ROOT" && "${SHADML[@]}" compile "$tmp_file" ) &>/dev/null; then
+    # Compile the formatted output and validate generated WGSL with naga
+    if ( cd "$REPO_ROOT" && "${SHADML[@]}" compile "$tmp_file" --validate-wgsl ) &>/dev/null; then
       echo -e "  ${GREEN}pass${RESET}  $file"
       passed=$((passed + 1))
     else

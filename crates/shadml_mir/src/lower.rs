@@ -178,6 +178,13 @@ impl<'a> LowerCtx<'a> {
         dt_name.to_string()
     }
 
+    fn sum_type_payload_layout(&self, name: &str) -> Option<&[HirFieldDef]> {
+        self.data_types
+            .get(name)
+            .and_then(|cons| cons.iter().max_by_key(|con| con.fields.len()))
+            .map(|con| con.fields.as_slice())
+    }
+
     /// Resolve a type constructor name to MirType, taking ADTs and bitfields into account.
     fn resolve_type_con(&self, name: &str) -> Option<MirType<'a>> {
         // Check if this is a bitfield type — resolve to its base MIR type
@@ -276,6 +283,14 @@ fn collect_mono_instances_from_expr(
 
     match expr {
         HirExpr::Lit(_, _, _) | HirExpr::Var(_, _, _) => {}
+        HirExpr::Tuple(items, _, _) => {
+            for item in items {
+                collect_mono_instances_from_expr(item, generic_types, instances, seen);
+            }
+        }
+        HirExpr::TupleIndex(base, _, _, _) => {
+            collect_mono_instances_from_expr(base, generic_types, instances, seen);
+        }
         HirExpr::App(f, arg, _, _) => {
             collect_mono_instances_from_expr(f, generic_types, instances, seen);
             collect_mono_instances_from_expr(arg, generic_types, instances, seen);
@@ -935,7 +950,10 @@ fn lower_hir_expr_to_stmts<'a>(
 
             // Simple ternary: both branches are pure expressions with no statements.
             // Emit select(false_val, true_val, condition) instead of var/if/assign.
-            if then_stmts.is_empty() && else_stmts.is_empty() {
+            if then_stmts.is_empty()
+                && else_stmts.is_empty()
+                && supports_select_result_type(&result_ty)
+            {
                 let select_expr = MirExpr::Call(
                     ctx.arena.alloc_str("select"),
                     vec![else_val, then_val, cond_mir],
@@ -957,7 +975,7 @@ fn lower_hir_expr_to_stmts<'a>(
                 MirStmt::Var(
                     tmp_name,
                     result_ty.clone(),
-                    default_expr_for_type(ctx.arena, &result_ty),
+                    MirExpr::default_value(ctx.arena, &result_ty),
                 ),
                 MirStmt::If(cond_mir, then_body, else_body),
             ];
@@ -977,7 +995,7 @@ fn lower_hir_expr_to_stmts<'a>(
                 MirStmt::Var(
                     tmp_name,
                     result_ty.clone(),
-                    default_expr_for_type(ctx.arena, &result_ty),
+                    MirExpr::default_value(ctx.arena, &result_ty),
                 ),
             ];
 
@@ -1091,6 +1109,10 @@ fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>,
             }
         }
 
+        HirExpr::Tuple(_, _, _) | HirExpr::TupleIndex(_, _, _, _) => {
+            Err("tuple expressions must be eliminated before MIR lowering".into())
+        }
+
         HirExpr::BinOp(op, lhs, rhs, ty, _span) => {
             let mir_lhs = lower_hir_expr(lhs, ctx)?;
             let mir_rhs = lower_hir_expr(rhs, ctx)?;
@@ -1116,14 +1138,21 @@ fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>,
 
         HirExpr::ConstructorCall(name, _tag, args, _ty, _span) => {
             // Check if this constructor belongs to a sum type with fields
-            if let Some((dt_name, tag, _fields)) = ctx.constructors.get(name.as_str()) {
+            if let Some((dt_name, tag, fields)) = ctx.constructors.get(name.as_str()) {
                 if ctx.is_sum_type(dt_name) && ctx.has_fields(dt_name) {
                     // Emit as DataType struct: DataType(tag, field0, ...)
                     let struct_name = ctx.resolve_struct_name(dt_name, _ty);
                     let mut all_args = vec![MirExpr::Lit(MirLit::U32(*tag))];
+                    let mut lowered_args = Vec::with_capacity(args.len());
                     for arg in args {
-                        all_args.push(lower_hir_expr(arg, ctx)?);
+                        lowered_args.push(lower_hir_expr(arg, ctx)?);
                     }
+                    all_args.extend(lower_sum_type_constructor_payload(
+                        dt_name,
+                        fields,
+                        lowered_args,
+                        ctx,
+                    )?);
                     return Ok(MirExpr::ConstructStruct(
                         ctx.arena.alloc_str(&struct_name),
                         all_args,
@@ -1260,6 +1289,35 @@ fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>,
             lower_bitfield_update(type_name, base, fields, ctx)
         }
     }
+}
+
+fn lower_sum_type_constructor_payload<'a>(
+    dt_name: &str,
+    ctor_fields: &[HirFieldDef],
+    lowered_args: Vec<MirExpr<'a>>,
+    ctx: &LowerCtx<'a>,
+) -> Result<Vec<MirExpr<'a>>, String> {
+    let layout = ctx
+        .sum_type_payload_layout(dt_name)
+        .ok_or_else(|| format!("missing payload layout for sum type `{dt_name}`"))?;
+
+    let provided: HashMap<&str, MirExpr<'a>> = ctor_fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .zip(lowered_args)
+        .collect();
+
+    layout
+        .iter()
+        .map(|field| {
+            if let Some(expr) = provided.get(field.name.as_str()) {
+                Ok(expr.clone())
+            } else {
+                let ty = ty_to_mir_type_with_ctx(&field.ty, Some(ctx))?;
+                Ok(MirExpr::default_value(ctx.arena, &ty))
+            }
+        })
+        .collect()
 }
 
 /// Lower a bitfield construction to `((v1 & mask1) << off1) | ((v2 & mask2) << off2) | ...`
@@ -1638,7 +1696,7 @@ fn lower_app_with_args<'a>(
         )),
         _ => {
             // Check if this is a constructor call for a data type with fields
-            if let Some((dt_name, tag, _fields)) = ctx.constructors.get(func_name) {
+            if let Some((dt_name, tag, fields)) = ctx.constructors.get(func_name) {
                 // Use the monomorphized struct name from the result type if available
                 let struct_name: &'a str = if let MirType::Struct(name) = &mir_ty {
                     name
@@ -1647,7 +1705,12 @@ fn lower_app_with_args<'a>(
                 };
                 if ctx.is_sum_type(dt_name) && ctx.has_fields(dt_name) {
                     let mut all_args = vec![MirExpr::Lit(MirLit::U32(*tag))];
-                    all_args.extend(mir_args);
+                    all_args.extend(lower_sum_type_constructor_payload(
+                        dt_name,
+                        fields,
+                        mir_args,
+                        ctx,
+                    )?);
                     return Ok(MirExpr::ConstructStruct(struct_name, all_args));
                 } else if ctx.has_fields(dt_name) {
                     // Single-constructor type with fields
@@ -2067,39 +2130,6 @@ fn lower_hir_binding<'a>(res: &HirBinding, ctx: &LowerCtx<'a>) -> Option<MirGlob
     })
 }
 
-fn default_lit_for_type(ty: &MirType) -> MirLit {
-    match ty {
-        MirType::I32 => MirLit::I32(0),
-        MirType::U32 => MirLit::U32(0),
-        MirType::F32 => MirLit::F32(0.0),
-        MirType::Bool => MirLit::Bool(false),
-        _ => MirLit::I32(0),
-    }
-}
-
-fn default_expr_for_type<'a>(arena: &'a Allocator, ty: &MirType<'a>) -> MirExpr<'a> {
-    match ty {
-        MirType::I32 | MirType::U32 | MirType::F32 | MirType::Bool => {
-            MirExpr::Lit(default_lit_for_type(ty))
-        }
-        MirType::Vec(n, inner) => MirExpr::Call(
-            arena.alloc_str(&format!("vec{}", n)),
-            (0..*n)
-                .map(|_| default_expr_for_type(arena, inner))
-                .collect(),
-            ty.clone(),
-        ),
-        MirType::Mat(cols, rows, inner) => MirExpr::Call(
-            arena.alloc_str(&format!("mat{}x{}", cols, rows)),
-            (0..(u32::from(*cols) * u32::from(*rows)))
-                .map(|_| default_expr_for_type(arena, inner))
-                .collect(),
-            ty.clone(),
-        ),
-        _ => MirExpr::Lit(MirLit::I32(0)),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Const-expression analysis for zero-param function promotion
 // ---------------------------------------------------------------------------
@@ -2148,6 +2178,18 @@ fn is_const_expr(expr: &MirExpr, known_consts: &HashSet<String>) -> bool {
         | MirExpr::FieldAccess(_, _, _)
         | MirExpr::Index(_, _, _) => false,
     }
+}
+
+fn supports_select_result_type(ty: &MirType<'_>) -> bool {
+    matches!(
+        ty,
+        MirType::I32
+            | MirType::U32
+            | MirType::F32
+            | MirType::Bool
+            | MirType::Vec(_, _)
+            | MirType::Mat(_, _, _)
+    )
 }
 
 fn rewrite_promoted_const_refs_in_program<'a>(

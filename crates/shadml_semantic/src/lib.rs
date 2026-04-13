@@ -997,64 +997,17 @@ impl SemanticAnalyzer {
     }
 
     fn has_impl_for_predicate(&self, predicate: &Predicate) -> bool {
-        self.impls.iter().any(|inst| {
-            inst.trait_name.as_deref() == Some(predicate.trait_name.as_str())
-                && inst.tys == predicate.tys
-        }) || self.builtin_impls.iter().any(|inst| {
-            inst.trait_name == predicate.trait_name && inst.tys == predicate.tys
-        })
+        predicate_has_impl(predicate, &self.impls, &self.builtin_impls)
     }
 
     fn try_improve_predicate(&mut self, predicate: &Predicate, span: Span) {
-        let predicate = predicate.apply_subst(&self.engine.subst);
-
-        if predicate.tys.iter().any(|ty| ty.free_vars().is_empty()) {
-            let candidates: Vec<Vec<Ty>> = self
-                .impls
-                .iter()
-                .filter(|inst| inst.trait_name.as_deref() == Some(predicate.trait_name.as_str()))
-                .filter(|inst| inst.tys.len() == predicate.tys.len())
-                .filter(|inst| predicate_matches_head(&predicate, &inst.tys))
-                .map(|inst| inst.tys.clone())
-                .collect();
-            if candidates.len() == 1 {
-                for (actual, expected) in predicate.tys.iter().zip(candidates[0].iter()) {
-                    self.engine.unify(actual, expected, span);
-                }
-                return;
-            }
-            let builtin_candidates: Vec<Vec<Ty>> = self
-                .builtin_impls
-                .iter()
-                .filter(|inst| inst.trait_name == predicate.trait_name)
-                .filter(|inst| inst.tys.len() == predicate.tys.len())
-                .filter(|inst| predicate_matches_head(&predicate, &inst.tys))
-                .map(|inst| inst.tys.clone())
-                .collect();
-            if builtin_candidates.len() == 1 {
-                for (actual, expected) in predicate.tys.iter().zip(builtin_candidates[0].iter()) {
-                    self.engine.unify(actual, expected, span);
-                }
-            } else if let Some(preferred) = builtin_head_for_predicate(&predicate) {
-                let preferred = preferred
-                    .into_iter()
-                    .map(|ty| normalize_type_aliases(&ty))
-                    .collect::<Vec<_>>();
-                if self.builtin_impls.iter().any(|inst| {
-                    inst.trait_name == predicate.trait_name
-                        && inst.tys.len() == preferred.len()
-                        && inst
-                            .tys
-                            .iter()
-                            .map(normalize_type_aliases)
-                            .eq(preferred.iter().cloned())
-                }) {
-                    for (actual, expected) in predicate.tys.iter().zip(preferred.iter()) {
-                        self.engine.unify(actual, expected, span);
-                    }
-                }
-            }
-        }
+        try_improve_predicate_with_impls(
+            &mut self.engine,
+            predicate,
+            span,
+            &self.impls,
+            &self.builtin_impls,
+        );
     }
 
     fn bind_pattern(&mut self, pat: &Pat, ty: &Ty, env: &mut TypeEnv) {
@@ -1733,7 +1686,7 @@ fn format_impl_head(tys: &[Ty]) -> String {
         .join(" ")
 }
 
-fn predicate_matches_head(predicate: &Predicate, head: &[Ty]) -> bool {
+pub fn predicate_matches_head(predicate: &Predicate, head: &[Ty]) -> bool {
     predicate.tys.len() == head.len()
         && predicate.tys.iter().zip(head.iter()).all(|(actual, expected)| {
             let actual = normalize_type_aliases(actual);
@@ -1742,7 +1695,7 @@ fn predicate_matches_head(predicate: &Predicate, head: &[Ty]) -> bool {
         })
 }
 
-fn builtin_head_for_predicate(predicate: &Predicate) -> Option<Vec<Ty>> {
+pub fn builtin_head_for_predicate(predicate: &Predicate) -> Option<Vec<Ty>> {
     use shadml_typechecker::ty_name;
 
     fn scalar_numeric_name(ty: &Ty) -> Option<&str> {
@@ -1958,6 +1911,75 @@ pub fn extract_vec_type(ty: &Ty) -> Option<(u8, Ty)> {
         }
     }
     None
+}
+
+pub fn predicate_has_impl(
+    predicate: &Predicate,
+    impls: &[ImplInfo],
+    builtin_impls: &[BuiltinImplInfo],
+) -> bool {
+    impls.iter().any(|inst| {
+        inst.trait_name.as_deref() == Some(predicate.trait_name.as_str())
+            && inst.tys == predicate.tys
+    }) || builtin_impls
+        .iter()
+        .any(|inst| inst.trait_name == predicate.trait_name && inst.tys == predicate.tys)
+}
+
+pub fn try_improve_predicate_with_impls(
+    engine: &mut InferEngine,
+    predicate: &Predicate,
+    span: Span,
+    impls: &[ImplInfo],
+    builtin_impls: &[BuiltinImplInfo],
+) {
+    let predicate = predicate.apply_subst(&engine.subst);
+
+    if predicate.tys.iter().any(|ty| ty.free_vars().is_empty()) {
+        let candidates: Vec<Vec<Ty>> = impls
+            .iter()
+            .filter(|inst| inst.trait_name.as_deref() == Some(predicate.trait_name.as_str()))
+            .filter(|inst| inst.tys.len() == predicate.tys.len())
+            .filter(|inst| predicate_matches_head(&predicate, &inst.tys))
+            .map(|inst| inst.tys.clone())
+            .collect();
+        if candidates.len() == 1 {
+            for (actual, expected) in predicate.tys.iter().zip(candidates[0].iter()) {
+                engine.unify(actual, expected, span);
+            }
+            return;
+        }
+        let builtin_candidates: Vec<Vec<Ty>> = builtin_impls
+            .iter()
+            .filter(|inst| inst.trait_name == predicate.trait_name)
+            .filter(|inst| inst.tys.len() == predicate.tys.len())
+            .filter(|inst| predicate_matches_head(&predicate, &inst.tys))
+            .map(|inst| inst.tys.clone())
+            .collect();
+        if builtin_candidates.len() == 1 {
+            for (actual, expected) in predicate.tys.iter().zip(builtin_candidates[0].iter()) {
+                engine.unify(actual, expected, span);
+            }
+        } else if let Some(preferred) = builtin_head_for_predicate(&predicate) {
+            let preferred = preferred
+                .into_iter()
+                .map(|ty| normalize_type_aliases(&ty))
+                .collect::<Vec<_>>();
+            if builtin_impls.iter().any(|inst| {
+                inst.trait_name == predicate.trait_name
+                    && inst.tys.len() == preferred.len()
+                    && inst
+                        .tys
+                        .iter()
+                        .map(normalize_type_aliases)
+                        .eq(preferred.iter().cloned())
+            }) {
+                for (actual, expected) in predicate.tys.iter().zip(preferred.iter()) {
+                    engine.unify(actual, expected, span);
+                }
+            }
+        }
+    }
 }
 
 /// Extract Mat type info: Mat r c T -> Some((r, c, T))

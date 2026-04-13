@@ -1,0 +1,4 @@
+shade : Vec2f -> F32 -> Vec 2 F32 -> Vec 2 F32 -> Vec 4 F32
+shade fragCoord time resolution mouse = vec4 0.0 0.0 0.0 1.0
+  where
+    dist = length (fragCoord - mouse)

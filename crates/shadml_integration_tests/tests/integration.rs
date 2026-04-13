@@ -2316,6 +2316,34 @@ apply x = x.sin
     }
 
     #[test]
+    fn constrained_generic_let_bound_trait_use_compiles() {
+        let source = r#"
+trait Light a where
+  position : a -> Vec<3, F32>
+
+data PointLight = PointLight {
+  lightPosition : Vec<3, F32>
+}
+
+impl Light PointLight where
+  position light = light.lightPosition
+
+lighting : Light a => a -> Vec<3, F32> -> Vec<3, F32>
+lighting light worldPos =
+  let lightDir = position light - worldPos
+  in lightDir
+
+point : PointLight
+point = PointLight { lightPosition = [1.0, 2.0, 3.0] }
+
+result : Vec<3, F32>
+result = lighting point [0.0, 0.0, 0.0]
+"#;
+        let wgsl = compile_to_wgsl(source).expect("generic let-bound trait use should compile");
+        assert!(wgsl.contains("fn lighting_pointlight("));
+    }
+
+    #[test]
     fn constrained_generic_call_without_impl_fails() {
         let source = r#"
 trait Light a where
@@ -2380,6 +2408,41 @@ pairSum a b = a + b
 "#;
         let err = compile_to_wgsl(source).expect_err("curried definition should be rejected");
         assert!(err.contains("expects 1"));
+    }
+
+    #[test]
+    fn tuple_variable_argument_function_compiles() {
+        let source = r#"
+pairSum : (I32, I32) -> I32
+pairSum (a, b) = a + b
+
+result : I32
+result =
+  let p = (1, 2)
+  in pairSum p
+"#;
+        let wgsl = compile_to_wgsl(source).expect("tuple variable argument should compile");
+        assert!(wgsl.contains("fn pairSum"));
+        assert!(wgsl.contains("let __tuple_p_0 = 1i;"));
+    }
+
+    #[test]
+    fn unannotated_tuple_pattern_parameter_compiles() {
+        let source = r#"
+test2 a b (k, j) = a
+
+result : I32
+result = test2 1 2 (3, 4)
+"#;
+        let wgsl = compile_to_wgsl(source).expect("unannotated tuple-pattern parameter should compile");
+        assert!(wgsl.contains("fn test2_"));
+        assert!(wgsl.contains("let k = __tuple__arg2_0;"));
+    }
+
+    #[test]
+    fn tuple_example_compiles() {
+        let source = include_str!("../../../examples/tuple.shadml");
+        compile_to_wgsl(source).expect("tuple example should compile");
     }
 
     #[test]

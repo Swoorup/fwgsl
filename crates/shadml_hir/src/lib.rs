@@ -109,6 +109,8 @@ pub struct HirFieldDef {
 pub enum HirExpr {
     Lit(HirLit, Ty, Span),
     Var(String, Ty, Span),
+    Tuple(Vec<HirExpr>, Ty, Span),
+    TupleIndex(Box<HirExpr>, usize, Ty, Span),
     App(Box<HirExpr>, Box<HirExpr>, Ty, Span),
     Let(Vec<(String, HirExpr)>, Box<HirExpr>, Ty, Span),
     Case(Box<HirExpr>, Vec<HirCaseArm>, Ty, Span),
@@ -137,6 +139,8 @@ impl HirExpr {
         match self {
             HirExpr::Lit(_, ty, _) => ty,
             HirExpr::Var(_, ty, _) => ty,
+            HirExpr::Tuple(_, ty, _) => ty,
+            HirExpr::TupleIndex(_, _, ty, _) => ty,
             HirExpr::App(_, _, ty, _) => ty,
             HirExpr::Let(_, _, ty, _) => ty,
             HirExpr::Case(_, _, ty, _) => ty,

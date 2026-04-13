@@ -21,6 +21,7 @@ shadml_span = { workspace = true }
 shadml_allocator = { workspace = true }
 shadml_bundler = { workspace = true }
 miette = { workspace = true }
+naga = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"

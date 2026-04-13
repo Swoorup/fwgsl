@@ -32,6 +32,8 @@ pub struct AstLowering {
     pub impls: Vec<shadml_semantic::ImplInfo>,
     pub builtin_externs: HashMap<String, Vec<shadml_semantic::BuiltinExternInfo>>,
     pub builtin_impls: Vec<shadml_semantic::BuiltinImplInfo>,
+    pub inferred_predicates: Vec<Predicate>,
+    pub active_constraints_stack: Vec<Vec<Predicate>>,
     /// Map from bitfield type name → ordered list of (field_name, meta).
     /// Populated during `lower_program` before expressions are lowered.
     pub bitfield_fields: HashMap<String, Vec<(String, BitfieldFieldMeta)>>,
@@ -42,6 +44,27 @@ struct PendingSpecialization {
     original_name: String,
     concrete_name: String,
     subst: HashMap<TyVarId, Ty>,
+}
+
+#[derive(Debug, Clone)]
+struct AbiInfo {
+    param_tys: Vec<Ty>,
+    flat_head_ty: Ty,
+}
+
+#[derive(Debug, Clone)]
+enum TupleValue {
+    Scalar(HirExpr, Ty),
+    Tuple(Vec<TupleValue>, Ty),
+}
+
+impl TupleValue {
+    fn into_scalar(self) -> Option<HirExpr> {
+        match self {
+            TupleValue::Scalar(expr, _) => Some(expr),
+            TupleValue::Tuple(_, _) => None,
+        }
+    }
 }
 
 impl AstLowering {
@@ -61,6 +84,8 @@ impl AstLowering {
             impls: sa.impls.clone(),
             builtin_externs: sa.builtin_externs.clone(),
             builtin_impls: sa.builtin_impls.clone(),
+            inferred_predicates: Vec::new(),
+            active_constraints_stack: Vec::new(),
             bitfield_fields: HashMap::new(),
         }
     }
@@ -121,12 +146,7 @@ impl AstLowering {
             } = decl
             {
                 let inferred_ty = self.convert_syntax_type_sig_scheme(constraints, ty);
-                let flattened = Scheme {
-                    constraints: inferred_ty.constraints.clone(),
-                    vars: inferred_ty.vars.clone(),
-                    ty: flatten_tuple_arrows(&inferred_ty.ty),
-                };
-                self.env.insert(name.clone(), flattened);
+                self.env.insert(name.clone(), inferred_ty);
             }
             if let Decl::ConstDecl { name, ty, .. } = decl {
                 let inferred_ty = self.convert_syntax_type_scheme(ty);
@@ -134,12 +154,7 @@ impl AstLowering {
             }
             if let Decl::ExternDecl { name, ty, .. } | Decl::BuiltinExternDecl { name, ty, .. } = decl {
                 let inferred_ty = self.convert_syntax_type_scheme(ty);
-                let flattened = Scheme {
-                    constraints: inferred_ty.constraints.clone(),
-                    vars: inferred_ty.vars.clone(),
-                    ty: flatten_tuple_arrows(&inferred_ty.ty),
-                };
-                self.env.insert(name.clone(), flattened);
+                self.env.insert(name.clone(), inferred_ty);
             }
         }
 
@@ -478,14 +493,15 @@ impl AstLowering {
             }
         }
 
-        self.monomorphize_generic_functions(HirProgram {
+        let program = self.monomorphize_generic_functions(HirProgram {
             functions,
             data_types,
             entry_points,
             bindings,
             bitfields,
             constants,
-        })
+        });
+        self.eliminate_tuple_abi(program)
     }
 
     fn monomorphize_generic_functions(&mut self, mut program: HirProgram) -> HirProgram {
@@ -559,6 +575,537 @@ impl AstLowering {
         program
     }
 
+    fn eliminate_tuple_abi(&mut self, program: HirProgram) -> HirProgram {
+        let abi_map: HashMap<String, AbiInfo> = program
+            .functions
+            .iter()
+            .map(|function| {
+                let param_tys: Vec<Ty> = function.params.iter().map(|(_, ty)| ty.clone()).collect();
+                let flat_param_tys: Vec<Ty> = param_tys
+                    .iter()
+                    .flat_map(flatten_tuple_ty_components)
+                    .collect();
+                let flat_head_ty = flat_param_tys
+                    .iter()
+                    .rev()
+                    .fold(function.return_ty.clone(), |acc, ty| Ty::arrow(ty.clone(), acc));
+                (
+                    function.name.clone(),
+                    AbiInfo {
+                        param_tys,
+                        flat_head_ty,
+                    },
+                )
+            })
+            .collect();
+
+        let functions = program
+            .functions
+            .into_iter()
+            .map(|function| self.eliminate_tuple_function(function, &abi_map))
+            .collect();
+        let entry_points = program
+            .entry_points
+            .into_iter()
+            .map(|entry| self.eliminate_tuple_entry_point(entry, &abi_map))
+            .collect();
+        let constants = program
+            .constants
+            .into_iter()
+            .map(|constant| self.eliminate_tuple_const(constant, &abi_map))
+            .collect();
+
+        HirProgram {
+            functions,
+            entry_points,
+            constants,
+            ..program
+        }
+    }
+
+    fn eliminate_tuple_function(
+        &mut self,
+        function: HirFunction,
+        abi_map: &HashMap<String, AbiInfo>,
+    ) -> HirFunction {
+        let mut tuple_env = HashMap::new();
+        let params = function
+            .params
+            .iter()
+            .flat_map(|(name, ty)| {
+                let flat = flatten_named_tuple_binding(name, ty);
+                if matches!(ty, Ty::Tuple(_)) {
+                    tuple_env.insert(
+                        name.clone(),
+                        tuple_value_from_binding(name, ty, function.span),
+                    );
+                }
+                flat
+            })
+            .collect::<Vec<_>>();
+
+        let body = match self.rewrite_tuple_expr(function.body, abi_map, &tuple_env) {
+            Ok(TupleValue::Scalar(expr, _)) => expr,
+            Ok(TupleValue::Tuple(_, _)) => {
+                self.engine.diagnostics.push(
+                    shadml_diagnostics::Diagnostic::error(format!(
+                        "function `{}` still returns a tuple after tuple ABI lowering",
+                        function.name
+                    ))
+                    .with_label(shadml_diagnostics::Label::primary(
+                        function.span,
+                        "tuple result cannot be lowered to WGSL",
+                    )),
+                );
+                HirExpr::Lit(HirLit::Int(0), Ty::Error, function.span)
+            }
+            Err(message) => {
+                self.engine.diagnostics.push(
+                    shadml_diagnostics::Diagnostic::error(message).with_label(
+                        shadml_diagnostics::Label::primary(
+                            function.span,
+                            "tuple lowering failed",
+                        ),
+                    ),
+                );
+                HirExpr::Lit(HirLit::Int(0), Ty::Error, function.span)
+            }
+        };
+
+        HirFunction {
+            params,
+            body,
+            ..function
+        }
+    }
+
+    fn eliminate_tuple_entry_point(
+        &mut self,
+        entry: HirEntryPoint,
+        abi_map: &HashMap<String, AbiInfo>,
+    ) -> HirEntryPoint {
+        let mut tuple_env = HashMap::new();
+        let params = entry
+            .params
+            .iter()
+            .flat_map(|(name, ty)| {
+                let flat = flatten_named_tuple_binding(name, ty);
+                if matches!(ty, Ty::Tuple(_)) {
+                    tuple_env.insert(name.clone(), tuple_value_from_binding(name, ty, entry.span));
+                }
+                flat
+            })
+            .collect::<Vec<_>>();
+
+        let body = match self.rewrite_tuple_expr(entry.body, abi_map, &tuple_env) {
+            Ok(TupleValue::Scalar(expr, _)) => expr,
+            Ok(TupleValue::Tuple(_, _)) => {
+                self.engine.diagnostics.push(
+                    shadml_diagnostics::Diagnostic::error(format!(
+                        "entry point `{}` still returns a tuple after tuple ABI lowering",
+                        entry.name
+                    ))
+                    .with_label(shadml_diagnostics::Label::primary(
+                        entry.span,
+                        "tuple result cannot be lowered to WGSL",
+                    )),
+                );
+                HirExpr::Lit(HirLit::Int(0), Ty::Error, entry.span)
+            }
+            Err(message) => {
+                self.engine.diagnostics.push(
+                    shadml_diagnostics::Diagnostic::error(message).with_label(
+                        shadml_diagnostics::Label::primary(entry.span, "tuple lowering failed"),
+                    ),
+                );
+                HirExpr::Lit(HirLit::Int(0), Ty::Error, entry.span)
+            }
+        };
+
+        HirEntryPoint { params, body, ..entry }
+    }
+
+    fn eliminate_tuple_const(
+        &mut self,
+        constant: HirConst,
+        abi_map: &HashMap<String, AbiInfo>,
+    ) -> HirConst {
+        let value = match self.rewrite_tuple_expr(constant.value, abi_map, &HashMap::new()) {
+            Ok(TupleValue::Scalar(expr, _)) => expr,
+            Ok(TupleValue::Tuple(_, _)) => {
+                self.engine.diagnostics.push(
+                    shadml_diagnostics::Diagnostic::error(format!(
+                        "constant `{}` still has a tuple value after tuple ABI lowering",
+                        constant.name
+                    ))
+                    .with_label(shadml_diagnostics::Label::primary(
+                        constant.span,
+                        "tuple constant cannot be lowered to WGSL",
+                    )),
+                );
+                HirExpr::Lit(HirLit::Int(0), Ty::Error, constant.span)
+            }
+            Err(message) => {
+                self.engine.diagnostics.push(
+                    shadml_diagnostics::Diagnostic::error(message).with_label(
+                        shadml_diagnostics::Label::primary(constant.span, "tuple lowering failed"),
+                    ),
+                );
+                HirExpr::Lit(HirLit::Int(0), Ty::Error, constant.span)
+            }
+        };
+
+        HirConst { value, ..constant }
+    }
+
+    fn rewrite_tuple_expr(
+        &mut self,
+        expr: HirExpr,
+        abi_map: &HashMap<String, AbiInfo>,
+        tuple_env: &HashMap<String, TupleValue>,
+    ) -> Result<TupleValue, String> {
+        match expr {
+            HirExpr::Lit(_, _, _) => {
+                let ty = expr.ty().clone();
+                Ok(TupleValue::Scalar(expr, ty))
+            }
+            HirExpr::Var(name, ty, span) if !matches!(ty, Ty::Tuple(_)) => Ok(
+                TupleValue::Scalar(HirExpr::Var(name, ty.clone(), span), ty),
+            ),
+            HirExpr::Var(name, _ty, span) => tuple_env
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| format!("tuple value `{}` escaped tuple ABI lowering at {:?}", name, span)),
+            HirExpr::Tuple(items, ty, _) => Ok(TupleValue::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| self.rewrite_tuple_expr(item, abi_map, tuple_env))
+                    .collect::<Result<Vec<_>, _>>()?,
+                ty,
+            )),
+            HirExpr::TupleIndex(base, index, _, span) => {
+                let base = self.rewrite_tuple_expr(*base, abi_map, tuple_env)?;
+                match base {
+                    TupleValue::Tuple(items, _) => items.into_iter().nth(index).ok_or_else(|| {
+                        format!("tuple index {} out of bounds during tuple ABI lowering at {:?}", index, span)
+                    }),
+                    TupleValue::Scalar(_, _) => Err(format!(
+                        "tuple projection applied to a non-tuple value at {:?}",
+                        span
+                    )),
+                }
+            }
+            HirExpr::App(_, _, _, _) => self.rewrite_tuple_app(expr, abi_map, tuple_env),
+            HirExpr::Let(binds, body, _ty, span) => {
+                let mut flat_binds = Vec::new();
+                let mut local_env = tuple_env.clone();
+                for (name, bind_expr) in binds {
+                    let value = self.rewrite_tuple_expr(bind_expr, abi_map, &local_env)?;
+                    self.emit_tuple_bindings(&name, value, span, &mut flat_binds, &mut local_env);
+                }
+                let body_value = self.rewrite_tuple_expr(*body, abi_map, &local_env)?;
+                match body_value {
+                    TupleValue::Scalar(body_expr, body_ty) => {
+                        if flat_binds.is_empty() {
+                            Ok(TupleValue::Scalar(body_expr, body_ty))
+                        } else {
+                            Ok(TupleValue::Scalar(
+                                HirExpr::Let(flat_binds, Box::new(body_expr), body_ty.clone(), span),
+                                body_ty,
+                            ))
+                        }
+                    }
+                    TupleValue::Tuple(_, _) => Err(format!(
+                        "tuple-valued let body escaped tuple ABI lowering at {:?}",
+                        span
+                    )),
+                }
+            }
+            HirExpr::Case(scrutinee, arms, ty, span) => {
+                let scrutinee = self
+                    .rewrite_tuple_expr(*scrutinee, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple scrutinee escaped tuple ABI lowering at {:?}", span))?;
+                let arms = arms
+                    .into_iter()
+                    .map(|arm| {
+                        let guard = arm
+                            .guard
+                            .map(|guard| {
+                                self.rewrite_tuple_expr(guard, abi_map, tuple_env)?
+                                    .into_scalar()
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "tuple guard escaped tuple ABI lowering at {:?}",
+                                            span
+                                        )
+                                    })
+                            })
+                            .transpose()?;
+                        let body = self
+                            .rewrite_tuple_expr(arm.body, abi_map, tuple_env)?
+                            .into_scalar()
+                            .ok_or_else(|| format!("tuple case body escaped tuple ABI lowering at {:?}", span))?;
+                        Ok(HirCaseArm {
+                            pattern: arm.pattern,
+                            guard,
+                            body,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::Case(Box::new(scrutinee), arms, ty.clone(), span),
+                    ty,
+                ))
+            }
+            HirExpr::If(cond, then_expr, else_expr, ty, span) => {
+                let cond = self
+                    .rewrite_tuple_expr(*cond, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple condition escaped tuple ABI lowering at {:?}", span))?;
+                let then_expr = self
+                    .rewrite_tuple_expr(*then_expr, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple then-branch escaped tuple ABI lowering at {:?}", span))?;
+                let else_expr = self
+                    .rewrite_tuple_expr(*else_expr, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple else-branch escaped tuple ABI lowering at {:?}", span))?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::If(Box::new(cond), Box::new(then_expr), Box::new(else_expr), ty.clone(), span),
+                    ty,
+                ))
+            }
+            HirExpr::BinOp(op, lhs, rhs, ty, span) => {
+                let lhs = self
+                    .rewrite_tuple_expr(*lhs, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple lhs escaped tuple ABI lowering at {:?}", span))?;
+                let rhs = self
+                    .rewrite_tuple_expr(*rhs, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple rhs escaped tuple ABI lowering at {:?}", span))?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::BinOp(op, Box::new(lhs), Box::new(rhs), ty.clone(), span),
+                    ty,
+                ))
+            }
+            HirExpr::UnaryNeg(inner, ty, span) => {
+                let inner = self
+                    .rewrite_tuple_expr(*inner, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple unary operand escaped tuple ABI lowering at {:?}", span))?;
+                Ok(TupleValue::Scalar(HirExpr::UnaryNeg(Box::new(inner), ty.clone(), span), ty))
+            }
+            HirExpr::UnaryNot(inner, ty, span) => {
+                let inner = self
+                    .rewrite_tuple_expr(*inner, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple unary operand escaped tuple ABI lowering at {:?}", span))?;
+                Ok(TupleValue::Scalar(HirExpr::UnaryNot(Box::new(inner), ty.clone(), span), ty))
+            }
+            HirExpr::UnaryBitNot(inner, ty, span) => {
+                let inner = self
+                    .rewrite_tuple_expr(*inner, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple unary operand escaped tuple ABI lowering at {:?}", span))?;
+                Ok(TupleValue::Scalar(HirExpr::UnaryBitNot(Box::new(inner), ty.clone(), span), ty))
+            }
+            HirExpr::ConstructorCall(name, tag, args, ty, span) => {
+                let args = args
+                    .into_iter()
+                    .map(|arg| {
+                        self.rewrite_tuple_expr(arg, abi_map, tuple_env)?
+                            .into_scalar()
+                            .ok_or_else(|| {
+                                format!("tuple constructor argument escaped tuple ABI lowering at {:?}", span)
+                            })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::ConstructorCall(name, tag, args, ty.clone(), span),
+                    ty,
+                ))
+            }
+            HirExpr::FieldAccess(base, field, ty, span) => {
+                let base = self
+                    .rewrite_tuple_expr(*base, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple field base escaped tuple ABI lowering at {:?}", span))?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::FieldAccess(Box::new(base), field, ty.clone(), span),
+                    ty,
+                ))
+            }
+            HirExpr::Index(base, index, ty, span) => {
+                let base = self
+                    .rewrite_tuple_expr(*base, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple index base escaped tuple ABI lowering at {:?}", span))?;
+                let index = self
+                    .rewrite_tuple_expr(*index, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple index escaped tuple ABI lowering at {:?}", span))?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::Index(Box::new(base), Box::new(index), ty.clone(), span),
+                    ty,
+                ))
+            }
+            HirExpr::Loop(loop_name, bindings, body, ty, span) => {
+                let bindings = bindings
+                    .into_iter()
+                    .map(|(name, expr)| {
+                        self.rewrite_tuple_expr(expr, abi_map, tuple_env)?
+                            .into_scalar()
+                            .ok_or_else(|| {
+                                format!("tuple loop binding escaped tuple ABI lowering at {:?}", span)
+                            })
+                            .map(|expr| (name, expr))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let body = self
+                    .rewrite_tuple_expr(*body, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple loop body escaped tuple ABI lowering at {:?}", span))?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::Loop(loop_name, bindings, Box::new(body), ty.clone(), span),
+                    ty,
+                ))
+            }
+            HirExpr::BitfieldConstruct(name, fields, ty, span) => {
+                let fields = fields
+                    .into_iter()
+                    .map(|(field_name, expr)| {
+                        self.rewrite_tuple_expr(expr, abi_map, tuple_env)?
+                            .into_scalar()
+                            .ok_or_else(|| {
+                                format!(
+                                    "tuple bitfield construction field escaped tuple ABI lowering at {:?}",
+                                    span
+                                )
+                            })
+                            .map(|expr| (field_name, expr))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::BitfieldConstruct(name, fields, ty.clone(), span),
+                    ty,
+                ))
+            }
+            HirExpr::BitfieldUpdate(name, base, fields, ty, span) => {
+                let base = self
+                    .rewrite_tuple_expr(*base, abi_map, tuple_env)?
+                    .into_scalar()
+                    .ok_or_else(|| format!("tuple bitfield base escaped tuple ABI lowering at {:?}", span))?;
+                let fields = fields
+                    .into_iter()
+                    .map(|(field_name, expr)| {
+                        self.rewrite_tuple_expr(expr, abi_map, tuple_env)?
+                            .into_scalar()
+                            .ok_or_else(|| {
+                                format!(
+                                    "tuple bitfield update field escaped tuple ABI lowering at {:?}",
+                                    span
+                                )
+                            })
+                            .map(|expr| (field_name, expr))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(TupleValue::Scalar(
+                    HirExpr::BitfieldUpdate(name, Box::new(base), fields, ty.clone(), span),
+                    ty,
+                ))
+            }
+        }
+    }
+
+    fn rewrite_tuple_app(
+        &mut self,
+        expr: HirExpr,
+        abi_map: &HashMap<String, AbiInfo>,
+        tuple_env: &HashMap<String, TupleValue>,
+    ) -> Result<TupleValue, String> {
+        let (head, args) = collect_hir_app_chain(expr.clone());
+        if let HirExpr::Var(name, _head_ty, span) = &head {
+            if let Some(abi) = abi_map.get(name) {
+                let rewritten_args = args
+                    .into_iter()
+                    .map(|arg| self.rewrite_tuple_expr(arg, abi_map, tuple_env))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if rewritten_args.len() > abi.param_tys.len() {
+                    return Err(format!(
+                        "call to `{}` has more arguments than its tuple-aware ABI expects",
+                        name
+                    ));
+                }
+
+                let mut flat_args = Vec::new();
+                for (arg, param_ty) in rewritten_args.into_iter().zip(abi.param_tys.iter()) {
+                    flat_args.extend(expand_tuple_argument(arg, param_ty)?);
+                }
+
+                let mut cursor = abi.flat_head_ty.clone();
+                let mut app = HirExpr::Var(name.clone(), abi.flat_head_ty.clone(), *span);
+                for arg in flat_args {
+                    let Ty::Arrow(_, to) = cursor else {
+                        return Err(format!("flattened tuple ABI for `{}` is not callable", name));
+                    };
+                    let next_ty = (*to).clone();
+                    app = HirExpr::App(Box::new(app), Box::new(arg), next_ty.clone(), *span);
+                    cursor = next_ty;
+                }
+                return Ok(TupleValue::Scalar(app, cursor));
+            }
+        }
+        let HirExpr::App(func, arg, ty, span) = expr else {
+            unreachable!();
+        };
+        let func = self
+            .rewrite_tuple_expr(*func, abi_map, tuple_env)?
+            .into_scalar()
+            .ok_or_else(|| format!("tuple-valued callee escaped tuple ABI lowering at {:?}", span))?;
+        let arg = self
+            .rewrite_tuple_expr(*arg, abi_map, tuple_env)?
+            .into_scalar()
+            .ok_or_else(|| format!("tuple-valued argument escaped tuple ABI lowering at {:?}", span))?;
+        Ok(TupleValue::Scalar(
+            HirExpr::App(Box::new(func), Box::new(arg), ty.clone(), span),
+            ty,
+        ))
+    }
+
+    fn emit_tuple_bindings(
+        &self,
+        name: &str,
+        value: TupleValue,
+        span: Span,
+        flat_binds: &mut Vec<(String, HirExpr)>,
+        tuple_env: &mut HashMap<String, TupleValue>,
+    ) {
+        match value {
+            TupleValue::Scalar(expr, ty) => {
+                flat_binds.push((name.to_string(), expr));
+                tuple_env.insert(
+                    name.to_string(),
+                    TupleValue::Scalar(HirExpr::Var(name.to_string(), ty.clone(), span), ty),
+                );
+            }
+            TupleValue::Tuple(items, ty) => {
+                for (index, item) in items.into_iter().enumerate() {
+                    let component_name = tuple_component_name(name, index);
+                    self.emit_tuple_bindings(
+                        &component_name,
+                        item,
+                        span,
+                        flat_binds,
+                        tuple_env,
+                    );
+                }
+                tuple_env.insert(name.to_string(), tuple_value_from_binding(name, &ty, span));
+            }
+        }
+    }
+
     fn specialize_function(
         &mut self,
         template: &HirFunction,
@@ -608,6 +1155,32 @@ impl AstLowering {
                 let resolved_name = self.resolve_trait_method_or_diag(&name, &ty, span);
                 HirExpr::Var(resolved_name, ty, span)
             }
+            HirExpr::Tuple(items, ty, span) => HirExpr::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| {
+                        self.rewrite_specialized_expr_with_subst(
+                            item,
+                            generic_templates,
+                            pending,
+                            subst,
+                        )
+                    })
+                    .collect(),
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
+            HirExpr::TupleIndex(base, index, ty, span) => HirExpr::TupleIndex(
+                Box::new(self.rewrite_specialized_expr_with_subst(
+                    *base,
+                    generic_templates,
+                    pending,
+                    subst,
+                )),
+                index,
+                substitute_ty_vars(&ty, subst),
+                span,
+            ),
             HirExpr::App(func, arg, ty, span) => HirExpr::App(
                 Box::new(self.rewrite_specialized_expr_with_subst(
                     *func,
@@ -921,25 +1494,20 @@ impl AstLowering {
         comments: Vec<String>,
     ) -> Option<HirFunction> {
         let mut local_env = self.env.clone();
+        let predicate_start = self.inferred_predicates.len();
 
         let mut hir_params = Vec::new();
         let mut param_types = Vec::new();
-        for pat in params {
-            // Flatten tuple patterns into individual parameters
-            if let Pat::Tuple(sub_pats, _) = pat {
-                for sub_pat in sub_pats {
-                    let ty = self.engine.fresh_var();
-                    let pname = pat_name(sub_pat);
-                    self.bind_pattern(sub_pat, &ty, &mut local_env);
-                    param_types.push(ty.clone());
-                    hir_params.push((pname, ty));
-                }
-            } else {
-                let ty = self.engine.fresh_var();
-                let pname = pat_name(pat);
-                self.bind_pattern(pat, &ty, &mut local_env);
-                param_types.push(ty.clone());
-                hir_params.push((pname, ty));
+        let mut param_pattern_binds = Vec::new();
+        for (index, pat) in params.iter().enumerate() {
+            let ty = self.engine.fresh_var();
+            let pname = param_binding_name(pat, index);
+            self.bind_pattern(pat, &ty, &mut local_env);
+            param_types.push(ty.clone());
+            hir_params.push((pname.clone(), ty.clone()));
+            if !matches!(pat, Pat::Var(..) | Pat::Wild(..)) {
+                let base = HirExpr::Var(pname, ty.clone(), span);
+                param_pattern_binds.extend(self.build_pattern_bindings(pat, base, &ty));
             }
         }
 
@@ -950,16 +1518,39 @@ impl AstLowering {
         for pt in param_types.iter().rev() {
             fun_ty = Ty::arrow(pt.clone(), fun_ty);
         }
-        if let Some(scheme) = self.env.lookup(name) {
-            let declared = self.engine.instantiate(scheme);
-            self.engine.unify(&fun_ty, &declared, span);
-        }
+        let active_constraints = if let Some(scheme) = self.env.lookup(name) {
+            let declared = self.engine.instantiate_qualified(scheme);
+            self.engine.unify(&fun_ty, &declared.ty, span);
+            declared.constraints
+        } else {
+            vec![]
+        };
 
         let body = desugar_where(body, where_binds, span);
-        let (hir_body, body_ty) = self.lower_expr(&body, &mut local_env);
+        self.active_constraints_stack.push(active_constraints.clone());
+        let (mut hir_body, body_ty) = self.lower_expr(&body, &mut local_env);
+        self.active_constraints_stack.pop();
+        if !param_pattern_binds.is_empty() {
+            hir_body = HirExpr::Let(param_pattern_binds, Box::new(hir_body), body_ty.clone(), span);
+        }
 
         // Unify body type with the return type from the signature
         self.engine.unify(&body_ty, &ret_ty_var, span);
+        let inferred_constraints =
+            self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
+        for predicate in inferred_constraints {
+            self.engine.diagnostics.push(
+                shadml_diagnostics::Diagnostic::error(format!(
+                    "missing trait constraint `{}`",
+                    format_predicate_local(&predicate)
+                ))
+                .with_label(shadml_diagnostics::Label::primary(
+                    span,
+                    "trait use requires a declared constraint",
+                ))
+                .with_help("add the corresponding constraint to the function signature"),
+            );
+        }
 
         // Finalize types
         let final_params: Vec<(String, Ty)> = hir_params
@@ -1099,24 +1690,20 @@ impl AstLowering {
         comments: Vec<String>,
     ) -> Option<HirEntryPoint> {
         let mut local_env = self.env.clone();
+        let predicate_start = self.inferred_predicates.len();
 
         let mut hir_params = Vec::new();
         let mut param_types = Vec::new();
-        for pat in params {
-            if let Pat::Tuple(sub_pats, _) = pat {
-                for sub_pat in sub_pats {
-                    let ty = self.engine.fresh_var();
-                    let pname = pat_name(sub_pat);
-                    self.bind_pattern(sub_pat, &ty, &mut local_env);
-                    param_types.push(ty.clone());
-                    hir_params.push((pname, ty));
-                }
-            } else {
-                let ty = self.engine.fresh_var();
-                let pname = pat_name(pat);
-                self.bind_pattern(pat, &ty, &mut local_env);
-                param_types.push(ty.clone());
-                hir_params.push((pname, ty));
+        let mut param_pattern_binds = Vec::new();
+        for (index, pat) in params.iter().enumerate() {
+            let ty = self.engine.fresh_var();
+            let pname = param_binding_name(pat, index);
+            self.bind_pattern(pat, &ty, &mut local_env);
+            param_types.push(ty.clone());
+            hir_params.push((pname.clone(), ty.clone()));
+            if !matches!(pat, Pat::Var(..) | Pat::Wild(..)) {
+                let base = HirExpr::Var(pname, ty.clone(), span);
+                param_pattern_binds.extend(self.build_pattern_bindings(pat, base, &ty));
             }
         }
 
@@ -1128,13 +1715,36 @@ impl AstLowering {
             fun_ty = Ty::arrow(pt.clone(), fun_ty);
         }
 
-        if let Some(scheme) = self.env.lookup(name) {
-            let declared = self.engine.instantiate(scheme);
-            self.engine.unify(&fun_ty, &declared, span);
-        }
+        let active_constraints = if let Some(scheme) = self.env.lookup(name) {
+            let declared = self.engine.instantiate_qualified(scheme);
+            self.engine.unify(&fun_ty, &declared.ty, span);
+            declared.constraints
+        } else {
+            vec![]
+        };
 
-        let (hir_body, body_ty) = self.lower_expr(body, &mut local_env);
+        self.active_constraints_stack.push(active_constraints.clone());
+        let (mut hir_body, body_ty) = self.lower_expr(body, &mut local_env);
+        self.active_constraints_stack.pop();
+        if !param_pattern_binds.is_empty() {
+            hir_body = HirExpr::Let(param_pattern_binds, Box::new(hir_body), body_ty.clone(), span);
+        }
         self.engine.unify(&body_ty, &ret_ty_var, span);
+        let inferred_constraints =
+            self.resolve_inferred_predicates(predicate_start, &active_constraints, span);
+        for predicate in inferred_constraints {
+            self.engine.diagnostics.push(
+                shadml_diagnostics::Diagnostic::error(format!(
+                    "missing trait constraint `{}`",
+                    format_predicate_local(&predicate)
+                ))
+                .with_label(shadml_diagnostics::Label::primary(
+                    span,
+                    "trait use requires a declared constraint",
+                ))
+                .with_help("add the corresponding constraint to the entry-point signature"),
+            );
+        }
 
         let final_params: Vec<(String, Ty)> = hir_params
             .into_iter()
@@ -1160,6 +1770,110 @@ impl AstLowering {
             span,
             comments,
         })
+    }
+
+    fn instantiate_scheme(&mut self, scheme: &Scheme) -> Ty {
+        let qualified = self.engine.instantiate_qualified(scheme);
+        self.inferred_predicates
+            .extend(qualified.constraints.iter().cloned());
+        qualified.ty
+    }
+
+    fn active_constraints(&self) -> &[Predicate] {
+        self.active_constraints_stack
+            .last()
+            .map(|constraints| constraints.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn resolve_inferred_predicates(
+        &mut self,
+        start: usize,
+        active_constraints: &[Predicate],
+        span: Span,
+    ) -> Vec<Predicate> {
+        let pending: Vec<Predicate> = self.inferred_predicates.drain(start..).collect();
+        let mut retained = Vec::new();
+        let subst = self.engine.subst.clone();
+        for predicate in pending.into_iter().map(|predicate| predicate.apply_subst(&subst)) {
+            shadml_semantic::try_improve_predicate_with_impls(
+                &mut self.engine,
+                &predicate,
+                span,
+                &self.impls,
+                &self.builtin_impls,
+            );
+            let predicate = predicate.apply_subst(&self.engine.subst);
+            if retained.iter().any(|existing| existing == &predicate) {
+                continue;
+            }
+            if active_constraints
+                .iter()
+                .any(|active| active.apply_subst(&self.engine.subst) == predicate)
+            {
+                continue;
+            }
+            if predicate.tys.iter().all(|ty| ty.free_vars().is_empty()) {
+                if shadml_semantic::predicate_has_impl(
+                    &predicate,
+                    &self.impls,
+                    &self.builtin_impls,
+                ) {
+                    continue;
+                }
+                self.engine.diagnostics.push(
+                    shadml_diagnostics::Diagnostic::error(format!(
+                        "type `{}` does not implement trait `{}`",
+                        format_impl_head_local(&predicate.tys),
+                        predicate.trait_name
+                    ))
+                    .with_label(shadml_diagnostics::Label::primary(
+                        span,
+                        "missing trait implementation",
+                    ))
+                    .with_help(format!(
+                        "define `impl {} {} where ...`",
+                        predicate.trait_name,
+                        format_impl_head_local(&predicate.tys)
+                    )),
+                );
+                continue;
+            }
+            retained.push(predicate);
+        }
+        retained
+    }
+
+    fn build_pattern_bindings(&mut self, pat: &Pat, base: HirExpr, ty: &Ty) -> Vec<(String, HirExpr)> {
+        let final_ty = self.engine.finalize(ty);
+        match pat {
+            Pat::Var(name, _) => vec![(name.clone(), base)],
+            Pat::Wild(_) => vec![],
+            Pat::Paren(inner, _) => self.build_pattern_bindings(inner, base, &final_ty),
+            Pat::As(name, inner, _) => {
+                let mut binds = vec![(name.clone(), base.clone())];
+                binds.extend(self.build_pattern_bindings(inner, base, &final_ty));
+                binds
+            }
+            Pat::Tuple(items, span) => match final_ty {
+                Ty::Tuple(elem_tys) if elem_tys.len() == items.len() => items
+                    .iter()
+                    .zip(elem_tys.iter())
+                    .enumerate()
+                    .flat_map(|(index, (item, item_ty))| {
+                        let projection = HirExpr::TupleIndex(
+                            Box::new(base.clone()),
+                            index,
+                            item_ty.clone(),
+                            *span,
+                        );
+                        self.build_pattern_bindings(item, projection, item_ty)
+                    })
+                    .collect(),
+                _ => vec![],
+            },
+            _ => vec![],
+        }
     }
 
     fn lower_data_decl(&self, name: &str, type_params: &[String], cons: &[ConDecl]) -> HirDataType {
@@ -1223,7 +1937,7 @@ impl AstLowering {
 
             Expr::Var(name, span) => {
                 let ty = if let Some(scheme) = env.lookup(name) {
-                    self.engine.instantiate(scheme)
+                    self.instantiate_scheme(scheme)
                 } else {
                     Ty::Error
                 };
@@ -1235,7 +1949,7 @@ impl AstLowering {
                 // a nullary constructor call; otherwise it's just a variable
                 // reference (will be applied later).
                 let ty = if let Some(scheme) = env.lookup(name) {
-                    self.engine.instantiate(scheme)
+                    self.instantiate_scheme(scheme)
                 } else {
                     Ty::Error
                 };
@@ -1336,26 +2050,6 @@ impl AstLowering {
                         )
                     }
                 } else {
-                    // Flatten tuple arguments: f (a, b, c) => f a b c
-                    if let Expr::Tuple(elems, _) = arg.as_ref() {
-                        if !elems.is_empty() {
-                            let (mut expr, mut cur_ty) = self.lower_expr(func, env);
-                            for elem in elems {
-                                let (hir_arg, arg_ty) = self.lower_expr(elem, env);
-                                let ret_ty = self.engine.fresh_var();
-                                let expected = Ty::arrow(arg_ty, ret_ty.clone());
-                                self.engine.unify(&cur_ty, &expected, *span);
-                                expr = HirExpr::App(
-                                    Box::new(expr),
-                                    Box::new(hir_arg),
-                                    ret_ty.clone(),
-                                    *span,
-                                );
-                                cur_ty = ret_ty;
-                            }
-                            return (expr, cur_ty);
-                        }
-                    }
                     let (hir_func, func_ty) = self.lower_expr(func, env);
                     let (hir_arg, arg_ty) = self.lower_expr(arg, env);
                     let ret_ty = self.engine.fresh_var();
@@ -1376,7 +2070,7 @@ impl AstLowering {
 
                     // Get operator type and unify
                     let op_ty = if let Some(scheme) = env.lookup(op) {
-                        self.engine.instantiate(scheme)
+                        self.instantiate_scheme(scheme)
                     } else if op == ">>" {
                         let a = self.engine.fresh_var();
                         Ty::arrow(a.clone(), Ty::arrow(a.clone(), a))
@@ -1402,7 +2096,7 @@ impl AstLowering {
                 } else {
                     // Desugar as function application: (op lhs) rhs
                     let op_ty = if let Some(scheme) = env.lookup(op) {
-                        self.engine.instantiate(scheme)
+                        self.instantiate_scheme(scheme)
                     } else if op == ">>" {
                         let a = self.engine.fresh_var();
                         Ty::arrow(a.clone(), Ty::arrow(a.clone(), a))
@@ -1449,8 +2143,20 @@ impl AstLowering {
                 let mut local_env = env.clone();
                 let mut hir_binds = Vec::new();
                 for (name, expr) in binds {
+                    let predicate_start = self.inferred_predicates.len();
                     let (hir_expr, ty) = self.lower_expr(expr, &mut local_env);
-                    local_env.insert(name.clone(), Scheme::mono(ty.clone()));
+                    let active_constraints = self.active_constraints().to_vec();
+                    let inferred_constraints = self.resolve_inferred_predicates(
+                        predicate_start,
+                        &active_constraints,
+                        *span,
+                    );
+                    let scheme = self.engine.generalize_with_constraints(
+                        &local_env,
+                        &ty,
+                        &inferred_constraints,
+                    );
+                    local_env.insert(name.clone(), scheme);
                     hir_binds.push((name.clone(), hir_expr));
                 }
                 let (hir_body, body_ty) = self.lower_expr(body, &mut local_env);
@@ -1511,16 +2217,17 @@ impl AstLowering {
 
             Expr::Tuple(elems, span) => {
                 if elems.is_empty() {
-                    (HirExpr::Lit(HirLit::Int(0), Ty::unit(), *span), Ty::unit())
+                    (HirExpr::Tuple(vec![], Ty::unit(), *span), Ty::unit())
                 } else {
-                    // Lower all elements and return the last one as a fallback.
-                    // Tuple expressions used as function arguments are handled
-                    // by the App flattening above; this path is for standalone tuples.
-                    let mut last = None;
+                    let mut hir_elems = Vec::new();
+                    let mut tys = Vec::new();
                     for e in elems {
-                        last = Some(self.lower_expr(e, env));
+                        let (hir_elem, ty) = self.lower_expr(e, env);
+                        hir_elems.push(hir_elem);
+                        tys.push(ty);
                     }
-                    last.unwrap()
+                    let tuple_ty = Ty::Tuple(tys);
+                    (HirExpr::Tuple(hir_elems, tuple_ty.clone(), *span), tuple_ty)
                 }
             }
 
@@ -1628,7 +2335,7 @@ impl AstLowering {
                     &expr_ty_final,
                 ) {
                     if let Some(scheme) = env.lookup(&name) {
-                        let func_ty = self.engine.instantiate(scheme);
+                        let func_ty = self.instantiate_scheme(scheme);
                         let ret_ty = self.engine.fresh_var();
                         let expected = Ty::arrow(expr_ty, ret_ty.clone());
                         self.engine.unify(&func_ty, &expected, *span);
@@ -1750,7 +2457,7 @@ impl AstLowering {
 
             Expr::OpSection(op, span) => {
                 let ty = if let Some(scheme) = env.lookup(op) {
-                    self.engine.instantiate(scheme)
+                    self.instantiate_scheme(scheme)
                 } else {
                     Ty::Error
                 };
@@ -2568,6 +3275,17 @@ impl AstLowering {
                 let resolved_name = self.resolve_trait_method_or_diag(&name, &final_ty, span);
                 HirExpr::Var(resolved_name, final_ty, span)
             }
+            HirExpr::Tuple(items, ty, span) => HirExpr::Tuple(
+                items.into_iter().map(|item| self.finalize_expr(item)).collect(),
+                self.engine.finalize(&ty),
+                span,
+            ),
+            HirExpr::TupleIndex(base, index, ty, span) => HirExpr::TupleIndex(
+                Box::new(self.finalize_expr(*base)),
+                index,
+                self.engine.finalize(&ty),
+                span,
+            ),
             HirExpr::App(func, arg, ty, span) => {
                 let final_func = self.finalize_expr(*func);
                 let final_arg = self.finalize_expr(*arg);
@@ -2948,6 +3666,21 @@ fn extract_first_arg_type(ty: &Ty) -> Option<Ty> {
     }
 }
 
+fn format_predicate_local(predicate: &Predicate) -> String {
+    format!(
+        "{} {}",
+        predicate.trait_name,
+        format_impl_head_local(&predicate.tys)
+    )
+}
+
+fn format_impl_head_local(tys: &[Ty]) -> String {
+    tys.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn fresh_var_id(engine: &mut InferEngine) -> TyVarId {
     match engine.fresh_var() {
         Ty::Var(id) => id,
@@ -2985,22 +3718,10 @@ fn pat_name(pat: &Pat) -> String {
     }
 }
 
-/// Flatten tuple arrows: `(A, B) -> R` becomes `A -> B -> R`.
-fn flatten_tuple_arrows(ty: &Ty) -> Ty {
-    match ty {
-        Ty::Arrow(from, to) => {
-            let to_flat = flatten_tuple_arrows(to);
-            if let Ty::Tuple(elems) = from.as_ref() {
-                let mut result = to_flat;
-                for elem in elems.iter().rev() {
-                    result = Ty::arrow(flatten_tuple_arrows(elem), result);
-                }
-                result
-            } else {
-                Ty::arrow(flatten_tuple_arrows(from), to_flat)
-            }
-        }
-        _ => ty.clone(),
+fn param_binding_name(pat: &Pat, index: usize) -> String {
+    match pat {
+        Pat::Var(..) | Pat::Wild(..) | Pat::Paren(..) | Pat::As(..) => pat_name(pat),
+        _ => format!("_arg{}", index),
     }
 }
 
@@ -3116,6 +3837,91 @@ fn collect_hir_app_args(expr: &HirExpr) -> (&HirExpr, Vec<&HirExpr>) {
     (current, args)
 }
 
+fn collect_hir_app_chain(expr: HirExpr) -> (HirExpr, Vec<HirExpr>) {
+    let mut args = Vec::new();
+    let mut current = expr;
+    while let HirExpr::App(func, arg, _, _) = current {
+        args.push(*arg);
+        current = *func;
+    }
+    args.reverse();
+    (current, args)
+}
+
+fn flatten_tuple_ty_components(ty: &Ty) -> Vec<Ty> {
+    match ty {
+        Ty::Tuple(items) => items
+            .iter()
+            .flat_map(flatten_tuple_ty_components)
+            .collect(),
+        _ => vec![ty.clone()],
+    }
+}
+
+fn tuple_component_name(base: &str, index: usize) -> String {
+    format!("__tuple_{}_{}", base, index)
+}
+
+fn flatten_named_tuple_binding(base: &str, ty: &Ty) -> Vec<(String, Ty)> {
+    match ty {
+        Ty::Tuple(items) => items
+            .iter()
+            .enumerate()
+            .flat_map(|(index, item)| {
+                flatten_named_tuple_binding(&tuple_component_name(base, index), item)
+            })
+            .collect(),
+        _ => vec![(base.to_string(), ty.clone())],
+    }
+}
+
+fn tuple_value_from_binding(base: &str, ty: &Ty, span: Span) -> TupleValue {
+    match ty {
+        Ty::Tuple(items) => TupleValue::Tuple(
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    tuple_value_from_binding(&tuple_component_name(base, index), item, span)
+                })
+                .collect(),
+            ty.clone(),
+        ),
+        _ => TupleValue::Scalar(
+            HirExpr::Var(base.to_string(), ty.clone(), span),
+            ty.clone(),
+        ),
+    }
+}
+
+fn expand_tuple_argument(value: TupleValue, param_ty: &Ty) -> Result<Vec<HirExpr>, String> {
+    match (value, param_ty) {
+        (TupleValue::Scalar(_, _), Ty::Tuple(_)) => Err(format!(
+            "expected a tuple argument for parameter type `{}`",
+            param_ty
+        )),
+        (TupleValue::Tuple(_, _), ty) if !matches!(ty, Ty::Tuple(_)) => {
+            Err(format!("tuple argument does not match non-tuple parameter type `{}`", ty))
+        }
+        (TupleValue::Scalar(expr, _), _) => Ok(vec![expr]),
+        (TupleValue::Tuple(items, _), Ty::Tuple(param_items)) => {
+            if items.len() != param_items.len() {
+                return Err(format!(
+                    "tuple argument arity mismatch: expected {}, found {}",
+                    param_items.len(),
+                    items.len()
+                ));
+            }
+            let mut flat = Vec::new();
+            for (item, param_item) in items.into_iter().zip(param_items.iter()) {
+                flat.extend(expand_tuple_argument(item, param_item)?);
+            }
+            Ok(flat)
+        }
+        (TupleValue::Tuple(_, _), _) => unreachable!(),
+    }
+}
+
 fn rename_hir_app_head(expr: HirExpr, new_name: &str, new_ty: Ty, span: Span) -> HirExpr {
     match expr {
         HirExpr::App(func, arg, ty, app_span) => HirExpr::App(
@@ -3199,6 +4005,7 @@ fn ty_to_mono_suffix_local(ty: &Ty) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shadml_parser::parser::Parser;
     use shadml_semantic::SemanticAnalyzer;
 
     fn span() -> Span {
@@ -3210,6 +4017,29 @@ mod tests {
         let mut combined = prelude.decls.clone();
         combined.append(&mut program.decls);
         program.decls = combined;
+    }
+
+    fn lower_source(source: &str) -> (AstLowering, HirProgram) {
+        let mut parser = Parser::new(source);
+        let mut program = parser.parse_program();
+        assert!(
+            !parser.diagnostics().has_errors(),
+            "parse errors: {:?}",
+            parser.diagnostics().iter().collect::<Vec<_>>()
+        );
+        with_prelude(&mut program);
+
+        let mut sa = SemanticAnalyzer::new();
+        sa.analyze(&program);
+        assert!(
+            !sa.has_errors(),
+            "semantic errors: {:?}",
+            sa.diagnostics().iter().collect::<Vec<_>>()
+        );
+
+        let mut lowering = AstLowering::new(&sa);
+        let hir = lowering.lower_program(&program);
+        (lowering, hir)
     }
 
     #[test]
@@ -3368,5 +4198,59 @@ mod tests {
         assert_eq!(dt.constructors[1].tag, 1);
         assert_eq!(dt.constructors[2].name, "Blue");
         assert_eq!(dt.constructors[2].tag, 2);
+    }
+
+    #[test]
+    fn test_where_bound_length_of_vector_subtraction_concretizes_types() {
+        let source = include_str!("../../../examples/shadorial/02-uniforms.shadml");
+        let (lowering, hir) = lower_source(source);
+        assert!(
+            !lowering.has_errors(),
+            "lowering errors: {:?}",
+            lowering.diagnostics().iter().collect::<Vec<_>>()
+        );
+
+        let shade = hir
+            .functions
+            .iter()
+            .find(|f| f.name == "shade")
+            .expect("shade function");
+
+        let HirExpr::Let(binds, _, _, _) = &shade.body else {
+            panic!("expected where-clause to lower to let-bindings");
+        };
+
+        let dist_expr = binds
+            .iter()
+            .find(|(name, _)| name == "dist")
+            .map(|(_, expr)| expr)
+            .expect("dist binding");
+        assert_eq!(dist_expr.ty(), &Ty::f32());
+
+        let HirExpr::App(_, arg, _, _) = dist_expr else {
+            panic!("expected dist to be a length application");
+        };
+        assert_eq!(arg.ty(), &vector_ty(2, Ty::f32()));
+    }
+
+    #[test]
+    fn test_unary_negation_remains_concrete_for_vector_length() {
+        let source = r#"
+shade : Vec 2 F32 -> Vec 4 F32
+shade fragCoord = vec4 0.0 0.0 (length (-fragCoord)) 1.0
+"#;
+        let (lowering, hir) = lower_source(source);
+        assert!(
+            !lowering.has_errors(),
+            "lowering errors: {:?}",
+            lowering.diagnostics().iter().collect::<Vec<_>>()
+        );
+
+        let shade = hir
+            .functions
+            .iter()
+            .find(|f| f.name == "shade")
+            .expect("shade function");
+        assert_eq!(shade.return_ty, vector_ty(4, Ty::f32()));
     }
 }
