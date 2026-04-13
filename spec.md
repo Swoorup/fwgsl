@@ -205,18 +205,27 @@ Arrow types are right-associative.
 
 Tuple types exist in the surface language and type system but are **desugared before codegen**. WGSL has no tuple type.
 
-Tuple function parameters are desugared to curried parameters:
+Tuple-argument functions are **distinct** from curried functions:
 
 ```
-f : (A, B) -> R     -- desugared to: f : A -> B -> R
-f (a, b) = ...      -- desugared to: f a b = ...
+f : (A, B) -> R
+f (a, b) = ...
 ```
 
-Tuple call-site arguments are flattened:
+This is not the same type as a curried function:
 
 ```
-f (x, y)            -- desugared to: f x y  (i.e. App(App(f, x), y))
+g : A -> B -> R
 ```
+
+So:
+
+```
+f (x, y)            -- one tuple argument
+g x y               -- two curried arguments
+```
+
+The compiler may still flatten tuple-shaped parameters during backend lowering when it is only an ABI/codegen detail, but tuple-argument and curried functions remain distinct in typing and source checking.
 
 ### 3.7 Type Application
 
@@ -862,6 +871,7 @@ case 4i, 8i: { ... }
 ```
 
 Tuple patterns in function parameters are desugared to curried parameters.
+In a function definition, a tuple pattern is still one parameter pattern that destructures a tuple argument.
 
 ### 6.7 Record Pattern
 

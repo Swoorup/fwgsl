@@ -2360,6 +2360,29 @@ test x = display x
     }
 
     #[test]
+    fn tuple_argument_function_compiles() {
+        let source = r#"
+pairSum : (I32, I32) -> I32
+pairSum (a, b) = a + b
+
+result : I32
+result = pairSum (1, 2)
+"#;
+        let wgsl = compile_to_wgsl(source).expect("tuple-argument function should compile");
+        assert!(wgsl.contains("fn pairSum"));
+    }
+
+    #[test]
+    fn tuple_argument_signature_rejects_curried_definition() {
+        let source = r#"
+pairSum : (I32, I32) -> I32
+pairSum a b = a + b
+"#;
+        let err = compile_to_wgsl(source).expect_err("curried definition should be rejected");
+        assert!(err.contains("expects 1"));
+    }
+
+    #[test]
     fn unknown_trait_in_impl_produces_error() {
         let source = r#"
 impl Nonexistent F32 where

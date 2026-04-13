@@ -175,13 +175,7 @@ impl SemanticAnalyzer {
             } = decl
             {
                 let inferred_ty = self.convert_syntax_type_sig(constraints, ty);
-                // Flatten tuple args: (A, B) -> R becomes A -> B -> R
-                let flattened = Scheme {
-                    constraints: inferred_ty.constraints.clone(),
-                    vars: inferred_ty.vars.clone(),
-                    ty: flatten_tuple_arrows(&inferred_ty.ty),
-                };
-                self.env.insert(name.clone(), flattened);
+                self.env.insert(name.clone(), inferred_ty);
             }
             if let Decl::ConstDecl { name, ty, .. } = decl {
                 let inferred_ty = self.convert_syntax_type(ty);
@@ -194,12 +188,7 @@ impl SemanticAnalyzer {
             }
             if let Decl::ExternDecl { name, ty, .. } = decl {
                 let inferred_ty = self.convert_syntax_type(ty);
-                let flattened = Scheme {
-                    constraints: inferred_ty.constraints.clone(),
-                    vars: inferred_ty.vars.clone(),
-                    ty: flatten_tuple_arrows(&inferred_ty.ty),
-                };
-                self.env.insert(name.clone(), flattened);
+                self.env.insert(name.clone(), inferred_ty);
             }
             if let Decl::BuiltinExternDecl {
                 name,
@@ -209,18 +198,13 @@ impl SemanticAnalyzer {
             } = decl
             {
                 let inferred_ty = self.convert_syntax_type(ty);
-                let flattened = Scheme {
-                    constraints: inferred_ty.constraints.clone(),
-                    vars: inferred_ty.vars.clone(),
-                    ty: flatten_tuple_arrows(&inferred_ty.ty),
-                };
-                self.env.insert(name.clone(), flattened);
+                self.env.insert(name.clone(), inferred_ty.clone());
                 self.builtin_externs
                     .entry(name.clone())
                     .or_default()
                     .push(BuiltinExternInfo {
                         name: name.clone(),
-                        ty: normalize_type_aliases(&flatten_tuple_arrows(&inferred_ty.ty)),
+                        ty: normalize_type_aliases(&inferred_ty.ty),
                         lowering: lowering.clone(),
                     });
             }
@@ -795,27 +779,35 @@ impl SemanticAnalyzer {
             .map(|qualified| qualified.constraints.clone())
             .unwrap_or_default();
 
-        // Create types for parameters, flattening tuple patterns
+        // Create one parameter type per syntactic parameter.
         let mut param_types = Vec::new();
         for pat in params {
-            if let Pat::Tuple(sub_pats, _) = pat {
-                for sub_pat in sub_pats {
-                    let ty = self.engine.fresh_var();
-                    self.bind_pattern(sub_pat, &ty, &mut local_env);
-                    param_types.push(ty);
-                }
-            } else {
-                let ty = self.engine.fresh_var();
-                self.bind_pattern(pat, &ty, &mut local_env);
-                param_types.push(ty);
-            }
+            let ty = self.engine.fresh_var();
+            self.bind_pattern(pat, &ty, &mut local_env);
+            param_types.push(ty);
         }
 
         // If there's a declared type, pre-unify parameter types so that
         // concrete type information (e.g. Vec dimensions) is available
         // during body inference for swizzle resolution and field access.
-        // The declared type has already been flattened (tuple arrows -> curried).
         if let Some(qualified) = &declared {
+            let expected_arity = function_arity(&qualified.ty);
+            if params.len() != expected_arity {
+                self.engine.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "function `{}` has {} parameter{} but its type signature expects {}",
+                        name,
+                        params.len(),
+                        if params.len() == 1 { "" } else { "s" },
+                        expected_arity
+                    ))
+                    .with_label(Label::primary(
+                        span,
+                        "function parameters do not match the declared function type",
+                    )),
+                );
+                return;
+            }
             let declared_ty = qualified.ty.clone();
             let mut cursor = &declared_ty;
             for param_ty in &param_types {
@@ -904,17 +896,27 @@ impl SemanticAnalyzer {
 
         let mut param_types = Vec::new();
         for pat in params {
-            if let Pat::Tuple(sub_pats, _) = pat {
-                for sub_pat in sub_pats {
-                    let ty = self.engine.fresh_var();
-                    self.bind_pattern(sub_pat, &ty, &mut local_env);
-                    param_types.push(ty);
-                }
-            } else {
-                let ty = self.engine.fresh_var();
-                self.bind_pattern(pat, &ty, &mut local_env);
-                param_types.push(ty);
-            }
+            let ty = self.engine.fresh_var();
+            self.bind_pattern(pat, &ty, &mut local_env);
+            param_types.push(ty);
+        }
+
+        let expected_arity = function_arity(&declared.ty);
+        if params.len() != expected_arity {
+            self.engine.diagnostics.push(
+                Diagnostic::error(format!(
+                    "method `{}` has {} parameter{} but its declared type expects {}",
+                    local_name,
+                    params.len(),
+                    if params.len() == 1 { "" } else { "s" },
+                    expected_arity
+                ))
+                .with_label(Label::primary(
+                    span,
+                    "method parameters do not match the declared function type",
+                )),
+            );
+            return;
         }
 
         let mut cursor = &declared.ty;
@@ -1216,20 +1218,6 @@ impl SemanticAnalyzer {
 
             Expr::App(func, arg, span) => {
                 let func_ty = self.infer_expr(func, env, active_constraints);
-                // Flatten tuple arguments: f (a, b, c) => f a b c
-                if let Expr::Tuple(elems, _) = arg.as_ref() {
-                    if !elems.is_empty() {
-                        let mut cur_ty = func_ty;
-                        for elem in elems {
-                            let arg_ty = self.infer_expr(elem, env, active_constraints);
-                            let ret_ty = self.engine.fresh_var();
-                            let expected = Ty::arrow(arg_ty, ret_ty.clone());
-                            self.engine.unify(&cur_ty, &expected, *span);
-                            cur_ty = ret_ty;
-                        }
-                        return cur_ty;
-                    }
-                }
                 let arg_ty = self.infer_expr(arg, env, active_constraints);
                 let ret_ty = self.engine.fresh_var();
                 let expected = Ty::arrow(arg_ty, ret_ty.clone());
@@ -1992,26 +1980,14 @@ pub fn extract_mat_type(ty: &Ty) -> Option<(u8, u8, Ty)> {
     None
 }
 
-/// Flatten tuple arrows: `(A, B) -> R` becomes `A -> B -> R`.
-/// This allows tuple-parameter function signatures to be stored
-/// in curried form, matching the flattened function definitions.
-fn flatten_tuple_arrows(ty: &Ty) -> Ty {
-    match ty {
-        Ty::Arrow(from, to) => {
-            let to_flat = flatten_tuple_arrows(to);
-            if let Ty::Tuple(elems) = from.as_ref() {
-                // (A, B, C) -> R => A -> B -> C -> R
-                let mut result = to_flat;
-                for elem in elems.iter().rev() {
-                    result = Ty::arrow(flatten_tuple_arrows(elem), result);
-                }
-                result
-            } else {
-                Ty::arrow(flatten_tuple_arrows(from), to_flat)
-            }
-        }
-        _ => ty.clone(),
+fn function_arity(ty: &Ty) -> usize {
+    let mut arity = 0;
+    let mut cursor = ty;
+    while let Ty::Arrow(_, to) = cursor {
+        arity += 1;
+        cursor = to;
     }
+    arity
 }
 
 #[cfg(test)]
@@ -2241,6 +2217,97 @@ mod tests {
             sa.has_errors(),
             "standalone impl method bodies should be checked against impl-local signatures"
         );
+    }
+
+    #[test]
+    fn test_tuple_parameter_signature_requires_one_tuple_parameter() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![
+                Decl::TypeSig {
+                    name: "test".into(),
+                    constraints: vec![],
+                    ty: Type::Arrow(
+                        Box::new(Type::Tuple(
+                            vec![
+                                Type::Con("I32".into(), span()),
+                                Type::Con("I32".into(), span()),
+                            ],
+                            span(),
+                        )),
+                        Box::new(Type::Con("I32".into(), span())),
+                        span(),
+                    ),
+                    span: span(),
+                    comments: vec![],
+                },
+                Decl::FunDecl {
+                    name: "test".into(),
+                    params: vec![Pat::Var("a".into(), span()), Pat::Var("b".into(), span())],
+                    body: Expr::Infix(
+                        Box::new(Expr::Var("a".into(), span())),
+                        "+".into(),
+                        Box::new(Expr::Var("b".into(), span())),
+                        span(),
+                    ),
+                    where_binds: vec![],
+                    span: span(),
+                    comments: vec![],
+                },
+            ],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        assert!(sa.has_errors());
+        assert!(sa
+            .diagnostics()
+            .iter()
+            .any(|diag| diag.message.contains("function `test` has 2 parameters but its type signature expects 1")));
+    }
+
+    #[test]
+    fn test_tuple_parameter_signature_accepts_tuple_pattern() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![
+                Decl::TypeSig {
+                    name: "test".into(),
+                    constraints: vec![],
+                    ty: Type::Arrow(
+                        Box::new(Type::Tuple(
+                            vec![
+                                Type::Con("I32".into(), span()),
+                                Type::Con("I32".into(), span()),
+                            ],
+                            span(),
+                        )),
+                        Box::new(Type::Con("I32".into(), span())),
+                        span(),
+                    ),
+                    span: span(),
+                    comments: vec![],
+                },
+                Decl::FunDecl {
+                    name: "test".into(),
+                    params: vec![Pat::Tuple(
+                        vec![Pat::Var("a".into(), span()), Pat::Var("b".into(), span())],
+                        span(),
+                    )],
+                    body: Expr::Infix(
+                        Box::new(Expr::Var("a".into(), span())),
+                        "+".into(),
+                        Box::new(Expr::Var("b".into(), span())),
+                        span(),
+                    ),
+                    where_binds: vec![],
+                    span: span(),
+                    comments: vec![],
+                },
+            ],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        assert!(!sa.has_errors());
     }
 
     #[test]
