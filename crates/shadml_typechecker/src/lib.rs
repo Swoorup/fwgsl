@@ -340,6 +340,126 @@ impl Scheme {
     }
 }
 
+pub fn format_scheme_surface(scheme: &Scheme, subst: Option<&Substitution>) -> String {
+    let ty = apply_optional_subst(&scheme.ty, subst);
+    let constraints: Vec<Predicate> = scheme
+        .constraints
+        .iter()
+        .map(|predicate| apply_optional_subst_predicate(predicate, subst))
+        .collect();
+    let names = canonical_type_var_names(scheme, &ty, &constraints);
+
+    let constraints = constraints
+        .iter()
+        .map(|predicate| format_predicate_surface(predicate, &names))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ty = format_ty_surface(&ty, &names, 0);
+
+    if constraints.is_empty() {
+        ty
+    } else {
+        format!("{constraints} => {ty}")
+    }
+}
+
+fn apply_optional_subst(ty: &Ty, subst: Option<&Substitution>) -> Ty {
+    subst.map_or_else(|| ty.clone(), |subst| ty.apply_subst(subst))
+}
+
+fn apply_optional_subst_predicate(predicate: &Predicate, subst: Option<&Substitution>) -> Predicate {
+    subst.map_or_else(|| predicate.clone(), |subst| predicate.apply_subst(subst))
+}
+
+fn canonical_type_var_names(
+    scheme: &Scheme,
+    ty: &Ty,
+    constraints: &[Predicate],
+) -> HashMap<TyVarId, String> {
+    let mut vars = scheme.vars.clone();
+    vars.extend(ty.free_vars());
+    for predicate in constraints {
+        vars.extend(predicate.free_vars());
+    }
+    vars.sort();
+    vars.dedup();
+
+    vars.into_iter()
+        .enumerate()
+        .map(|(index, var)| (var, pretty_type_var_name(index)))
+        .collect()
+}
+
+fn pretty_type_var_name(index: usize) -> String {
+    const ALPHABET: &[u8; 26] = b"abcdefghijklmnopqrstuvwxyz";
+    let letter = ALPHABET[index % 26] as char;
+    let suffix = index / 26;
+    if suffix == 0 {
+        letter.to_string()
+    } else {
+        format!("{letter}{suffix}")
+    }
+}
+
+fn format_predicate_surface(predicate: &Predicate, names: &HashMap<TyVarId, String>) -> String {
+    let args = predicate
+        .tys
+        .iter()
+        .map(|ty| format_ty_surface(ty, names, 2))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if args.is_empty() {
+        predicate.trait_name.clone()
+    } else {
+        format!("{} {}", predicate.trait_name, args)
+    }
+}
+
+fn format_ty_surface(ty: &Ty, names: &HashMap<TyVarId, String>, prec: u8) -> String {
+    match ty {
+        Ty::Var(v) => names.get(v).cloned().unwrap_or_else(|| format!("t{v}")),
+        Ty::Con(name) => name.clone(),
+        Ty::Nat(n) => n.to_string(),
+        Ty::Error => "<error>".into(),
+        Ty::Tuple(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(|item| format_ty_surface(item, names, 0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Ty::Forall(vars, body) => {
+            let vars = vars.join(" ");
+            format!("forall {vars}. {}", format_ty_surface(body, names, 0))
+        }
+        Ty::App(func, arg) => {
+            let rendered = format!(
+                "{} {}",
+                format_ty_surface(func, names, 2),
+                format_ty_surface(arg, names, 3)
+            );
+            if prec > 2 {
+                format!("({rendered})")
+            } else {
+                rendered
+            }
+        }
+        Ty::Arrow(from, to) => {
+            let rendered = format!(
+                "{} -> {}",
+                format_ty_surface(from, names, 1),
+                format_ty_surface(to, names, 0)
+            );
+            if prec > 0 {
+                format!("({rendered})")
+            } else {
+                rendered
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct QualifiedType {
     pub constraints: Vec<Predicate>,
@@ -977,6 +1097,36 @@ mod tests {
         let scheme = Scheme::mono(Ty::i32());
         assert!(scheme.vars.is_empty());
         assert_eq!(scheme.ty, Ty::i32());
+    }
+
+    #[test]
+    fn test_format_scheme_surface_uses_canonical_names() {
+        let scheme = Scheme::poly_with_constraints(
+            vec![Predicate {
+                trait_name: "Add".into(),
+                tys: vec![Ty::Var(138), Ty::Var(138), Ty::Var(138)],
+            }],
+            vec![138],
+            Ty::arrow(
+                Ty::Tuple(vec![Ty::Var(138), Ty::Var(138)]),
+                Ty::arrow(
+                    Ty::Tuple(vec![Ty::Var(138), Ty::Var(138)]),
+                    Ty::Var(138),
+                ),
+            ),
+        );
+        assert_eq!(
+            format_scheme_surface(&scheme, None),
+            "Add a a a => (a, a) -> (a, a) -> a"
+        );
+    }
+
+    #[test]
+    fn test_format_scheme_surface_applies_substitutions() {
+        let scheme = Scheme::poly(vec![7], Ty::arrow(Ty::Var(7), Ty::Var(7)));
+        let mut subst = Substitution::new();
+        subst.insert(7, Ty::Con("F32".into()));
+        assert_eq!(format_scheme_surface(&scheme, Some(&subst)), "F32 -> F32");
     }
 
     #[test]

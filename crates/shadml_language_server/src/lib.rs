@@ -27,7 +27,7 @@ use shadml_parser::{lex, Parser};
 use shadml_semantic::SemanticAnalyzer;
 use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
-use shadml_typechecker::{InferEngine, Scheme};
+use shadml_typechecker::{format_scheme_surface, InferEngine, Scheme};
 
 /// Check whether the URI points at the compiler prelude file.
 fn is_compiler_prelude_uri(uri: &Url) -> bool {
@@ -745,39 +745,7 @@ fn symbol_description(analyzer: &SemanticAnalyzer, label: &str, kind: SyntaxKind
 }
 
 fn format_scheme(engine: &InferEngine, scheme: &Scheme) -> String {
-    let ty = engine.finalize(&scheme.ty);
-    let constraints = scheme
-        .constraints
-        .iter()
-        .map(|predicate| {
-            format!(
-                "{} {}",
-                predicate.trait_name,
-                predicate
-                    .tys
-                    .iter()
-                    .map(|ty| engine.finalize(ty).to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut rendered = if scheme.vars.is_empty() {
-        format!("{}", ty)
-    } else {
-        let vars = scheme
-            .vars
-            .iter()
-            .map(|var| format!("t{}", var))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("forall {}. {}", vars, ty)
-    };
-    if !constraints.is_empty() {
-        rendered = format!("{} => {}", constraints, rendered);
-    }
-    rendered
+    format_scheme_surface(scheme, Some(&engine.subst))
 }
 
 // ============================================================================
