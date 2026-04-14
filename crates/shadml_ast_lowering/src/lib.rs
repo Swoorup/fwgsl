@@ -1489,7 +1489,7 @@ impl AstLowering {
         name: &str,
         params: &[Pat],
         body: &Expr,
-        where_binds: &[(String, Expr)],
+        where_binds: &[LocalBind],
         span: Span,
         comments: Vec<String>,
     ) -> Option<HirFunction> {
@@ -2142,9 +2142,9 @@ impl AstLowering {
             Expr::Let(binds, body, span) => {
                 let mut local_env = env.clone();
                 let mut hir_binds = Vec::new();
-                for (name, expr) in binds {
+                for bind in binds {
                     let predicate_start = self.inferred_predicates.len();
-                    let (hir_expr, ty) = self.lower_expr(expr, &mut local_env);
+                    let (hir_expr, ty) = self.lower_expr(&bind.expr, &mut local_env);
                     let active_constraints = self.active_constraints().to_vec();
                     let inferred_constraints = self.resolve_inferred_predicates(
                         predicate_start,
@@ -2156,8 +2156,8 @@ impl AstLowering {
                         &ty,
                         &inferred_constraints,
                     );
-                    local_env.insert(name.clone(), scheme);
-                    hir_binds.push((name.clone(), hir_expr));
+                    local_env.insert(bind.name.clone(), scheme);
+                    hir_binds.push((bind.name.clone(), hir_expr));
                 }
                 let (hir_body, body_ty) = self.lower_expr(body, &mut local_env);
                 (
@@ -2501,18 +2501,18 @@ impl AstLowering {
                             let (hir_expr, _ty) = self.lower_expr(expr, &mut local_env);
                             last_expr = Some(hir_expr);
                         }
-                        DoStmt::Bind(name, expr, _) => {
-                            let (hir_expr, ty) = self.lower_expr(expr, &mut local_env);
+                        DoStmt::Bind(bind) => {
+                            let (hir_expr, ty) = self.lower_expr(&bind.expr, &mut local_env);
                             let inner_ty = self.engine.fresh_var();
-                            local_env.insert(name.clone(), Scheme::mono(inner_ty));
-                            hir_binds.push((name.clone(), hir_expr));
+                            local_env.insert(bind.name.clone(), Scheme::mono(inner_ty));
+                            hir_binds.push((bind.name.clone(), hir_expr));
                             last_expr = None;
                             let _ = ty;
                         }
-                        DoStmt::Let(name, expr, _) => {
-                            let (hir_expr, ty) = self.lower_expr(expr, &mut local_env);
-                            local_env.insert(name.clone(), Scheme::mono(ty));
-                            hir_binds.push((name.clone(), hir_expr));
+                        DoStmt::Let(bind) => {
+                            let (hir_expr, ty) = self.lower_expr(&bind.expr, &mut local_env);
+                            local_env.insert(bind.name.clone(), Scheme::mono(ty));
+                            hir_binds.push((bind.name.clone(), hir_expr));
                             last_expr = None;
                         }
                     }
@@ -2665,11 +2665,11 @@ impl AstLowering {
                 // Build the type of the loop result from the first binding
                 // (for single-binding loops), or a tuple of all binding types.
                 let mut binding_tys = Vec::new();
-                for (bind_name, init_expr) in bindings {
-                    let (hir_init, init_ty) = self.lower_expr(init_expr, env);
-                    loop_env.insert(bind_name.clone(), Scheme::mono(init_ty.clone()));
+                for bind in bindings {
+                    let (hir_init, init_ty) = self.lower_expr(&bind.expr, env);
+                    loop_env.insert(bind.name.clone(), Scheme::mono(init_ty.clone()));
                     binding_tys.push(init_ty);
-                    hir_bindings.push((bind_name.clone(), hir_init));
+                    hir_bindings.push((bind.name.clone(), hir_init));
                 }
 
                 // The result type of the loop is inferred from the body's
@@ -3649,7 +3649,7 @@ impl AstLowering {
     }
 }
 
-fn desugar_where(body: &Expr, where_binds: &[(String, Expr)], span: Span) -> Expr {
+fn desugar_where(body: &Expr, where_binds: &[LocalBind], span: Span) -> Expr {
     if where_binds.is_empty() {
         body.clone()
     } else {
@@ -4116,7 +4116,12 @@ mod tests {
                     Box::new(Expr::Lit(Lit::Int(1), span())),
                     span(),
                 ),
-                where_binds: vec![("y".into(), Expr::Var("x".into(), span()))],
+                where_binds: vec![LocalBind {
+                    name: "y".into(),
+                    name_span: span(),
+                    expr: Expr::Var("x".into(), span()),
+                    span: span(),
+                }],
                 span: span(),
                 comments: vec![],
             }],

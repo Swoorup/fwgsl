@@ -129,7 +129,7 @@ pub enum Decl {
         name: String,
         params: Vec<Pat>,
         body: Expr,
-        where_binds: Vec<(String, Expr)>,
+        where_binds: Vec<LocalBind>,
         span: Span,
         comments: Vec<String>,
     },
@@ -320,6 +320,14 @@ pub struct ImplMethod {
 }
 
 #[derive(Debug, Clone)]
+pub struct LocalBind {
+    pub name: String,
+    pub name_span: Span,
+    pub expr: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct BuiltinImplMethod {
     pub name: String,
     pub lowering: BuiltinLowering,
@@ -405,7 +413,7 @@ pub enum Expr {
     App(Box<Expr>, Box<Expr>, Span),
     Infix(Box<Expr>, String, Box<Expr>, Span),
     Lambda(Vec<Pat>, Box<Expr>, Span),
-    Let(Vec<(String, Expr)>, Box<Expr>, Span),
+    Let(Vec<LocalBind>, Box<Expr>, Span),
     /// Match expression. Arms are `(pattern, optional_guard, body)`.
     Case(Box<Expr>, Vec<(Pat, Option<Expr>, Expr)>, Span),
     If(Box<Expr>, Box<Expr>, Box<Expr>, Span),
@@ -425,16 +433,16 @@ pub enum Expr {
     VecLit(Vec<Expr>, Span),
     /// Named loop (tail-recursive): `loop go (i = 0) (acc = 0) in body`
     /// Fields: (loop_name, bindings[(name, init)], body, span)
-    Loop(String, Vec<(String, Expr)>, Box<Expr>, Span),
+    Loop(String, Vec<LocalBind>, Box<Expr>, Span),
     /// Record/bitfield functional update: `expr { field = val, ... }`
     RecordUpdate(Box<Expr>, Vec<(String, Expr)>, Span),
 }
 
 #[derive(Debug, Clone)]
 pub enum DoStmt {
-    Bind(String, Expr, Span),
+    Bind(LocalBind),
     Expr(Expr, Span),
-    Let(String, Expr, Span),
+    Let(LocalBind),
 }
 
 #[derive(Debug, Clone)]
@@ -1311,7 +1319,7 @@ impl Parser {
         })
     }
 
-    fn parse_where_binds(&mut self) -> Vec<(String, Expr)> {
+    fn parse_where_binds(&mut self) -> Vec<LocalBind> {
         let mut binds = Vec::new();
         // Layout should have inserted LayoutBraceOpen
         self.skip_trivia();
@@ -1330,11 +1338,17 @@ impl Parser {
             if self.at(SyntaxKind::Ident) {
                 let name_tok = self.bump();
                 let name = self.text_of(&name_tok).to_owned();
+                let start = name_tok.span.start;
                 self.skip_trivia();
                 self.expect(SyntaxKind::Equals);
                 self.skip_trivia();
                 let expr = self.parse_expr();
-                binds.push((name, expr));
+                binds.push(LocalBind {
+                    name,
+                    name_span: name_tok.span,
+                    expr,
+                    span: self.span_from(start),
+                });
                 self.eat_layout_semi();
             } else {
                 break;
@@ -3254,11 +3268,17 @@ impl Parser {
             if self.at(SyntaxKind::Ident) {
                 let name_tok = self.bump();
                 let name = self.text_of(&name_tok).to_owned();
+                let bind_start = name_tok.span.start;
                 self.skip_trivia();
                 self.expect(SyntaxKind::Equals);
                 self.skip_trivia();
                 let expr = self.parse_expr();
-                binds.push((name, expr));
+                binds.push(LocalBind {
+                    name,
+                    name_span: name_tok.span,
+                    expr,
+                    span: self.span_from(bind_start),
+                });
                 self.eat_layout_semi();
             } else {
                 break;
@@ -3308,7 +3328,12 @@ impl Parser {
                 self.skip_trivia();
                 let expr = self.parse_expr();
                 let span = self.span_from(stmt_start);
-                stmts.push(DoStmt::Let(name, expr, span));
+                stmts.push(DoStmt::Let(LocalBind {
+                    name,
+                    name_span: name_tok.span,
+                    expr,
+                    span,
+                }));
                 self.eat_layout_semi();
                 self.eat_layout_close();
                 continue;
@@ -3327,7 +3352,12 @@ impl Parser {
                     let name = self.text_of(&name_tok).to_owned();
                     let expr = self.parse_expr();
                     let span = self.span_from(stmt_start);
-                    stmts.push(DoStmt::Bind(name, expr, span));
+                    stmts.push(DoStmt::Bind(LocalBind {
+                        name,
+                        name_span: name_tok.span,
+                        expr,
+                        span,
+                    }));
                     self.eat_layout_semi();
                     continue;
                 } else {
@@ -3366,6 +3396,7 @@ impl Parser {
         // Parse bindings: `(name = init)` repeated
         let mut bindings = Vec::new();
         while self.at(SyntaxKind::LParen) && self.consume_fuel() {
+            let bind_start = self.current_span().start;
             self.expect(SyntaxKind::LParen);
             self.skip_trivia();
             let bind_tok = self.expect(SyntaxKind::Ident);
@@ -3377,7 +3408,12 @@ impl Parser {
             self.skip_trivia();
             self.expect(SyntaxKind::RParen);
             self.skip_trivia();
-            bindings.push((bind_name, init));
+            bindings.push(LocalBind {
+                name: bind_name,
+                name_span: bind_tok.span,
+                expr: init,
+                span: self.span_from(bind_start),
+            });
         }
 
         // `in` keyword
@@ -4107,7 +4143,7 @@ mod tests {
             Decl::FunDecl { body, .. } => match body {
                 Expr::Let(binds, _, _) => {
                     assert_eq!(binds.len(), 1);
-                    assert_eq!(binds[0].0, "y");
+                    assert_eq!(binds[0].name, "y");
                 }
                 other => panic!("expected Let, got {:?}", other),
             },
@@ -4125,7 +4161,7 @@ mod tests {
             } => {
                 assert!(matches!(body, Expr::Infix(..)));
                 assert_eq!(where_binds.len(), 1);
-                assert_eq!(where_binds[0].0, "y");
+                assert_eq!(where_binds[0].name, "y");
             }
             other => panic!("expected FunDecl, got {:?}", other),
         }

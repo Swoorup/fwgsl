@@ -1163,7 +1163,7 @@ fn find_operator_context_in_expr(
         | Expr::BitNot(body, _) => find_operator_context_in_expr(body, offset, operator),
         Expr::Let(bindings, body, _) => bindings
             .iter()
-            .find_map(|(_, value)| find_operator_context_in_expr(value, offset, operator))
+            .find_map(|bind| find_operator_context_in_expr(&bind.expr, offset, operator))
             .or_else(|| find_operator_context_in_expr(body, offset, operator)),
         Expr::Case(scrutinee, arms, _) => find_operator_context_in_expr(scrutinee, offset, operator)
             .or_else(|| {
@@ -1191,14 +1191,14 @@ fn find_operator_context_in_expr(
             shadml_parser::parser::DoStmt::Expr(expr, _) => {
                 find_operator_context_in_expr(expr, offset, operator)
             }
-            shadml_parser::parser::DoStmt::Bind(_, expr, _)
-            | shadml_parser::parser::DoStmt::Let(_, expr, _) => {
-                find_operator_context_in_expr(expr, offset, operator)
+            shadml_parser::parser::DoStmt::Bind(bind)
+            | shadml_parser::parser::DoStmt::Let(bind) => {
+                find_operator_context_in_expr(&bind.expr, offset, operator)
             }
         }),
         Expr::Loop(_, bindings, body, _) => bindings
             .iter()
-            .find_map(|(_, value)| find_operator_context_in_expr(value, offset, operator))
+            .find_map(|bind| find_operator_context_in_expr(&bind.expr, offset, operator))
             .or_else(|| find_operator_context_in_expr(body, offset, operator)),
         Expr::RecordUpdate(base, fields, _) => find_operator_context_in_expr(base, offset, operator)
             .or_else(|| {

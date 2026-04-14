@@ -187,7 +187,7 @@ mod parse_single_decl_tests {
                 body
             );
             assert_eq!(where_binds.len(), 1, "expected one where binding");
-            assert_eq!(where_binds[0].0, "y");
+            assert_eq!(where_binds[0].name, "y");
         } else {
             panic!("expected FunDecl");
         }

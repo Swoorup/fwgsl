@@ -54,6 +54,7 @@ pub struct SemanticAnalyzer {
     pub constructors: HashMap<String, ConstructorInfo>,
     pub data_types: HashMap<String, DataTypeInfo>,
     pub expr_types: HashMap<Span, Ty>,
+    pub local_binding_schemes: HashMap<Span, Scheme>,
     /// User-defined type aliases (e.g. `alias Float2 = Vec<2, F32>`).
     /// Maps alias name → expanded Ty so they can be resolved during type conversion.
     pub type_aliases: HashMap<String, Ty>,
@@ -87,6 +88,7 @@ impl SemanticAnalyzer {
             constructors: HashMap::new(),
             data_types: HashMap::new(),
             expr_types: HashMap::new(),
+            local_binding_schemes: HashMap::new(),
             type_aliases: HashMap::new(),
             traits: HashMap::new(),
             impls: Vec::new(),
@@ -767,7 +769,7 @@ impl SemanticAnalyzer {
         name: &str,
         params: &[Pat],
         body: &Expr,
-        where_binds: &[(String, Expr)],
+        where_binds: &[LocalBind],
         span: Span,
     ) {
         let mut local_env = self.env.clone();
@@ -960,12 +962,26 @@ impl SemanticAnalyzer {
         active_constraints: &[Predicate],
         span: Span,
     ) -> Vec<Predicate> {
-        let pending: Vec<Predicate> = self.inferred_predicates.drain(start..).collect();
+        let mut pending: Vec<Predicate> = self.inferred_predicates.drain(start..).collect();
+        loop {
+            let mut changed = false;
+            for predicate in &mut pending {
+                let current = predicate.apply_subst(&self.engine.subst);
+                self.try_improve_predicate(&current, span);
+                let improved = current.apply_subst(&self.engine.subst);
+                changed |= improved != current;
+                *predicate = improved;
+            }
+            if !changed {
+                break;
+            }
+        }
+
         let mut retained = Vec::new();
-        let subst = self.engine.subst.clone();
-        for predicate in pending.into_iter().map(|predicate| predicate.apply_subst(&subst)) {
-            self.try_improve_predicate(&predicate, span);
-            let predicate = predicate.apply_subst(&self.engine.subst);
+        for predicate in pending
+            .into_iter()
+            .map(|predicate| predicate.apply_subst(&self.engine.subst))
+        {
             if retained.iter().any(|existing| existing == &predicate) {
                 continue;
             }
@@ -1226,15 +1242,21 @@ impl SemanticAnalyzer {
 
             Expr::Let(binds, body, _span) => {
                 let mut local_env = env.clone();
-                for (name, expr) in binds {
+                for bind in binds {
                     let predicate_start = self.inferred_predicates.len();
-                    let ty = self.infer_expr(expr, &mut local_env, active_constraints);
+                    let ty = self.infer_expr(&bind.expr, &mut local_env, active_constraints);
                     let inferred_constraints =
-                        self.resolve_inferred_predicates(predicate_start, active_constraints, expr.span());
+                        self.resolve_inferred_predicates(
+                            predicate_start,
+                            active_constraints,
+                            bind.expr.span(),
+                        );
                     let scheme = self
                         .engine
                         .generalize_with_constraints(&local_env, &ty, &inferred_constraints);
-                    local_env.insert(name.clone(), scheme);
+                    self.local_binding_schemes
+                        .insert(bind.name_span, scheme.clone());
+                    local_env.insert(bind.name.clone(), scheme);
                 }
                 self.infer_expr(body, &mut local_env, active_constraints)
             }
@@ -1504,16 +1526,24 @@ impl SemanticAnalyzer {
                         DoStmt::Expr(expr, _) => {
                             last_ty = self.infer_expr(expr, &mut local_env, active_constraints);
                         }
-                        DoStmt::Bind(name, expr, _) => {
-                            let ty = self.infer_expr(expr, &mut local_env, active_constraints);
+                        DoStmt::Bind(bind) => {
+                            let ty =
+                                self.infer_expr(&bind.expr, &mut local_env, active_constraints);
                             // bind extracts the inner type from m a
                             let inner_ty = self.engine.fresh_var();
-                            local_env.insert(name.clone(), Scheme::mono(inner_ty));
+                            let scheme = Scheme::mono(inner_ty);
+                            self.local_binding_schemes
+                                .insert(bind.name_span, scheme.clone());
+                            local_env.insert(bind.name.clone(), scheme);
                             last_ty = ty;
                         }
-                        DoStmt::Let(name, expr, _) => {
-                            let ty = self.infer_expr(expr, &mut local_env, active_constraints);
-                            local_env.insert(name.clone(), Scheme::mono(ty));
+                        DoStmt::Let(bind) => {
+                            let ty =
+                                self.infer_expr(&bind.expr, &mut local_env, active_constraints);
+                            let scheme = Scheme::mono(ty);
+                            self.local_binding_schemes
+                                .insert(bind.name_span, scheme.clone());
+                            local_env.insert(bind.name.clone(), scheme);
                         }
                     }
                 }
@@ -1523,9 +1553,12 @@ impl SemanticAnalyzer {
             Expr::Loop(loop_name, bindings, body, span) => {
                 let mut loop_env = env.clone();
                 let mut binding_tys = Vec::new();
-                for (bind_name, init_expr) in bindings {
-                    let init_ty = self.infer_expr(init_expr, env, active_constraints);
-                    loop_env.insert(bind_name.clone(), Scheme::mono(init_ty.clone()));
+                for bind in bindings {
+                    let init_ty = self.infer_expr(&bind.expr, env, active_constraints);
+                    let scheme = Scheme::mono(init_ty.clone());
+                    self.local_binding_schemes
+                        .insert(bind.name_span, scheme.clone());
+                    loop_env.insert(bind.name.clone(), scheme);
                     binding_tys.push(init_ty);
                 }
                 let result_ty = self.engine.fresh_var();
@@ -1570,7 +1603,7 @@ impl SemanticAnalyzer {
 
 }
 
-fn desugar_where(body: &Expr, where_binds: &[(String, Expr)], span: Span) -> Expr {
+fn desugar_where(body: &Expr, where_binds: &[LocalBind], span: Span) -> Expr {
     if where_binds.is_empty() {
         body.clone()
     } else {
@@ -2936,7 +2969,12 @@ impl Convert (Vec<3, F32>) where
                 name: "f".into(),
                 params: vec![],
                 body: Expr::Let(
-                    vec![("x".into(), Expr::Lit(Lit::Int(42), span()))],
+                    vec![LocalBind {
+                        name: "x".into(),
+                        name_span: span(),
+                        expr: Expr::Lit(Lit::Int(42), span()),
+                        span: span(),
+                    }],
                     Box::new(Expr::Infix(
                         Box::new(Expr::Var("x".into(), span())),
                         "+".into(),
@@ -2969,7 +3007,12 @@ impl Convert (Vec<3, F32>) where
                     Box::new(Expr::Lit(Lit::Int(1), span())),
                     span(),
                 ),
-                where_binds: vec![("y".into(), Expr::Var("x".into(), span()))],
+                where_binds: vec![LocalBind {
+                    name: "y".into(),
+                    name_span: span(),
+                    expr: Expr::Var("x".into(), span()),
+                    span: span(),
+                }],
                 span: span(),
                 comments: vec![],
             }],
@@ -2981,6 +3024,30 @@ impl Convert (Vec<3, F32>) where
         let scheme = sa.env.lookup("f").expect("f should be in env");
         let ty = sa.engine.finalize(&scheme.ty);
         assert_eq!(format!("{}", ty), "(I32 -> I32)");
+    }
+
+    #[test]
+    fn test_local_binding_schemes_record_finalized_types() {
+        let source = include_str!("../../../examples/slang-generics.shadml");
+        let mut parser = Parser::new(source);
+        let mut program = parser.parse_program();
+        with_prelude(&mut program);
+
+        let mut sa = SemanticAnalyzer::new();
+        sa.analyze(&program);
+        assert!(!sa.has_errors());
+
+        let find_scheme = |name: &str| {
+            sa.local_binding_schemes
+                .iter()
+                .find(|(span, _)| span.source_text(source) == name)
+                .map(|(_, scheme)| format_scheme_surface(scheme, Some(&sa.engine.subst)))
+                .unwrap_or_else(|| panic!("missing local binding scheme for `{name}`"))
+        };
+
+        assert_eq!(find_scheme("dist"), "F32");
+        assert_eq!(find_scheme("spotFactor"), "F32");
+        assert_eq!(find_scheme("atten"), "F32");
     }
 
     #[test]

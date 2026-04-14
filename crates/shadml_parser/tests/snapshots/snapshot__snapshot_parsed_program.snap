@@ -297,9 +297,13 @@ Program {
             ],
             body: Let(
                 [
-                    (
-                        "y",
-                        App(
+                    LocalBind {
+                        name: "y",
+                        name_span: Span {
+                            start: 190,
+                            end: 191,
+                        },
+                        expr: App(
                             App(
                                 Var(
                                     "add",
@@ -334,7 +338,11 @@ Program {
                                 end: 201,
                             },
                         ),
-                    ),
+                        span: Span {
+                            start: 190,
+                            end: 204,
+                        },
+                    },
                 ],
                 App(
                     Var(

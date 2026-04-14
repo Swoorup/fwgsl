@@ -690,7 +690,7 @@ impl<'a> IndexBuilder<'a> {
         name: &str,
         params: &[Pat],
         body: &Expr,
-        where_binds: &[(String, Expr)],
+        where_binds: &[shadml_parser::parser::LocalBind],
         span: Span,
         frames: &mut Vec<ScopeFrame>,
     ) {
@@ -701,15 +701,12 @@ impl<'a> IndexBuilder<'a> {
         }
 
         let where_depth = frames.len() - 1;
-        for (binding, expr) in where_binds {
-            let binding_span = self
-                .last_name_span_before(binding, span, expr.span().start)
-                .unwrap_or(expr.span());
+        for bind in where_binds {
             let symbol_id = self.index.push_symbol(NewSymbol {
-                name: binding.clone(),
+                name: bind.name.clone(),
                 namespace: Namespace::Value,
                 kind: SymbolKind::LocalBinding,
-                span: binding_span,
+                span: bind.name_span,
                 scope_span: span,
                 scope_depth: where_depth,
                 visible_from: span.start,
@@ -717,11 +714,11 @@ impl<'a> IndexBuilder<'a> {
             });
             frames[where_depth]
                 .value_defs
-                .insert(binding.clone(), symbol_id);
+                .insert(bind.name.clone(), symbol_id);
         }
 
-        for (_, expr) in where_binds {
-            self.walk_expr(expr, frames);
+        for bind in where_binds {
+            self.walk_expr(&bind.expr, frames);
         }
         self.walk_expr(body, frames);
         frames.pop();
@@ -759,24 +756,21 @@ impl<'a> IndexBuilder<'a> {
                 let container = frames.last().and_then(|frame| frame.container.clone());
                 frames.push(ScopeFrame::new(*span, container));
                 let depth = frames.len() - 1;
-                for (binding, value) in bindings {
-                    let binding_span = self
-                        .last_name_span_before(binding, *span, value.span().start)
-                        .unwrap_or(value.span());
+                for bind in bindings {
                     let symbol_id = self.index.push_symbol(NewSymbol {
-                        name: binding.clone(),
+                        name: bind.name.clone(),
                         namespace: Namespace::Value,
                         kind: SymbolKind::LocalBinding,
-                        span: binding_span,
+                        span: bind.name_span,
                         scope_span: *span,
                         scope_depth: depth,
                         visible_from: span.start,
                         container: frames[depth].container.clone(),
                     });
-                    frames[depth].value_defs.insert(binding.clone(), symbol_id);
+                    frames[depth].value_defs.insert(bind.name.clone(), symbol_id);
                 }
-                for (_, value) in bindings {
-                    self.walk_expr(value, frames);
+                for bind in bindings {
+                    self.walk_expr(&bind.expr, frames);
                 }
                 self.walk_expr(body, frames);
                 frames.pop();
@@ -863,23 +857,19 @@ impl<'a> IndexBuilder<'a> {
                 let depth = frames.len() - 1;
                 for statement in statements {
                     match statement {
-                        DoStmt::Bind(name, value, stmt_span)
-                        | DoStmt::Let(name, value, stmt_span) => {
-                            self.walk_expr(value, frames);
-                            let binding_span = self
-                                .last_name_span_before(name, *span, value.span().start)
-                                .unwrap_or(*stmt_span);
+                        DoStmt::Bind(bind) | DoStmt::Let(bind) => {
+                            self.walk_expr(&bind.expr, frames);
                             let symbol_id = self.index.push_symbol(NewSymbol {
-                                name: name.clone(),
+                                name: bind.name.clone(),
                                 namespace: Namespace::Value,
                                 kind: SymbolKind::LocalBinding,
-                                span: binding_span,
+                                span: bind.name_span,
                                 scope_span: *span,
                                 scope_depth: depth,
-                                visible_from: stmt_span.start,
+                                visible_from: bind.span.start,
                                 container: frames[depth].container.clone(),
                             });
-                            frames[depth].value_defs.insert(name.clone(), symbol_id);
+                            frames[depth].value_defs.insert(bind.name.clone(), symbol_id);
                         }
                         DoStmt::Expr(value, _) => self.walk_expr(value, frames),
                     }
@@ -903,16 +893,13 @@ impl<'a> IndexBuilder<'a> {
                     container: frames[depth].container.clone(),
                 });
                 frames[depth].value_defs.insert(loop_name.clone(), loop_sym);
-                for (bind_name, init_expr) in bindings {
-                    self.walk_expr(init_expr, frames);
-                    let binding_span = self
-                        .last_name_span_before(bind_name, *span, init_expr.span().start)
-                        .unwrap_or(*span);
+                for bind in bindings {
+                    self.walk_expr(&bind.expr, frames);
                     let symbol_id = self.index.push_symbol(NewSymbol {
-                        name: bind_name.clone(),
+                        name: bind.name.clone(),
                         namespace: Namespace::Value,
                         kind: SymbolKind::LocalBinding,
-                        span: binding_span,
+                        span: bind.name_span,
                         scope_span: *span,
                         scope_depth: depth,
                         visible_from: span.start,
@@ -920,7 +907,7 @@ impl<'a> IndexBuilder<'a> {
                     });
                     frames[depth]
                         .value_defs
-                        .insert(bind_name.clone(), symbol_id);
+                        .insert(bind.name.clone(), symbol_id);
                 }
                 self.walk_expr(body, frames);
                 frames.pop();
@@ -1432,7 +1419,7 @@ fn build_ide_state(source: &str, is_compiler_prelude: bool) -> IdeState<'_> {
     // don't correspond to positions in the user's source and would cause
     // symbol_at_offset to return wrong results.
     let index = IndexBuilder::new(source).build(&user_program);
-    let symbol_types = collect_symbol_types(&user_program, source, &analyzer);
+    let symbol_types = collect_symbol_types(&user_program, &analyzer);
     let explicit_signatures = extract_explicit_signatures(&user_program, source);
     let doc_comments = extract_doc_comments(&user_program);
     let field_types = extract_field_types(&user_program, source);
@@ -1968,11 +1955,13 @@ fn format_ty(engine: &InferEngine, ty: &shadml_typechecker::Ty) -> String {
 
 fn collect_symbol_types(
     program: &Program,
-    source: &str,
     analyzer: &SemanticAnalyzer,
 ) -> HashMap<Span, String> {
-    let mut types = HashMap::new();
-    let tokens = lex(source);
+    let mut types = analyzer
+        .local_binding_schemes
+        .iter()
+        .map(|(span, scheme)| (*span, format_scheme(&analyzer.engine, scheme)))
+        .collect::<HashMap<_, _>>();
     let all_decls = Decl::flatten_cfg_decls(&program.decls);
     let mut impl_infos = analyzer.impls.iter();
     for decl in &all_decls {
@@ -1980,8 +1969,6 @@ fn collect_symbol_types(
             Decl::FunDecl {
                 name,
                 params,
-                body,
-                where_binds,
                 span,
                 ..
             } => {
@@ -1996,24 +1983,11 @@ fn collect_symbol_types(
                             break;
                         }
                     }
-                }
-                collect_local_binding_types(body, source, &tokens, analyzer, &mut types);
-                for (binding, expr) in where_binds {
-                    let binding_span = last_name_span_before_in_tokens(
-                        &tokens,
-                        source,
-                        binding,
-                        *span,
-                        expr.span().start,
-                    )
-                    .unwrap_or(expr.span());
-                    collect_expr_binding_type(expr, binding_span, analyzer, &mut types);
                 }
             }
             Decl::EntryPoint {
                 name,
                 params,
-                body,
                 span,
                 ..
             } => {
@@ -2029,7 +2003,6 @@ fn collect_symbol_types(
                         }
                     }
                 }
-                collect_local_binding_types(body, source, &tokens, analyzer, &mut types);
             }
             Decl::ImplDecl { methods, .. } => {
                 let Some(impl_info) = impl_infos.next() else {
@@ -2050,7 +2023,6 @@ fn collect_symbol_types(
                             }
                         }
                     }
-                    collect_local_binding_types(&method.body, source, &tokens, analyzer, &mut types);
                 }
             }
             Decl::BuiltinImplDecl { .. } => {}
@@ -2096,148 +2068,6 @@ fn collect_pattern_types(
         }
         _ => {}
     }
-}
-
-fn collect_local_binding_types(
-    expr: &Expr,
-    source: &str,
-    tokens: &[Token],
-    analyzer: &SemanticAnalyzer,
-    types: &mut HashMap<Span, String>,
-) {
-    match expr {
-        Expr::Lit(_, _) | Expr::Var(_, _) | Expr::Con(_, _) | Expr::OpSection(_, _) => {}
-        Expr::App(left, right, _)
-        | Expr::Infix(left, _, right, _)
-        | Expr::Index(left, right, _) => {
-            collect_local_binding_types(left, source, tokens, analyzer, types);
-            collect_local_binding_types(right, source, tokens, analyzer, types);
-        }
-        Expr::Lambda(_, body, _)
-        | Expr::Paren(body, _)
-        | Expr::Neg(body, _)
-        | Expr::Not(body, _)
-        | Expr::BitNot(body, _) => collect_local_binding_types(body, source, tokens, analyzer, types),
-        Expr::Let(bindings, body, _) => {
-            for (name, value) in bindings {
-                let binding_span = last_name_span_before_in_tokens(
-                    tokens,
-                    source,
-                    name,
-                    expr.span(),
-                    value.span().start,
-                )
-                .unwrap_or(value.span());
-                collect_expr_binding_type(value, binding_span, analyzer, types);
-                collect_local_binding_types(value, source, tokens, analyzer, types);
-            }
-            collect_local_binding_types(body, source, tokens, analyzer, types);
-        }
-        Expr::Case(scrutinee, arms, _) => {
-            collect_local_binding_types(scrutinee, source, tokens, analyzer, types);
-            for (_, guard, body) in arms {
-                if let Some(guard) = guard {
-                    collect_local_binding_types(guard, source, tokens, analyzer, types);
-                }
-                collect_local_binding_types(body, source, tokens, analyzer, types);
-            }
-        }
-        Expr::If(condition, then_branch, else_branch, _) => {
-            collect_local_binding_types(condition, source, tokens, analyzer, types);
-            collect_local_binding_types(then_branch, source, tokens, analyzer, types);
-            collect_local_binding_types(else_branch, source, tokens, analyzer, types);
-        }
-        Expr::Tuple(items, _)
-        | Expr::VecLit(items, _) => {
-            for item in items {
-                collect_local_binding_types(item, source, tokens, analyzer, types);
-            }
-        }
-        Expr::Record(_, fields, _) => {
-            for (_, value) in fields {
-                collect_local_binding_types(value, source, tokens, analyzer, types);
-            }
-        }
-        Expr::RecordUpdate(base, fields, _) => {
-            collect_local_binding_types(base, source, tokens, analyzer, types);
-            for (_, value) in fields {
-                collect_local_binding_types(value, source, tokens, analyzer, types);
-            }
-        }
-        Expr::FieldAccess(base, _, _) => collect_local_binding_types(base, source, tokens, analyzer, types),
-        Expr::Do(statements, _) => {
-            for stmt in statements {
-                match stmt {
-                    DoStmt::Expr(value, _) => {
-                        collect_local_binding_types(value, source, tokens, analyzer, types)
-                    }
-                    DoStmt::Bind(name, value, stmt_span)
-                    | DoStmt::Let(name, value, stmt_span) => {
-                        let binding_span = last_name_span_before_in_tokens(
-                            tokens,
-                            source,
-                            name,
-                            *stmt_span,
-                            value.span().start,
-                        )
-                        .unwrap_or(*stmt_span);
-                        collect_expr_binding_type(
-                            value,
-                            binding_span,
-                            analyzer,
-                            types,
-                        );
-                        collect_local_binding_types(value, source, tokens, analyzer, types);
-                    }
-                }
-            }
-        }
-        Expr::Loop(_, bindings, body, span) => {
-            for (name, value) in bindings {
-                let binding_span = last_name_span_before_in_tokens(
-                    tokens,
-                    source,
-                    name,
-                    *span,
-                    value.span().start,
-                )
-                .unwrap_or(*span);
-                collect_expr_binding_type(value, binding_span, analyzer, types);
-                collect_local_binding_types(value, source, tokens, analyzer, types);
-            }
-            collect_local_binding_types(body, source, tokens, analyzer, types);
-        }
-    }
-}
-
-fn collect_expr_binding_type(
-    expr: &Expr,
-    binding_span: Span,
-    analyzer: &SemanticAnalyzer,
-    types: &mut HashMap<Span, String>,
-) {
-    if let Some(ty) = analyzer.expr_types.get(&expr.span()) {
-        types.insert(binding_span, format_ty(&analyzer.engine, ty));
-    }
-}
-
-fn last_name_span_before_in_tokens(
-    tokens: &[Token],
-    source: &str,
-    name: &str,
-    within: Span,
-    before: u32,
-) -> Option<Span> {
-    tokens
-        .iter()
-        .rev()
-        .find(|token| {
-            matches!(token.kind, SyntaxKind::Ident | SyntaxKind::UpperIdent)
-                && within.start <= token.span.start
-                && token.span.end <= before
-                && token.text(source) == name
-        })
-        .map(|token| token.span)
 }
 
 pub fn compute_line_starts(source: &str) -> Vec<u32> {
@@ -2458,6 +2288,13 @@ impl Light SpotLight where
         let source = include_str!("../../../examples/slang-generics.shadml");
         let markup = hover_markdown(source, nth_position(source, "lambert", 4));
         assert!(markup.contains("lambert : F32"), "{markup}");
+    }
+
+    #[test]
+    fn hover_on_slang_generics_atten_shows_finalized_scalar_type() {
+        let source = include_str!("../../../examples/slang-generics.shadml");
+        let markup = hover_markdown(source, nth_position(source, "atten", 3));
+        assert!(markup.contains("atten : F32"), "{markup}");
     }
 
     #[test]
