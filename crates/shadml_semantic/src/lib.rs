@@ -53,6 +53,7 @@ pub struct SemanticAnalyzer {
     pub engine: InferEngine,
     pub constructors: HashMap<String, ConstructorInfo>,
     pub data_types: HashMap<String, DataTypeInfo>,
+    pub expr_types: HashMap<Span, Ty>,
     /// User-defined type aliases (e.g. `alias Float2 = Vec<2, F32>`).
     /// Maps alias name → expanded Ty so they can be resolved during type conversion.
     pub type_aliases: HashMap<String, Ty>,
@@ -85,6 +86,7 @@ impl SemanticAnalyzer {
             engine: InferEngine::new(),
             constructors: HashMap::new(),
             data_types: HashMap::new(),
+            expr_types: HashMap::new(),
             type_aliases: HashMap::new(),
             traits: HashMap::new(),
             impls: Vec::new(),
@@ -1122,7 +1124,7 @@ impl SemanticAnalyzer {
         env: &mut TypeEnv,
         active_constraints: &[Predicate],
     ) -> Ty {
-        match expr {
+        let ty = match expr {
             Expr::Lit(lit, _) => self.lit_type(lit),
 
             Expr::Var(name, span) => {
@@ -1543,7 +1545,9 @@ impl SemanticAnalyzer {
                 }
                 base_ty
             }
-        }
+        };
+        self.expr_types.insert(expr.span(), ty.clone());
+        ty
     }
 
     fn lit_type(&self, lit: &Lit) -> Ty {

@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use dashmap::DashMap;
+use shadml_parser::parser::{Decl, Expr};
 use shadml_ide::{
     all_completion_specs, build_completions_with_prelude_flag as ide_build_completions_with_prelude_flag,
     build_goto_definition_with_prelude_flag as ide_build_goto_definition_with_prelude_flag,
@@ -27,7 +28,9 @@ use shadml_parser::{lex, Parser};
 use shadml_semantic::SemanticAnalyzer;
 use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
-use shadml_typechecker::{format_scheme_surface, InferEngine, Scheme};
+use shadml_typechecker::{
+    format_scheme_surface, normalize_type_aliases, InferEngine, Scheme,
+};
 
 /// Check whether the URI points at the compiler prelude file.
 fn is_compiler_prelude_uri(uri: &Url) -> bool {
@@ -426,6 +429,10 @@ impl LanguageServer for ShadmlBackend {
                     }
                 }
             }
+        }
+
+        if let Some(location) = find_builtin_operator_definition(&text, pos) {
+            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
         }
 
         Ok(None)
@@ -1035,6 +1042,172 @@ fn find_record_field_in_source(source: &str, field_name: &str) -> Option<Range> 
         }
     }
     None
+}
+
+fn find_builtin_operator_definition(source: &str, pos: Position) -> Option<Location> {
+    let offset = shadml_ide::position_to_offset(source, pos)? as u32;
+    let token = lex(source).into_iter().find(|token| {
+        token.kind.is_operator() && token.span.start <= offset && offset < token.span.end
+    })?;
+    let operator = token.text(source).to_string();
+
+    let mut parser = Parser::new(source);
+    let user_program = parser.parse_program();
+    let mut full_program = user_program.clone();
+    with_prelude(&mut full_program, false);
+
+    let mut analyzer = SemanticAnalyzer::new();
+    analyzer.analyze(&full_program);
+
+    let prelude = shadml_parser::prelude_program();
+    let mut prelude_analyzer = SemanticAnalyzer::new();
+    prelude_analyzer.analyze(prelude);
+    let prelude_source = shadml_parser::prelude_source();
+    let prelude_uri = Url::from_file_path(shadml_parser::prelude::prelude_path()).ok()?;
+
+    let mut matches = Vec::new();
+    if let Some((lhs_span, rhs_span, expr_span)) = find_operator_context(&user_program, offset, &operator)
+    {
+        if let (Some(lhs_ty), Some(rhs_ty), Some(expr_ty)) = (
+            analyzer.expr_types.get(&lhs_span),
+            analyzer.expr_types.get(&rhs_span),
+            analyzer.expr_types.get(&expr_span),
+        ) {
+            let lhs_ty = normalize_type_aliases(&analyzer.engine.finalize(lhs_ty));
+            let rhs_ty = normalize_type_aliases(&analyzer.engine.finalize(rhs_ty));
+            let expr_ty = normalize_type_aliases(&analyzer.engine.finalize(expr_ty));
+
+            let mut builtin_impls = prelude_analyzer.builtin_impls.iter();
+            for decl in Decl::flatten_cfg_decls(&prelude.decls) {
+                if let Decl::BuiltinImplDecl { tys, methods, .. } = decl {
+                    let Some(builtin_impl) = builtin_impls.next() else {
+                        continue;
+                    };
+                    if tys.len() != 3 || builtin_impl.tys.len() != 3 {
+                        continue;
+                    }
+                    if builtin_impl.tys[0] != lhs_ty
+                        || builtin_impl.tys[1] != rhs_ty
+                        || builtin_impl.tys[2] != expr_ty
+                    {
+                        continue;
+                    }
+                    if let Some(method) = methods.iter().find(|method| method.name == operator) {
+                        matches.push(Location {
+                            uri: prelude_uri.clone(),
+                            range: shadml_ide::span_to_range(prelude_source, method.span),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if matches.len() == 1 {
+        return Some(matches.remove(0));
+    }
+
+    Decl::flatten_cfg_decls(&prelude.decls)
+        .into_iter()
+        .find_map(|decl| {
+            let Decl::BuiltinImplDecl { methods, .. } = decl else {
+                return None;
+            };
+            methods.iter().find(|method| method.name == operator).map(|method| Location {
+                uri: prelude_uri.clone(),
+                range: shadml_ide::span_to_range(prelude_source, method.span),
+            })
+        })
+}
+
+fn find_operator_context(
+    program: &Program,
+    offset: u32,
+    operator: &str,
+) -> Option<(Span, Span, Span)> {
+    Decl::flatten_cfg_decls(&program.decls)
+        .into_iter()
+        .find_map(|decl| match decl {
+            Decl::FunDecl { body, .. } | Decl::EntryPoint { body, .. } => {
+                find_operator_context_in_expr(body, offset, operator)
+            }
+            Decl::ImplDecl { methods, .. } => methods
+                .iter()
+                .find_map(|method| find_operator_context_in_expr(&method.body, offset, operator)),
+            _ => None,
+        })
+}
+
+fn find_operator_context_in_expr(
+    expr: &Expr,
+    offset: u32,
+    operator: &str,
+) -> Option<(Span, Span, Span)> {
+    match expr {
+        Expr::Infix(lhs, op, rhs, span) => {
+            find_operator_context_in_expr(lhs, offset, operator)
+                .or_else(|| find_operator_context_in_expr(rhs, offset, operator))
+                .or_else(|| {
+                    (op == operator && span.contains(offset))
+                        .then_some((lhs.span(), rhs.span(), *span))
+                })
+        }
+        Expr::App(lhs, rhs, _) | Expr::Index(lhs, rhs, _) => {
+            find_operator_context_in_expr(lhs, offset, operator)
+                .or_else(|| find_operator_context_in_expr(rhs, offset, operator))
+        }
+        Expr::Lambda(_, body, _)
+        | Expr::Paren(body, _)
+        | Expr::Neg(body, _)
+        | Expr::Not(body, _)
+        | Expr::BitNot(body, _) => find_operator_context_in_expr(body, offset, operator),
+        Expr::Let(bindings, body, _) => bindings
+            .iter()
+            .find_map(|(_, value)| find_operator_context_in_expr(value, offset, operator))
+            .or_else(|| find_operator_context_in_expr(body, offset, operator)),
+        Expr::Case(scrutinee, arms, _) => find_operator_context_in_expr(scrutinee, offset, operator)
+            .or_else(|| {
+                arms.iter().find_map(|(_, guard, body)| {
+                    guard
+                        .as_ref()
+                        .and_then(|guard| find_operator_context_in_expr(guard, offset, operator))
+                        .or_else(|| find_operator_context_in_expr(body, offset, operator))
+                })
+            }),
+        Expr::If(cond, then_expr, else_expr, _) => {
+            find_operator_context_in_expr(cond, offset, operator)
+                .or_else(|| find_operator_context_in_expr(then_expr, offset, operator))
+                .or_else(|| find_operator_context_in_expr(else_expr, offset, operator))
+        }
+        Expr::Tuple(items, _)
+        | Expr::VecLit(items, _) => items
+            .iter()
+            .find_map(|item| find_operator_context_in_expr(item, offset, operator)),
+        Expr::Record(_, fields, _) => fields
+            .iter()
+            .find_map(|(_, value)| find_operator_context_in_expr(value, offset, operator)),
+        Expr::FieldAccess(base, _, _) => find_operator_context_in_expr(base, offset, operator),
+        Expr::Do(statements, _) => statements.iter().find_map(|stmt| match stmt {
+            shadml_parser::parser::DoStmt::Expr(expr, _) => {
+                find_operator_context_in_expr(expr, offset, operator)
+            }
+            shadml_parser::parser::DoStmt::Bind(_, expr, _)
+            | shadml_parser::parser::DoStmt::Let(_, expr, _) => {
+                find_operator_context_in_expr(expr, offset, operator)
+            }
+        }),
+        Expr::Loop(_, bindings, body, _) => bindings
+            .iter()
+            .find_map(|(_, value)| find_operator_context_in_expr(value, offset, operator))
+            .or_else(|| find_operator_context_in_expr(body, offset, operator)),
+        Expr::RecordUpdate(base, fields, _) => find_operator_context_in_expr(base, offset, operator)
+            .or_else(|| {
+                fields
+                    .iter()
+                    .find_map(|(_, value)| find_operator_context_in_expr(value, offset, operator))
+            }),
+        Expr::Lit(_, _) | Expr::Var(_, _) | Expr::Con(_, _) | Expr::OpSection(_, _) => None,
+    }
 }
 
 // ============================================================================
@@ -2395,6 +2568,18 @@ mod tests {
         // Position on "=" sign
         let result = build_goto_definition(&uri, source, Position::new(0, 6));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_builtin_operator_definition_resolves_prelude_impl() {
+        let source = include_str!("../../../examples/slang-generics.shadml");
+        let offset = source.find("light.lightPosition - worldPos").unwrap() + "light.lightPosition ".len();
+        let location = find_builtin_operator_definition(source, offset_to_position(source, offset))
+            .expect("operator definition should resolve");
+        assert!(location.uri.path().ends_with("/prelude/prelude.shadml"));
+        let prelude_source = shadml_parser::prelude_source();
+        let start = shadml_ide::position_to_offset(prelude_source, location.range.start).unwrap();
+        assert!(prelude_source[start..].starts_with("(-) = native_binop (-)"));
     }
 
     #[test]

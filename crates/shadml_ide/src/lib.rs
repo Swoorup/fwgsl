@@ -16,7 +16,9 @@ use shadml_parser::{lex, Parser};
 use shadml_semantic::SemanticAnalyzer;
 use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
-use shadml_typechecker::{format_scheme_surface, InferEngine, Scheme};
+use shadml_typechecker::{
+    format_scheme_surface, format_ty_surface_inferred, InferEngine, Scheme,
+};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Namespace {
@@ -87,6 +89,7 @@ struct IdeState<'a> {
     analyzer: SemanticAnalyzer,
     index: DocumentIndex,
     symbol_types: HashMap<Span, String>,
+    explicit_signatures: HashMap<String, String>,
     /// Doc comments extracted from declarations, keyed by symbol name.
     doc_comments: HashMap<String, String>,
     /// Record field types, keyed by field name (for hover display).
@@ -1429,7 +1432,8 @@ fn build_ide_state(source: &str, is_compiler_prelude: bool) -> IdeState<'_> {
     // don't correspond to positions in the user's source and would cause
     // symbol_at_offset to return wrong results.
     let index = IndexBuilder::new(source).build(&user_program);
-    let symbol_types = collect_symbol_types(&user_program, &analyzer);
+    let symbol_types = collect_symbol_types(&user_program, source, &analyzer);
+    let explicit_signatures = extract_explicit_signatures(&user_program, source);
     let doc_comments = extract_doc_comments(&user_program);
     let field_types = extract_field_types(&user_program, source);
 
@@ -1438,9 +1442,44 @@ fn build_ide_state(source: &str, is_compiler_prelude: bool) -> IdeState<'_> {
         analyzer,
         index,
         symbol_types,
+        explicit_signatures,
         doc_comments,
         field_types,
     }
+}
+
+fn extract_explicit_signatures(program: &Program, source: &str) -> HashMap<String, String> {
+    let mut signatures = HashMap::new();
+    for decl in &program.decls {
+        match decl {
+            Decl::TypeSig {
+                name,
+                constraints,
+                ty,
+                ..
+            } => {
+                let rendered = if constraints.is_empty() {
+                    ty.span().source_text(source).to_string()
+                } else {
+                    let constraints = constraints
+                        .iter()
+                        .map(|constraint| constraint.span.source_text(source))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{constraints} => {}", ty.span().source_text(source))
+                };
+                signatures.insert(name.clone(), rendered);
+            }
+            Decl::ConstDecl { name, ty, .. }
+            | Decl::ExternDecl { name, ty, .. }
+            | Decl::BuiltinExternDecl { name, ty, .. }
+            | Decl::BindingDecl { name, ty, .. } => {
+                signatures.insert(name.clone(), ty.span().source_text(source).to_string());
+            }
+            _ => {}
+        }
+    }
+    signatures
 }
 
 /// Extract `-- |` doc comments from declaration comments and sub-items.
@@ -1793,10 +1832,16 @@ fn symbol_signature(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
             state.symbol_types.get(&symbol.primary_span).cloned()
         }
         _ => state
-            .analyzer
-            .env
-            .lookup(&symbol.name)
-            .map(|scheme| format_scheme(&state.analyzer.engine, scheme)),
+            .explicit_signatures
+            .get(&symbol.name)
+            .cloned()
+            .or_else(|| {
+                state
+                    .analyzer
+                    .env
+                    .lookup(&symbol.name)
+                    .map(|scheme| format_scheme(&state.analyzer.engine, scheme))
+            }),
     }
 }
 
@@ -1918,20 +1963,27 @@ fn format_type(ty: &Type) -> String {
 }
 
 fn format_ty(engine: &InferEngine, ty: &shadml_typechecker::Ty) -> String {
-    format!("{}", engine.finalize(ty))
+    format_ty_surface_inferred(ty, Some(&engine.subst))
 }
 
-fn collect_symbol_types(program: &Program, analyzer: &SemanticAnalyzer) -> HashMap<Span, String> {
+fn collect_symbol_types(
+    program: &Program,
+    source: &str,
+    analyzer: &SemanticAnalyzer,
+) -> HashMap<Span, String> {
     let mut types = HashMap::new();
+    let tokens = lex(source);
     let all_decls = Decl::flatten_cfg_decls(&program.decls);
     let mut impl_infos = analyzer.impls.iter();
     for decl in &all_decls {
         match decl {
             Decl::FunDecl {
-                name, params, span, ..
-            }
-            | Decl::EntryPoint {
-                name, params, span, ..
+                name,
+                params,
+                body,
+                where_binds,
+                span,
+                ..
             } => {
                 if let Some(scheme) = analyzer.env.lookup(name) {
                     let mut cursor = analyzer.engine.finalize(&scheme.ty);
@@ -1945,6 +1997,39 @@ fn collect_symbol_types(program: &Program, analyzer: &SemanticAnalyzer) -> HashM
                         }
                     }
                 }
+                collect_local_binding_types(body, source, &tokens, analyzer, &mut types);
+                for (binding, expr) in where_binds {
+                    let binding_span = last_name_span_before_in_tokens(
+                        &tokens,
+                        source,
+                        binding,
+                        *span,
+                        expr.span().start,
+                    )
+                    .unwrap_or(expr.span());
+                    collect_expr_binding_type(expr, binding_span, analyzer, &mut types);
+                }
+            }
+            Decl::EntryPoint {
+                name,
+                params,
+                body,
+                span,
+                ..
+            } => {
+                if let Some(scheme) = analyzer.env.lookup(name) {
+                    let mut cursor = analyzer.engine.finalize(&scheme.ty);
+                    for pat in params {
+                        if let shadml_typechecker::Ty::Arrow(from, to) = cursor {
+                            collect_pattern_types(pat, from.as_ref(), analyzer, &mut types);
+                            cursor = (*to).clone();
+                        } else {
+                            let _ = span;
+                            break;
+                        }
+                    }
+                }
+                collect_local_binding_types(body, source, &tokens, analyzer, &mut types);
             }
             Decl::ImplDecl { methods, .. } => {
                 let Some(impl_info) = impl_infos.next() else {
@@ -1965,6 +2050,7 @@ fn collect_symbol_types(program: &Program, analyzer: &SemanticAnalyzer) -> HashM
                             }
                         }
                     }
+                    collect_local_binding_types(&method.body, source, &tokens, analyzer, &mut types);
                 }
             }
             Decl::BuiltinImplDecl { .. } => {}
@@ -2010,6 +2096,148 @@ fn collect_pattern_types(
         }
         _ => {}
     }
+}
+
+fn collect_local_binding_types(
+    expr: &Expr,
+    source: &str,
+    tokens: &[Token],
+    analyzer: &SemanticAnalyzer,
+    types: &mut HashMap<Span, String>,
+) {
+    match expr {
+        Expr::Lit(_, _) | Expr::Var(_, _) | Expr::Con(_, _) | Expr::OpSection(_, _) => {}
+        Expr::App(left, right, _)
+        | Expr::Infix(left, _, right, _)
+        | Expr::Index(left, right, _) => {
+            collect_local_binding_types(left, source, tokens, analyzer, types);
+            collect_local_binding_types(right, source, tokens, analyzer, types);
+        }
+        Expr::Lambda(_, body, _)
+        | Expr::Paren(body, _)
+        | Expr::Neg(body, _)
+        | Expr::Not(body, _)
+        | Expr::BitNot(body, _) => collect_local_binding_types(body, source, tokens, analyzer, types),
+        Expr::Let(bindings, body, _) => {
+            for (name, value) in bindings {
+                let binding_span = last_name_span_before_in_tokens(
+                    tokens,
+                    source,
+                    name,
+                    expr.span(),
+                    value.span().start,
+                )
+                .unwrap_or(value.span());
+                collect_expr_binding_type(value, binding_span, analyzer, types);
+                collect_local_binding_types(value, source, tokens, analyzer, types);
+            }
+            collect_local_binding_types(body, source, tokens, analyzer, types);
+        }
+        Expr::Case(scrutinee, arms, _) => {
+            collect_local_binding_types(scrutinee, source, tokens, analyzer, types);
+            for (_, guard, body) in arms {
+                if let Some(guard) = guard {
+                    collect_local_binding_types(guard, source, tokens, analyzer, types);
+                }
+                collect_local_binding_types(body, source, tokens, analyzer, types);
+            }
+        }
+        Expr::If(condition, then_branch, else_branch, _) => {
+            collect_local_binding_types(condition, source, tokens, analyzer, types);
+            collect_local_binding_types(then_branch, source, tokens, analyzer, types);
+            collect_local_binding_types(else_branch, source, tokens, analyzer, types);
+        }
+        Expr::Tuple(items, _)
+        | Expr::VecLit(items, _) => {
+            for item in items {
+                collect_local_binding_types(item, source, tokens, analyzer, types);
+            }
+        }
+        Expr::Record(_, fields, _) => {
+            for (_, value) in fields {
+                collect_local_binding_types(value, source, tokens, analyzer, types);
+            }
+        }
+        Expr::RecordUpdate(base, fields, _) => {
+            collect_local_binding_types(base, source, tokens, analyzer, types);
+            for (_, value) in fields {
+                collect_local_binding_types(value, source, tokens, analyzer, types);
+            }
+        }
+        Expr::FieldAccess(base, _, _) => collect_local_binding_types(base, source, tokens, analyzer, types),
+        Expr::Do(statements, _) => {
+            for stmt in statements {
+                match stmt {
+                    DoStmt::Expr(value, _) => {
+                        collect_local_binding_types(value, source, tokens, analyzer, types)
+                    }
+                    DoStmt::Bind(name, value, stmt_span)
+                    | DoStmt::Let(name, value, stmt_span) => {
+                        let binding_span = last_name_span_before_in_tokens(
+                            tokens,
+                            source,
+                            name,
+                            *stmt_span,
+                            value.span().start,
+                        )
+                        .unwrap_or(*stmt_span);
+                        collect_expr_binding_type(
+                            value,
+                            binding_span,
+                            analyzer,
+                            types,
+                        );
+                        collect_local_binding_types(value, source, tokens, analyzer, types);
+                    }
+                }
+            }
+        }
+        Expr::Loop(_, bindings, body, span) => {
+            for (name, value) in bindings {
+                let binding_span = last_name_span_before_in_tokens(
+                    tokens,
+                    source,
+                    name,
+                    *span,
+                    value.span().start,
+                )
+                .unwrap_or(*span);
+                collect_expr_binding_type(value, binding_span, analyzer, types);
+                collect_local_binding_types(value, source, tokens, analyzer, types);
+            }
+            collect_local_binding_types(body, source, tokens, analyzer, types);
+        }
+    }
+}
+
+fn collect_expr_binding_type(
+    expr: &Expr,
+    binding_span: Span,
+    analyzer: &SemanticAnalyzer,
+    types: &mut HashMap<Span, String>,
+) {
+    if let Some(ty) = analyzer.expr_types.get(&expr.span()) {
+        types.insert(binding_span, format_ty(&analyzer.engine, ty));
+    }
+}
+
+fn last_name_span_before_in_tokens(
+    tokens: &[Token],
+    source: &str,
+    name: &str,
+    within: Span,
+    before: u32,
+) -> Option<Span> {
+    tokens
+        .iter()
+        .rev()
+        .find(|token| {
+            matches!(token.kind, SyntaxKind::Ident | SyntaxKind::UpperIdent)
+                && within.start <= token.span.start
+                && token.span.end <= before
+                && token.text(source) == name
+        })
+        .map(|token| token.span)
 }
 
 pub fn compute_line_starts(source: &str) -> Vec<u32> {
@@ -2059,6 +2287,25 @@ pub fn span_to_range(source: &str, span: Span) -> Range {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nth_position(source: &str, needle: &str, nth: usize) -> Position {
+        let offset = source
+            .match_indices(needle)
+            .nth(nth)
+            .map(|(offset, _)| offset)
+            .unwrap_or_else(|| panic!("missing occurrence {nth} of `{needle}`"));
+        let line_starts = compute_line_starts(source);
+        let (line, col) = offset_to_line_col(&line_starts, offset as u32);
+        Position::new(line, col)
+    }
+
+    fn hover_markdown(source: &str, pos: Position) -> String {
+        let hover = build_hover(source, pos).unwrap();
+        match hover.contents {
+            HoverContents::Markup(markup) => markup.value,
+            other => panic!("expected markup hover, got {other:?}"),
+        }
+    }
 
     #[test]
     fn completions_include_generic_prefixed_builtin_docs() {
@@ -2197,6 +2444,64 @@ impl Light SpotLight where
             }
             other => panic!("expected markup hover, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn hover_on_slang_generics_worldpos_uses_inferred_surface_type() {
+        let source = include_str!("../../../examples/slang-generics.shadml");
+        let markup = hover_markdown(source, nth_position(source, "worldPos", 5));
+        assert!(markup.contains("worldPos : Vec<3, F32>"), "{markup}");
+    }
+
+    #[test]
+    fn hover_on_slang_generics_lambert_shows_inferred_scalar_type() {
+        let source = include_str!("../../../examples/slang-generics.shadml");
+        let markup = hover_markdown(source, nth_position(source, "lambert", 4));
+        assert!(markup.contains("lambert : F32"), "{markup}");
+    }
+
+    #[test]
+    fn hover_on_slang_generics_light_is_canonical_type_variable() {
+        let source = include_str!("../../../examples/slang-generics.shadml");
+        let anchor = source.match_indices("color light").last().unwrap().0 + "color ".len();
+        let line_starts = compute_line_starts(source);
+        let (line, col) = offset_to_line_col(&line_starts, anchor as u32);
+        let markup = hover_markdown(source, Position::new(line, col));
+        assert!(markup.contains("light : a"), "{markup}");
+        assert!(!markup.contains("t138"), "{markup}");
+    }
+
+    #[test]
+    fn hover_on_slang_generics_light_direction_field_keeps_closing_bracket() {
+        let source = include_str!("../../../examples/slang-generics.shadml");
+        let markup = hover_markdown(source, nth_position(source, "lightDirection", 0));
+        assert!(markup.contains("lightDirection : Vec<3, F32>"), "{markup}");
+    }
+
+    #[test]
+    fn explicit_signature_preserves_angle_style_surface_text() {
+        let source = r#"
+lighting : Light a => a -> Vec<3, F32> -> Vec<3, F32> -> Vec<3, F32>
+lighting light worldPos normal = vec3 1.0 1.0 1.0
+"#;
+        let markup = hover_markdown(source, nth_position(source, "lighting", 1));
+        assert!(
+            markup.contains("lighting : Light a => a -> Vec<3, F32> -> Vec<3, F32> -> Vec<3, F32>"),
+            "{markup}"
+        );
+    }
+
+    #[test]
+    fn explicit_signature_preserves_space_application_style_surface_text() {
+        let source = r#"
+lighting : Light a => a -> Vec 3 F32 -> Vec 3 F32 -> Vec 3 F32
+lighting light worldPos normal = vec3 1.0 1.0 1.0
+"#;
+        let markup = hover_markdown(source, nth_position(source, "lighting", 1));
+        assert!(
+            markup.contains("lighting : Light a => a -> Vec 3 F32 -> Vec 3 F32 -> Vec 3 F32"),
+            "{markup}"
+        );
     }
 
     #[test]

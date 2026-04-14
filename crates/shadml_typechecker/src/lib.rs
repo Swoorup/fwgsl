@@ -363,6 +363,19 @@ pub fn format_scheme_surface(scheme: &Scheme, subst: Option<&Substitution>) -> S
     }
 }
 
+pub fn format_ty_surface_inferred(ty: &Ty, subst: Option<&Substitution>) -> String {
+    let ty = apply_optional_subst(ty, subst);
+    let mut vars = ty.free_vars();
+    vars.sort();
+    vars.dedup();
+    let names = vars
+        .into_iter()
+        .enumerate()
+        .map(|(index, var)| (var, pretty_type_var_name(index)))
+        .collect();
+    format_ty_surface(&ty, &names, 0)
+}
+
 fn apply_optional_subst(ty: &Ty, subst: Option<&Substitution>) -> Ty {
     subst.map_or_else(|| ty.clone(), |subst| ty.apply_subst(subst))
 }
@@ -434,15 +447,23 @@ fn format_ty_surface(ty: &Ty, names: &HashMap<TyVarId, String>, prec: u8) -> Str
             format!("forall {vars}. {}", format_ty_surface(body, names, 0))
         }
         Ty::App(func, arg) => {
-            let rendered = format!(
-                "{} {}",
-                format_ty_surface(func, names, 2),
-                format_ty_surface(arg, names, 3)
-            );
-            if prec > 2 {
-                format!("({rendered})")
+            if let Some(rendered) = format_special_surface_type(func, arg, names) {
+                if prec > 2 {
+                    format!("({rendered})")
+                } else {
+                    rendered
+                }
             } else {
-                rendered
+                let rendered = format!(
+                    "{} {}",
+                    format_ty_surface(func, names, 2),
+                    format_ty_surface(arg, names, 3)
+                );
+                if prec > 2 {
+                    format!("({rendered})")
+                } else {
+                    rendered
+                }
             }
         }
         Ty::Arrow(from, to) => {
@@ -457,6 +478,41 @@ fn format_ty_surface(ty: &Ty, names: &HashMap<TyVarId, String>, prec: u8) -> Str
                 rendered
             }
         }
+    }
+}
+
+fn format_special_surface_type(
+    func: &Ty,
+    arg: &Ty,
+    names: &HashMap<TyVarId, String>,
+) -> Option<String> {
+    fn flatten_app<'a>(ty: &'a Ty, out: &mut Vec<&'a Ty>) {
+        match ty {
+            Ty::App(head, tail) => {
+                flatten_app(head, out);
+                out.push(tail);
+            }
+            other => out.push(other),
+        }
+    }
+
+    let applied = Ty::App(Box::new(func.clone()), Box::new(arg.clone()));
+    let mut parts = Vec::new();
+    flatten_app(&applied, &mut parts);
+    let (Ty::Con(name), args) = parts.split_first()? else {
+        return None;
+    };
+
+    if matches!(name.as_str(), ty_name::VEC | ty_name::MAT | ty_name::TENSOR) {
+        Some(format!(
+            "{name}<{}>",
+            args.iter()
+                .map(|part| format_ty_surface(part, names, 0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    } else {
+        None
     }
 }
 

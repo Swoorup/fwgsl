@@ -3734,7 +3734,19 @@ impl Parser {
             break;
         }
 
-        self.expect(SyntaxKind::Greater);
+        let end = self.expect(SyntaxKind::Greater);
+        match &mut base {
+            Type::Con(_, span)
+            | Type::Var(_, span)
+            | Type::Nat(_, span)
+            | Type::App(_, _, span)
+            | Type::Arrow(_, _, span)
+            | Type::Paren(_, span)
+            | Type::Tuple(_, span)
+            | Type::Unit(span) => {
+                *span = span.merge(end.span);
+            }
+        }
         base
     }
 }

@@ -31,15 +31,29 @@ fn pipeline_inserts_lhs_as_first_arg() {
 
 #[test]
 fn parse_angle_type_arguments() {
-    let mut p = Parser::new("alias Float2 = Vec<2, F32>");
+    let source = "alias Float2 = Vec<2, F32>";
+    let mut p = Parser::new(source);
     let program = p.parse_program();
     let Decl::TypeAlias { ty, .. } = &program.decls[0] else {
         panic!("alias")
     };
     match ty {
-        Type::App(_, _, _) => {}
+        Type::App(_, _, _) => {
+            assert_eq!(ty.span().source_text(source), "Vec<2, F32>");
+        }
         _ => panic!("expected applied type"),
     }
+}
+
+#[test]
+fn parse_nested_angle_type_arguments_preserve_closing_brackets_in_span() {
+    let source = "alias Nested = Vec<3, Vec<2, F32>>";
+    let mut p = Parser::new(source);
+    let program = p.parse_program();
+    let Decl::TypeAlias { ty, .. } = &program.decls[0] else {
+        panic!("alias")
+    };
+    assert_eq!(ty.span().source_text(source), "Vec<3, Vec<2, F32>>");
 }
 
 #[test]
