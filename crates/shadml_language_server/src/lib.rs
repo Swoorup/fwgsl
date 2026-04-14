@@ -371,12 +371,17 @@ impl LanguageServer for ShadmlBackend {
             // in the current file. The IDE index can produce spurious results for
             // names imported from other modules.
             let is_valid = match &result {
-                GotoDefinitionResponse::Scalar(loc) => name
-                    .as_deref()
-                    .map_or(true, |n| location_text_matches(&text, &loc.range, n)),
+                GotoDefinitionResponse::Scalar(loc) => {
+                    if &loc.uri != uri {
+                        true
+                    } else {
+                        name.as_deref()
+                            .map_or(true, |n| location_text_matches(&text, &loc.range, n))
+                    }
+                }
                 GotoDefinitionResponse::Array(locs) => name.as_deref().map_or(true, |n| {
                     locs.iter()
-                        .any(|loc| location_text_matches(&text, &loc.range, n))
+                        .any(|loc| &loc.uri != uri || location_text_matches(&text, &loc.range, n))
                 }),
                 _ => true,
             };
@@ -2580,6 +2585,22 @@ mod tests {
         let prelude_source = shadml_parser::prelude_source();
         let start = shadml_ide::position_to_offset(prelude_source, location.range.start).unwrap();
         assert!(prelude_source[start..].starts_with("(-) = native_binop (-)"));
+    }
+
+    #[test]
+    fn test_goto_definition_resolves_named_prelude_function() {
+        let source = "main x = normalize x";
+        let uri = Url::parse("file:///test.shadml").unwrap();
+        let result = ide_build_goto_definition_with_prelude_flag(&uri, source, Position::new(0, 9), false)
+            .expect("prelude definition should resolve");
+        let location = match result {
+            GotoDefinitionResponse::Scalar(location) => location,
+            other => panic!("expected scalar location, got {other:?}"),
+        };
+        assert!(location.uri.path().ends_with("/prelude/prelude.shadml"));
+        let prelude_source = shadml_parser::prelude_source();
+        let start = shadml_ide::position_to_offset(prelude_source, location.range.start).unwrap();
+        assert!(prelude_source[start..].starts_with("normalize"));
     }
 
     #[test]

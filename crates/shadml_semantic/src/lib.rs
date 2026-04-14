@@ -58,6 +58,8 @@ pub struct SemanticAnalyzer {
     /// User-defined type aliases (e.g. `alias Float2 = Vec<2, F32>`).
     /// Maps alias name → expanded Ty so they can be resolved during type conversion.
     pub type_aliases: HashMap<String, Ty>,
+    /// Source-declared builtin type constructors: name -> arity.
+    pub builtin_types: HashMap<String, usize>,
     /// Trait declarations: trait_name → TraitInfo.
     pub traits: HashMap<String, TraitInfo>,
     /// Trait impls.
@@ -90,6 +92,7 @@ impl SemanticAnalyzer {
             expr_types: HashMap::new(),
             local_binding_schemes: HashMap::new(),
             type_aliases: HashMap::new(),
+            builtin_types: HashMap::new(),
             traits: HashMap::new(),
             impls: Vec::new(),
             builtin_externs: HashMap::new(),
@@ -110,6 +113,9 @@ impl SemanticAnalyzer {
         // same module can refer to each other regardless of source order.
         for decl in &all_decls {
             match decl {
+                Decl::BuiltinTypeDecl { name, arity, .. } => {
+                    self.builtin_types.insert(name.clone(), *arity);
+                }
                 Decl::DataDecl {
                     name, type_params, ..
                 } => {
@@ -709,28 +715,9 @@ impl SemanticAnalyzer {
     fn is_known_type_constructor(&self, name: &str) -> bool {
         matches!(
             name,
-            ty_name::I32
-                | ty_name::U32
-                | ty_name::F32
-                | ty_name::BOOL
-                | ty_name::UNIT
-                | ty_name::STRING
-                | ty_name::VEC
-                | "Vector"
-                | ty_name::MAT
-                | "Matrix"
-                | ty_name::TENSOR
-                | "Array"
-                | "Ten"
-                | "Scalar"
-                | "Sca"
-                | "Option"
-                | "Options"
-                | "Result"
-                | "Pair"
-                | ty_name::UNIFORM
-                | ty_name::STORAGE
+            ty_name::UNIT | ty_name::UNIFORM | ty_name::STORAGE
         ) || self.data_types.contains_key(name)
+            || self.builtin_types.contains_key(name)
             || self.bitfield_field_names.contains_key(name)
             || self.type_aliases.contains_key(name)
     }

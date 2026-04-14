@@ -368,6 +368,7 @@ impl AstLowering {
                     });
                 }
                 Decl::TypeSig { .. }
+                | Decl::BuiltinTypeDecl { .. }
                 | Decl::TypeAlias { .. }
                 | Decl::ExternDecl { .. }
                 | Decl::BuiltinExternDecl { .. }

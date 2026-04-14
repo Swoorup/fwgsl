@@ -39,6 +39,7 @@ enum SymbolKind {
     Parameter,
     LocalBinding,
     PatternBinding,
+    BuiltinType,
     DataType,
     TypeAlias,
     Constructor,
@@ -84,7 +85,7 @@ struct DocumentIndex {
     occurrences: Vec<Occurrence>,
 }
 
-struct IdeState<'a> {
+struct DocumentState<'a> {
     source: &'a str,
     analyzer: SemanticAnalyzer,
     index: DocumentIndex,
@@ -94,6 +95,17 @@ struct IdeState<'a> {
     doc_comments: HashMap<String, String>,
     /// Record field types, keyed by field name (for hover display).
     field_types: HashMap<String, String>,
+}
+
+struct IdeState<'a> {
+    source: &'a str,
+    analyzer: SemanticAnalyzer,
+    index: DocumentIndex,
+    symbol_types: HashMap<Span, String>,
+    explicit_signatures: HashMap<String, String>,
+    doc_comments: HashMap<String, String>,
+    field_types: HashMap<String, String>,
+    prelude: Option<DocumentState<'static>>,
 }
 
 #[derive(Clone)]
@@ -236,7 +248,9 @@ impl<'a> IndexBuilder<'a> {
                     });
                     self.index.add_definition_span(symbol_id, name_span);
                 }
-                Decl::FunDecl { name, span, .. } | Decl::BuiltinExternDecl { name, span, .. } => {
+                Decl::FunDecl { name, span, .. }
+                | Decl::ExternDecl { name, span, .. }
+                | Decl::BuiltinExternDecl { name, span, .. } => {
                     let name_span = self.first_name_span(name, *span).unwrap_or(*span);
                     let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
                         let id = self.index.push_symbol(NewSymbol {
@@ -271,6 +285,27 @@ impl<'a> IndexBuilder<'a> {
                         id
                     });
                     self.index.symbols[symbol_id].kind = SymbolKind::EntryPoint;
+                    self.index.add_definition_span(symbol_id, name_span);
+                }
+                Decl::BuiltinTypeDecl {
+                    name, span, arity, ..
+                } => {
+                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                    let symbol_id = self.top_level_types.get(name).copied().unwrap_or_else(|| {
+                        let id = self.index.push_symbol(NewSymbol {
+                            name: name.clone(),
+                            namespace: Namespace::Type,
+                            kind: SymbolKind::BuiltinType,
+                            span: name_span,
+                            scope_span: whole_file,
+                            scope_depth: 0,
+                            visible_from: 0,
+                            container: Some(format!("builtin-type/{}", arity)),
+                        });
+                        self.top_level_types.insert(name.clone(), id);
+                        id
+                    });
+                    self.index.symbols[symbol_id].kind = SymbolKind::BuiltinType;
                     self.index.add_definition_span(symbol_id, name_span);
                 }
                 Decl::DataDecl {
@@ -484,9 +519,6 @@ impl<'a> IndexBuilder<'a> {
                             .push(mid);
                     }
                 }
-                Decl::ExternDecl { .. } => {
-                    // Extern declarations are type-level only.
-                }
                 Decl::ModuleDecl { .. } | Decl::ImportDecl { .. } => {
                     // Module/import declarations don't define symbols.
                 }
@@ -536,6 +568,7 @@ impl<'a> IndexBuilder<'a> {
                 }
                 self.walk_callable(name, params, body, &[], *span, frames);
             }
+            Decl::BuiltinTypeDecl { .. } => {}
             Decl::DataDecl {
                 name,
                 type_params,
@@ -1115,6 +1148,16 @@ pub fn build_completions_with_prelude_flag(
         if !matches_prefix(spec.label, &prefix) {
             continue;
         }
+        let token_kind = if context == CompletionContext::Type {
+            SyntaxKind::UpperIdent
+        } else {
+            SyntaxKind::Ident
+        };
+        if context != CompletionContext::Attribute
+            && prelude_symbol(&state, spec.label, token_kind).is_some()
+        {
+            continue;
+        }
         seen.insert(spec.label.to_owned());
         items.push(completion_item_from_spec(spec));
     }
@@ -1136,6 +1179,31 @@ pub fn build_completions_with_prelude_flag(
             ));
             seen.insert(label.to_owned());
         }
+    }
+
+    for symbol in prelude_completion_symbols(&state, context)
+        .filter(|symbol| matches_prefix(&symbol.name, &prefix))
+    {
+        if seen.contains(&symbol.name) {
+            continue;
+        }
+        let kind = completion_kind_for_symbol(symbol);
+        let documentation = prelude_symbol_markdown(&state, symbol)
+            .unwrap_or_else(|| generic_builtin_markdown_text(&symbol.name, ""));
+        let detail = prelude_symbol_detail(&state, symbol).unwrap_or_else(|| "builtin".to_owned());
+        items.push(CompletionItem {
+            label: symbol.name.clone(),
+            kind: Some(kind),
+            detail: Some(detail),
+            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: documentation,
+            })),
+            sort_text: Some(format!("03-prelude-{}", symbol.name)),
+            filter_text: Some(symbol.name.clone()),
+            ..Default::default()
+        });
+        seen.insert(symbol.name.clone());
     }
 
     if is_member_context {
@@ -1257,6 +1325,18 @@ pub fn build_hover_with_prelude_flag(
                 });
             }
 
+            if let Some(symbol) = prelude_symbol(&state, name, tok.kind) {
+                if let Some(markdown) = prelude_symbol_markdown(&state, symbol) {
+                    return Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: markdown,
+                        }),
+                        range: Some(range),
+                    });
+                }
+            }
+
             if let Some(spec) = lookup_non_attribute_spec(name) {
                 return Some(spec_hover(&state, spec, range, Some(name)));
             }
@@ -1303,47 +1383,73 @@ pub fn build_goto_definition_with_prelude_flag(
     is_compiler_prelude: bool,
 ) -> Option<GotoDefinitionResponse> {
     let offset = position_to_offset(source, pos)? as u32;
+    let tokens = lex(source);
     let state = build_ide_state(source, is_compiler_prelude);
-    let occurrence = state.index.symbol_at_offset(offset)?;
-    let symbol = &state.index.symbols[occurrence.symbol_id];
-    if occurrence.role == OccurrenceRole::Definition && symbol.kind == SymbolKind::PatternBinding {
-        if let Some(field_occurrence) = state.index.occurrences.iter().find(|candidate| {
-            candidate.span == occurrence.span
-                && candidate.role == OccurrenceRole::Reference
-                && state.index.symbols[candidate.symbol_id].kind == SymbolKind::RecordField
-        }) {
-            let field_symbol = &state.index.symbols[field_occurrence.symbol_id];
-            let locations = field_symbol
-                .definition_spans
-                .iter()
-                .copied()
-                .map(|span| Location {
-                    uri: uri.clone(),
-                    range: span_to_range(source, span),
-                })
-                .collect::<Vec<_>>();
-            return match locations.as_slice() {
-                [] => None,
-                [single] => Some(GotoDefinitionResponse::Scalar(single.clone())),
-                _ => Some(GotoDefinitionResponse::Array(locations)),
-            };
+    if let Some(occurrence) = state.index.symbol_at_offset(offset) {
+        let symbol = &state.index.symbols[occurrence.symbol_id];
+        if occurrence.role == OccurrenceRole::Definition && symbol.kind == SymbolKind::PatternBinding
+        {
+            if let Some(field_occurrence) = state.index.occurrences.iter().find(|candidate| {
+                candidate.span == occurrence.span
+                    && candidate.role == OccurrenceRole::Reference
+                    && state.index.symbols[candidate.symbol_id].kind == SymbolKind::RecordField
+            }) {
+                let field_symbol = &state.index.symbols[field_occurrence.symbol_id];
+                let locations = field_symbol
+                    .definition_spans
+                    .iter()
+                    .copied()
+                    .map(|span| Location {
+                        uri: uri.clone(),
+                        range: span_to_range(source, span),
+                    })
+                    .collect::<Vec<_>>();
+                return match locations.as_slice() {
+                    [] => None,
+                    [single] => Some(GotoDefinitionResponse::Scalar(single.clone())),
+                    _ => Some(GotoDefinitionResponse::Array(locations)),
+                };
+            }
         }
+        let mut definition_spans = symbol.definition_spans.clone();
+        definition_spans.sort_by(|left, right| {
+            left.start
+                .cmp(&right.start)
+                .then_with(|| left.end.cmp(&right.end))
+        });
+        definition_spans.dedup();
+        let locations = definition_spans
+            .into_iter()
+            .map(|span| Location {
+                uri: uri.clone(),
+                range: span_to_range(source, span),
+            })
+            .collect::<Vec<_>>();
+
+        return match locations.as_slice() {
+            [] => None,
+            [single] => Some(GotoDefinitionResponse::Scalar(single.clone())),
+            _ => Some(GotoDefinitionResponse::Array(locations)),
+        };
     }
-    let mut definition_spans = symbol.definition_spans.clone();
-    definition_spans.sort_by(|left, right| {
-        left.start
-            .cmp(&right.start)
-            .then_with(|| left.end.cmp(&right.end))
-    });
-    definition_spans.dedup();
-    let locations = definition_spans
-        .into_iter()
+
+    let token = tokens.iter().find(|token| {
+        matches!(token.kind, SyntaxKind::Ident | SyntaxKind::UpperIdent)
+            && token.span.start <= offset
+            && offset < token.span.end
+    })?;
+    let symbol = prelude_symbol(&state, token.text(source), token.kind)?;
+    let prelude_source = shadml_parser::prelude_source();
+    let prelude_uri = Url::from_file_path(shadml_parser::prelude::prelude_path()).ok()?;
+    let locations = symbol
+        .definition_spans
+        .iter()
+        .copied()
         .map(|span| Location {
-            uri: uri.clone(),
-            range: span_to_range(source, span),
+            uri: prelude_uri.clone(),
+            range: span_to_range(prelude_source, span),
         })
         .collect::<Vec<_>>();
-
     match locations.as_slice() {
         [] => None,
         [single] => Some(GotoDefinitionResponse::Scalar(single.clone())),
@@ -1411,27 +1517,46 @@ fn build_ide_state(source: &str, is_compiler_prelude: bool) -> IdeState<'_> {
         combined.extend(user_program.decls.iter().cloned());
         Program { decls: combined }
     };
-
-    let mut analyzer = SemanticAnalyzer::new();
-    analyzer.analyze(&full_program);
-
-    // Build the document index from user declarations only — prelude spans
-    // don't correspond to positions in the user's source and would cause
-    // symbol_at_offset to return wrong results.
-    let index = IndexBuilder::new(source).build(&user_program);
-    let symbol_types = collect_symbol_types(&user_program, &analyzer);
-    let explicit_signatures = extract_explicit_signatures(&user_program, source);
-    let doc_comments = extract_doc_comments(&user_program);
-    let field_types = extract_field_types(&user_program, source);
+    let document = build_document_state(source, &user_program, &full_program);
+    let prelude = if is_compiler_prelude || source == shadml_parser::prelude_source() {
+        None
+    } else {
+        let prelude_program = shadml_parser::prelude_program();
+        Some(build_document_state(
+            shadml_parser::prelude_source(),
+            prelude_program,
+            prelude_program,
+        ))
+    };
 
     IdeState {
+        source: document.source,
+        analyzer: document.analyzer,
+        index: document.index,
+        symbol_types: document.symbol_types,
+        explicit_signatures: document.explicit_signatures,
+        doc_comments: document.doc_comments,
+        field_types: document.field_types,
+        prelude,
+    }
+}
+
+fn build_document_state<'a>(
+    source: &'a str,
+    user_program: &Program,
+    full_program: &Program,
+) -> DocumentState<'a> {
+    let mut analyzer = SemanticAnalyzer::new();
+    analyzer.analyze(full_program);
+
+    DocumentState {
         source,
+        index: IndexBuilder::new(source).build(user_program),
+        symbol_types: collect_symbol_types(user_program, &analyzer),
+        explicit_signatures: extract_explicit_signatures(user_program, source),
+        doc_comments: extract_doc_comments(user_program),
+        field_types: extract_field_types(user_program, source),
         analyzer,
-        index,
-        symbol_types,
-        explicit_signatures,
-        doc_comments,
-        field_types,
     }
 }
 
@@ -1482,6 +1607,7 @@ fn extract_doc_comments(program: &Program) -> HashMap<String, String> {
                 | Decl::FunDecl { name, .. }
                 | Decl::DataDecl { name, .. }
                 | Decl::EntryPoint { name, .. }
+                | Decl::BuiltinTypeDecl { name, .. }
                 | Decl::TypeAlias { name, .. }
                 | Decl::BindingDecl { name, .. }
                 | Decl::BitfieldDecl { name, .. }
@@ -1677,7 +1803,10 @@ fn completion_kind_for_symbol(symbol: &Symbol) -> CompletionItemKind {
             CompletionItemKind::VARIABLE
         }
         SymbolKind::Constructor => CompletionItemKind::CONSTRUCTOR,
-        SymbolKind::DataType | SymbolKind::TypeAlias | SymbolKind::TypeParameter => {
+        SymbolKind::BuiltinType
+        | SymbolKind::DataType
+        | SymbolKind::TypeAlias
+        | SymbolKind::TypeParameter => {
             CompletionItemKind::TYPE_PARAMETER
         }
         SymbolKind::RecordField => CompletionItemKind::FIELD,
@@ -1726,6 +1855,233 @@ fn generic_builtin_markdown_text(label: &str, signature: &str) -> String {
     sections.join("\n\n")
 }
 
+fn prelude_symbol<'a>(
+    state: &'a IdeState<'_>,
+    name: &str,
+    token_kind: SyntaxKind,
+) -> Option<&'a Symbol> {
+    let prelude = state.prelude.as_ref()?;
+    let matches = prelude
+        .index
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.name == name)
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return None;
+    }
+    if prelude.analyzer.constructors.contains_key(name) {
+        return matches
+            .iter()
+            .copied()
+            .find(|symbol| symbol.kind == SymbolKind::Constructor)
+            .or_else(|| matches.first().copied());
+    }
+    if token_kind == SyntaxKind::UpperIdent {
+        return matches
+            .iter()
+            .copied()
+            .find(|symbol| symbol.namespace == Namespace::Type)
+            .or_else(|| matches.first().copied());
+    }
+    matches.first().copied()
+}
+
+fn prelude_completion_symbols<'a>(
+    state: &'a IdeState<'_>,
+    context: CompletionContext,
+) -> impl Iterator<Item = &'a Symbol> {
+    state
+        .prelude
+        .iter()
+        .flat_map(move |prelude| prelude.index.visible_symbols(0, context))
+}
+
+fn prelude_symbol_markdown(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
+    let prelude = state.prelude.as_ref()?;
+    Some(document_symbol_markdown(prelude, symbol))
+}
+
+fn prelude_symbol_detail(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
+    let prelude = state.prelude.as_ref()?;
+    Some(document_symbol_detail(prelude, symbol))
+}
+
+fn document_symbol_detail(state: &DocumentState<'_>, symbol: &Symbol) -> String {
+    match symbol.kind {
+        SymbolKind::Function => state
+            .analyzer
+            .env
+            .lookup(&symbol.name)
+            .map(|scheme| format!("binding : {}", format_scheme(&state.analyzer.engine, scheme)))
+            .unwrap_or_else(|| "binding".to_owned()),
+        SymbolKind::EntryPoint => state
+            .analyzer
+            .env
+            .lookup(&symbol.name)
+            .map(|scheme| {
+                format!("entry point : {}", format_scheme(&state.analyzer.engine, scheme))
+            })
+            .unwrap_or_else(|| "entry point".to_owned()),
+        SymbolKind::Parameter => state
+            .symbol_types
+            .get(&symbol.primary_span)
+            .map(|ty| format!("parameter : {}", ty))
+            .unwrap_or_else(|| "parameter".to_owned()),
+        SymbolKind::LocalBinding | SymbolKind::PatternBinding => state
+            .symbol_types
+            .get(&symbol.primary_span)
+            .map(|ty| format!("local : {}", ty))
+            .unwrap_or_else(|| "local binding".to_owned()),
+        SymbolKind::Constructor => state
+            .analyzer
+            .env
+            .lookup(&symbol.name)
+            .map(|scheme| {
+                format!(
+                    "constructor : {}",
+                    format_scheme(&state.analyzer.engine, scheme)
+                )
+            })
+            .unwrap_or_else(|| "constructor".to_owned()),
+        SymbolKind::BuiltinType => match state
+            .analyzer
+            .builtin_types
+            .get(&symbol.name)
+            .copied()
+            .unwrap_or(0)
+        {
+            0 => "builtin type".to_owned(),
+            arity => format!("builtin type constructor (arity {})", arity),
+        },
+        SymbolKind::DataType => "data type".to_owned(),
+        SymbolKind::TypeAlias => "type alias".to_owned(),
+        SymbolKind::TypeParameter => "type parameter".to_owned(),
+        SymbolKind::RecordField => "record field".to_owned(),
+    }
+}
+
+fn document_symbol_markdown(state: &DocumentState<'_>, symbol: &Symbol) -> String {
+    let mut sections = Vec::new();
+
+    if let Some(signature) = document_symbol_signature(state, symbol) {
+        sections.push(format!("```shadml\n{} : {}\n```", symbol.name, signature));
+    } else if let Some(excerpt) = document_declaration_excerpt(state, symbol) {
+        sections.push(format!("```shadml\n{}\n```", excerpt));
+    } else {
+        sections.push(format!("**`{}`**", symbol.name));
+    }
+
+    if let Some(doc) = state.doc_comments.get(&symbol.name) {
+        sections.push(doc.clone());
+    } else {
+        sections.push(document_symbol_summary(state, symbol));
+    }
+
+    let references = state
+        .index
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.symbol_id == symbol.id)
+        .count();
+    sections.push(format!(
+        "{} reference{} in this document.",
+        references,
+        if references == 1 { "" } else { "s" }
+    ));
+
+    sections.join("\n\n")
+}
+
+fn document_symbol_signature(state: &DocumentState<'_>, symbol: &Symbol) -> Option<String> {
+    match symbol.kind {
+        SymbolKind::BuiltinType
+        | SymbolKind::DataType
+        | SymbolKind::TypeAlias
+        | SymbolKind::TypeParameter => None,
+        SymbolKind::RecordField => state.field_types.get(&symbol.name).cloned(),
+        SymbolKind::Parameter | SymbolKind::LocalBinding | SymbolKind::PatternBinding => {
+            state.symbol_types.get(&symbol.primary_span).cloned()
+        }
+        _ => state
+            .explicit_signatures
+            .get(&symbol.name)
+            .cloned()
+            .or_else(|| {
+                state
+                    .analyzer
+                    .env
+                    .lookup(&symbol.name)
+                    .map(|scheme| format_scheme(&state.analyzer.engine, scheme))
+            }),
+    }
+}
+
+fn document_symbol_summary(state: &DocumentState<'_>, symbol: &Symbol) -> String {
+    match symbol.kind {
+        SymbolKind::Function => "Top-level binding from this document.".to_owned(),
+        SymbolKind::EntryPoint => "Shader entry point from this document.".to_owned(),
+        SymbolKind::Parameter => match &symbol.container {
+            Some(container) => format!("Parameter of `{}`.", container),
+            None => "Function parameter.".to_owned(),
+        },
+        SymbolKind::LocalBinding => match &symbol.container {
+            Some(container) => format!("Local binding inside `{}`.", container),
+            None => "Local binding.".to_owned(),
+        },
+        SymbolKind::PatternBinding => match &symbol.container {
+            Some(container) => format!("Pattern-bound name inside `{}`.", container),
+            None => "Pattern-bound name.".to_owned(),
+        },
+        SymbolKind::BuiltinType => match state.analyzer.builtin_types.get(&symbol.name).copied() {
+            Some(0) => "Builtin prelude type.".to_owned(),
+            Some(arity) => format!("Builtin prelude type constructor with arity {}.", arity),
+            None => "Builtin prelude type.".to_owned(),
+        },
+        SymbolKind::DataType => {
+            if let Some(data_type) = state.analyzer.data_types.get(&symbol.name) {
+                if data_type.constructors.is_empty() {
+                    "User-defined data type.".to_owned()
+                } else {
+                    format!(
+                        "User-defined data type with constructors: {}.",
+                        data_type.constructors.join(", ")
+                    )
+                }
+            } else {
+                "User-defined data type.".to_owned()
+            }
+        }
+        SymbolKind::TypeAlias => "Named type alias from this document.".to_owned(),
+        SymbolKind::Constructor => state
+            .analyzer
+            .constructors
+            .get(&symbol.name)
+            .map(|constructor| format!("Constructor for `{}`.", constructor.type_name))
+            .unwrap_or_else(|| "Data constructor.".to_owned()),
+        SymbolKind::TypeParameter => match &symbol.container {
+            Some(container) => format!("Type parameter scoped to `{}`.", container),
+            None => "Type parameter.".to_owned(),
+        },
+        SymbolKind::RecordField => match &symbol.container {
+            Some(container) => format!("Field of `{}`.", container),
+            None => "Record field.".to_owned(),
+        },
+    }
+}
+
+fn document_declaration_excerpt(state: &DocumentState<'_>, symbol: &Symbol) -> Option<String> {
+    let line_index = compute_line_starts(state.source)
+        .binary_search(&symbol.primary_span.start)
+        .unwrap_or_else(|index| index.saturating_sub(1));
+    state
+        .source
+        .lines()
+        .nth(line_index)
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty())
+}
+
 fn symbol_detail(state: &IdeState<'_>, symbol: &Symbol) -> String {
     match symbol.kind {
         SymbolKind::Function => state
@@ -1771,6 +2127,11 @@ fn symbol_detail(state: &IdeState<'_>, symbol: &Symbol) -> String {
                 )
             })
             .unwrap_or_else(|| "constructor".to_owned()),
+        SymbolKind::BuiltinType => match state.analyzer.builtin_types.get(&symbol.name).copied() {
+            Some(0) => "builtin type".to_owned(),
+            Some(arity) => format!("builtin type constructor (arity {})", arity),
+            None => "builtin type".to_owned(),
+        },
         SymbolKind::DataType => "data type".to_owned(),
         SymbolKind::TypeAlias => "type alias".to_owned(),
         SymbolKind::TypeParameter => "type parameter".to_owned(),
@@ -1789,7 +2150,6 @@ fn symbol_markdown(state: &IdeState<'_>, symbol: &Symbol) -> String {
         sections.push(format!("**`{}`**", symbol.name));
     }
 
-    // Include doc comment if available
     if let Some(doc) = state.doc_comments.get(&symbol.name) {
         sections.push(doc.clone());
     } else {
@@ -1813,7 +2173,10 @@ fn symbol_markdown(state: &IdeState<'_>, symbol: &Symbol) -> String {
 
 fn symbol_signature(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
     match symbol.kind {
-        SymbolKind::DataType | SymbolKind::TypeAlias | SymbolKind::TypeParameter => None,
+        SymbolKind::BuiltinType
+        | SymbolKind::DataType
+        | SymbolKind::TypeAlias
+        | SymbolKind::TypeParameter => None,
         SymbolKind::RecordField => state.field_types.get(&symbol.name).cloned(),
         SymbolKind::Parameter | SymbolKind::LocalBinding | SymbolKind::PatternBinding => {
             state.symbol_types.get(&symbol.primary_span).cloned()
@@ -1847,6 +2210,11 @@ fn symbol_summary(state: &IdeState<'_>, symbol: &Symbol) -> String {
         SymbolKind::PatternBinding => match &symbol.container {
             Some(container) => format!("Pattern-bound name inside `{}`.", container),
             None => "Pattern-bound name.".to_owned(),
+        },
+        SymbolKind::BuiltinType => match state.analyzer.builtin_types.get(&symbol.name).copied() {
+            Some(0) => "Builtin prelude type.".to_owned(),
+            Some(arity) => format!("Builtin prelude type constructor with arity {}.", arity),
+            None => "Builtin prelude type.".to_owned(),
         },
         SymbolKind::DataType => {
             if let Some(data_type) = state.analyzer.data_types.get(&symbol.name) {
@@ -2176,11 +2544,27 @@ value = 1.0.ha
         match hover.contents {
             HoverContents::Markup(markup) => {
                 assert!(markup.value.contains("length"));
-                assert!(markup.value.contains("Builtin prelude symbol"));
                 assert!(markup.value.contains("```shadml"));
+                assert!(markup.value.contains("length :"));
             }
             other => panic!("expected markup hover, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn hover_on_prelude_function_uses_haddock_doc_from_prelude() {
+        let source = "main x = normalize x";
+        let markup = hover_markdown(source, Position::new(0, 9));
+        assert!(markup.contains("normalize"));
+        assert!(markup.contains("Scale a vector to unit length."));
+    }
+
+    #[test]
+    fn hover_on_prelude_builtin_type_uses_haddock_doc_from_prelude() {
+        let source = "value : F32\nvalue = 1.0";
+        let markup = hover_markdown(source, Position::new(0, 8));
+        assert!(markup.contains("builtin type F32"));
+        assert!(markup.contains("32-bit floating point scalar."));
     }
 
     #[test]
@@ -2196,6 +2580,21 @@ value = 1.0.ha
             }
             other => panic!("expected multiple locations, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn goto_definition_for_prelude_function_jumps_to_prelude_decl() {
+        let source = "main x = normalize x";
+        let uri = Url::parse("file:///test.shadml").unwrap();
+        let response = build_goto_definition(&uri, source, Position::new(0, 9)).unwrap();
+        let location = match response {
+            GotoDefinitionResponse::Scalar(location) => location,
+            other => panic!("expected scalar location, got {other:?}"),
+        };
+        assert!(location.uri.path().ends_with("/prelude/prelude.shadml"));
+        let prelude_source = shadml_parser::prelude_source();
+        let start = position_to_offset(prelude_source, location.range.start).unwrap();
+        assert!(prelude_source[start..].starts_with("normalize"));
     }
 
     #[test]

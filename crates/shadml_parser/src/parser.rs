@@ -29,6 +29,7 @@ impl Decl {
             | Decl::FunDecl { comments, .. }
             | Decl::DataDecl { comments, .. }
             | Decl::EntryPoint { comments, .. }
+            | Decl::BuiltinTypeDecl { comments, .. }
             | Decl::TypeAlias { comments, .. }
             | Decl::BindingDecl { comments, .. }
             | Decl::BitfieldDecl { comments, .. }
@@ -51,6 +52,7 @@ impl Decl {
             | Decl::FunDecl { comments, .. }
             | Decl::DataDecl { comments, .. }
             | Decl::EntryPoint { comments, .. }
+            | Decl::BuiltinTypeDecl { comments, .. }
             | Decl::TypeAlias { comments, .. }
             | Decl::BindingDecl { comments, .. }
             | Decl::BitfieldDecl { comments, .. }
@@ -100,6 +102,7 @@ impl Decl {
             | Decl::FunDecl { span, .. }
             | Decl::DataDecl { span, .. }
             | Decl::EntryPoint { span, .. }
+            | Decl::BuiltinTypeDecl { span, .. }
             | Decl::TypeAlias { span, .. }
             | Decl::BindingDecl { span, .. }
             | Decl::BitfieldDecl { span, .. }
@@ -145,6 +148,12 @@ pub enum Decl {
         name: String,
         params: Vec<Pat>,
         body: Expr,
+        span: Span,
+        comments: Vec<String>,
+    },
+    BuiltinTypeDecl {
+        name: String,
+        arity: usize,
         span: Span,
         comments: Vec<String>,
     },
@@ -1996,9 +2005,12 @@ impl Parser {
         match self.peek_non_trivia() {
             SyntaxKind::KwExtern => self.parse_builtin_extern_decl(start),
             SyntaxKind::KwImpl => self.parse_builtin_impl_decl(start),
+            SyntaxKind::Ident if self.text_of(self.current_token()) == "type" => {
+                self.parse_builtin_type_decl(start)
+            }
             _ => {
                 self.diagnostics.push(
-                    Diagnostic::error("expected `extern` or `impl` after `builtin`")
+                    Diagnostic::error("expected `type`, `extern`, or `impl` after `builtin`")
                         .with_label(Label::primary(self.current_span(), "expected builtin declaration kind")),
                 );
                 Decl::ExternDecl {
@@ -2008,6 +2020,33 @@ impl Parser {
                     comments: vec![],
                 }
             }
+        }
+    }
+
+    fn parse_builtin_type_decl(&mut self, start: u32) -> Decl {
+        let type_tok = self.expect(SyntaxKind::Ident);
+        if self.text_of(&type_tok) != "type" {
+            self.diagnostics.push(
+                Diagnostic::error("expected `type` after `builtin`")
+                    .with_label(Label::primary(type_tok.span, "expected `type`")),
+            );
+        }
+        self.skip_trivia();
+        let name_tok = self.expect(SyntaxKind::UpperIdent);
+        let name = self.text_of(&name_tok).to_owned();
+        self.skip_trivia();
+        let arity = if self.at(SyntaxKind::IntLiteral) {
+            let arity_tok = self.bump();
+            self.text_of(&arity_tok).parse::<usize>().unwrap_or(0)
+        } else {
+            0
+        };
+        let span = self.span_from(start);
+        Decl::BuiltinTypeDecl {
+            name,
+            arity,
+            span,
+            comments: vec![],
         }
     }
 
@@ -4425,6 +4464,18 @@ main x =
                 );
             }
             other => panic!("expected ImplDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_builtin_type_decl() {
+        let prog = parse("builtin type Vec 2");
+        match &prog.decls[0] {
+            Decl::BuiltinTypeDecl { name, arity, .. } => {
+                assert_eq!(name, "Vec");
+                assert_eq!(*arity, 2);
+            }
+            other => panic!("expected BuiltinTypeDecl, got {:?}", other),
         }
     }
 

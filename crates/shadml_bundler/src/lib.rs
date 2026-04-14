@@ -767,6 +767,7 @@ fn decl_name_and_kind(decl: &Decl) -> Option<(String, &'static str)> {
         Decl::FunDecl { name, .. } => Some((name.clone(), "function")),
         Decl::TypeSig { .. } => None, // type sigs pair with FunDecl, don't count separately
         Decl::DataDecl { name, .. } => Some((name.clone(), "type")),
+        Decl::BuiltinTypeDecl { name, .. } => Some((name.clone(), "builtin type")),
         Decl::TypeAlias { name, .. } => Some((name.clone(), "type alias")),
         Decl::TraitDecl { name, .. } => Some((name.clone(), "trait")),
         Decl::ImplDecl { .. } | Decl::BuiltinImplDecl { .. } => None, // impls don't introduce names

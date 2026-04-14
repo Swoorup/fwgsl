@@ -3,10 +3,47 @@
 -- These declarations define the type environment. They are not compiled to WGSL.
 -- User definitions shadow prelude names.
 
+-- Builtin scalar and shaped type constructors.
+--
+-- These names are compiler-recognized, but they are declared here so IDE
+-- features can treat the prelude as the source of truth.
+
+-- | Signed 32-bit integer scalar.
+builtin type I32
+-- | Unsigned 32-bit integer scalar.
+builtin type U32
+-- | 32-bit floating point scalar.
+builtin type F32
+-- | Boolean scalar.
+builtin type Bool
+-- | Source-level string type.
+builtin type String
+-- | Fixed-length vector type constructor with dimension and element type.
+builtin type Vec 2
+-- | Long-form alias for `Vec`.
+builtin type Vector 2
+-- | Matrix type constructor with row count, column count, and element type.
+builtin type Mat 3
+-- | Long-form alias for `Mat`.
+builtin type Matrix 3
+-- | Tensor/array type constructor with extent and element type.
+builtin type Tensor 2
+-- | Surface alias for tensor/array shapes.
+builtin type Array 2
+-- | Short alias for `Tensor`.
+builtin type Ten 2
+-- | Scalar wrapper alias.
+builtin type Scalar 1
+-- | Short alias for `Scalar`.
+builtin type Sca 1
+
 -- Data types
 
+-- | Optional value.
 data Option a = Some a | None
+-- | Success-or-error result.
 data Result a = Ok a | Err String
+-- | Builtin product type.
 data Pair a b = Pair a b
 
 -- Operator overloading traits
@@ -428,7 +465,9 @@ builtin impl BitNot Vec4u where
 
 -- WGSL math — unary (a -> a)
 
+-- | WGSL sine builtin.
 extern sin   : a -> a
+-- | WGSL cosine builtin.
 extern cos   : a -> a
 extern tan   : a -> a
 extern abs   : a -> a
@@ -477,14 +516,17 @@ extern ldexp   : a -> a -> a
 -- WGSL math — ternary
 
 extern clamp      : a -> a -> a -> a
+-- | Interpolate between two values with a scalar weight.
 extern mix        : a -> a -> b -> a
 extern smoothstep : a -> a -> b -> a
 extern fma        : a -> a -> a -> a
 
 -- WGSL vector operations
 
+-- | Scale a vector to unit length.
 extern normalize : Vec<n, a> -> Vec<n, a>
 extern length    : Vec<n, a> -> a
+-- | Compute the dot product of two vectors.
 extern dot       : Vec<n, a> -> Vec<n, a> -> a
 extern distance  : Vec<n, a> -> Vec<n, a> -> a
 extern cross     : Vec<3, a> -> Vec<3, a> -> Vec<3, a>
@@ -533,8 +575,11 @@ extern insertBits        : a -> a -> U32 -> U32 -> a
 
 -- Vector constructors
 
+-- | Construct a two-component vector value.
 extern vec2 : a -> a -> Vec<2, a>
+-- | Construct a three-component vector value.
 extern vec3 : a -> a -> a -> Vec<3, a>
+-- | Construct a four-component vector value.
 extern vec4 : a -> a -> a -> a -> Vec<4, a>
 
 extern splat2 : a -> Vec<2, a>
