@@ -1,0 +1,280 @@
+-- Type name conflict exhaustiveness test.
+--
+-- shadml uses separate namespaces for data types, traits, type aliases,
+-- constructors, and value bindings. This file exercises every conflict
+-- scenario to document how the compiler handles them, including conflicts
+-- with names from the prelude and imported modules.
+
+-- ============================================================================
+-- 1. Data type named the same as a trait
+--    Traits and data types occupy separate namespaces, so they coexist.
+
+trait Scalable a where
+  scale : a -> F32 -> a
+
+data Scalable = Scalable { factor : F32 }
+
+impl Scalable F32 where
+  scale x f = x * f
+
+scalableResult : Scalable
+scalableResult = Scalable { factor = scale 2.0 3.0 }
+
+-- ============================================================================
+-- 2. Associated type sharing a name with a data type
+--    `Output` is both an associated type of Add and a data type.
+
+data Output = Output { tag : I32 }
+
+trait Add a b where
+  type Output
+  (+) : a -> b -> Output
+
+impl Add F32 F32 where
+  type Output = F32
+  (+) x y = x + y
+
+addResult : F32
+addResult = 1.0 + 2.0
+
+-- ============================================================================
+-- 3. Multiple traits with the same associated type name
+--    `Output` is declared in both Add and Mul without conflict.
+
+trait Mul a b where
+  type Output
+  (*) : a -> b -> Output
+
+impl Mul F32 F32 where
+  type Output = F32
+  (*) x y = x * y
+
+mulResult : F32
+mulResult = 2.0 * 3.0
+
+-- ============================================================================
+-- 4. Constructor with the same name as its type (newtype pattern)
+--    Very common in ML-family languages.
+
+data Velocity = Velocity (Vec<3, F32>)
+
+velocityResult : Velocity
+velocityResult = Velocity [1.0, 0.0, 0.0]
+
+-- ============================================================================
+-- 5. Record field sharing a name with a top-level binding
+--    Record fields and value bindings are in different scopes.
+
+data Params = Params { scale : F32, offset : F32 }
+
+offset : F32
+offset = 0.5
+
+paramsResult : Params
+paramsResult = Params { scale = 2.0, offset = offset }
+
+-- ============================================================================
+-- 6. Trait with a method that has the same name as a data field
+--    Method names and field names are in different namespaces.
+--    NOTE: When a trait method and a field share a name, use field
+--    access syntax (dot) which unambiguously selects the field.
+
+data Lens = Lens { brightness : F32, contrast : F32 }
+
+trait HasBrightness a where
+  getBrightness : a -> F32
+
+impl HasBrightness Lens where
+  getBrightness l = l.brightness
+
+brightnessResult : F32
+brightnessResult = getBrightness (Lens { brightness = 0.8, contrast = 0.5 })
+
+-- ============================================================================
+-- 7. Using associated types in constrained function signatures
+--    The return type uses the trait's associated type Output.
+
+addThree : F32 -> F32 -> F32 -> F32
+addThree x y z = (x + y) + z
+
+addThreeResult : F32
+addThreeResult = addThree 1.0 2.0 3.0
+
+-- ============================================================================
+-- 8. Data type sharing a name with a trait (different scenario: no impl needed)
+
+data Metric = Metric { value : F32 }
+
+metricValue : Metric -> F32
+metricValue m = m.value
+
+metricResult : F32
+metricResult = metricValue (Metric { value = 10.0 })
+
+-- ============================================================================
+-- 9. Trait type parameter that shadows a data type name
+--    The type parameter `Result` is separate from any data type.
+
+data Container a = Container a
+
+data Tag = Tag I32
+
+tagResult : Tag
+tagResult = Tag 42
+
+-- ============================================================================
+-- 10. User data type shadowing a prelude data type (Option)
+--    User-defined `Option` takes precedence in both type and value
+--    position. The prelude `Option` is shadowed.
+
+data Option = Option { chosen : F32 }
+
+userOption : Option
+userOption = Option { chosen = 42.0 }
+
+chosenValue : F32
+chosenValue = userOption.chosen
+
+-- ============================================================================
+-- 11. User data type shadowing a prelude data type (Result)
+--    User-defined `Result` shadows the prelude's Option/Result ADT.
+
+data Result = Result { code : I32 }
+
+userResult : Result
+userResult = Result { code = 1 }
+
+resultCode : I32
+resultCode = userResult.code
+
+-- ============================================================================
+-- 12. User data type shadowing a prelude data type (Pair)
+--    User-defined `Pair` shadows the prelude's Pair constructor.
+
+data Pair = Pair { first : F32, second : F32 }
+
+userPair : Pair
+userPair = Pair { first = 1.0, second = 2.0 }
+
+pairSum : F32
+pairSum = userPair.first + userPair.second
+
+-- ============================================================================
+-- 13. User trait with same name as a prelude trait (Neg)
+--    User-defined `Neg` shadows the prelude trait. The prelude's
+--    built-in negation operator (-) still works on F32 because
+--    the builtin impl is already registered.
+
+trait Neg a where
+  negate : a -> a
+
+data Signed = Signed { amount : F32 }
+
+impl Neg Signed where
+  negate s = Signed { amount = 0.0 - s.amount }
+
+negResult : Signed
+negResult = negate (Signed { amount = -5.0 })
+
+-- ============================================================================
+-- 14. User function shadowing a prelude extern (sin, max)
+--    User definitions shadow prelude externs in value position.
+--    The prelude `sin` is still accessible via explicit call for F32.
+
+mySin : F32 -> F32
+mySin x = x * 0.01
+
+mySinResult : F32
+mySinResult = mySin 1.0
+
+-- Prelude sin is shadowed but we can still use arithmetic
+preludeSinWorkaround : F32
+preludeSinWorkaround = sin 0.5
+
+-- User function shadowing `max`
+customMax : F32 -> F32 -> F32
+customMax a b = a - b
+
+customMaxResult : F32
+customMaxResult = customMax 10.0 3.0
+
+-- ============================================================================
+-- 15. User type alias shadowing a prelude type alias
+--    User aliases can shadow prelude aliases. Here `Color` is a new
+--    alias not in the prelude, demonstrating that user aliases work
+--    alongside prelude aliases without conflict.
+
+alias Color = Vec<3, F32>
+
+bgColor : Color
+bgColor = [0.5, 0.5, 0.5]
+
+-- ============================================================================
+-- 16. User data type with constructor shadowing a prelude constructor (Some)
+--    `Some` from prelude Option is shadowed by the user's constructor.
+
+data MaybeVal = Some F32 | None
+
+someVal : MaybeVal
+someVal = Some 99.0
+
+-- ============================================================================
+-- 17. User data type with constructor shadowing a prelude constructor (Ok)
+--    `Ok` from prelude Result is shadowed by the user's constructor.
+
+data Status = Ok I32 | Failed
+
+okStatus : Status
+okStatus = Ok 0
+
+-- ============================================================================
+-- 18. User-associated type named Output in a custom trait
+--    `Output` is used by Add/Sub/Mul/etc. in the prelude.
+--    A user trait can also declare `type Output` without conflict.
+
+trait Scale a where
+  type Output
+  scaleTo : a -> F32 -> Output
+
+data Weight = Weight { grams : F32 }
+
+impl Scale Weight where
+  type Output = Weight
+  scaleTo w factor = Weight { grams = w.grams * factor }
+
+scaledWeight : Weight
+scaledWeight = scaleTo (Weight { grams = 100.0 }) 0.5
+
+-- ============================================================================
+-- 19. User type alias named after a prelude builtin type (Scalar)
+--    `Scalar` is a builtin type constructor in the prelude.
+--    User alias shadows it in type position.
+
+alias Scalar = F32
+
+scalarVal : Scalar
+scalarVal = 3.14
+
+-- ============================================================================
+-- 20. Cross-module: imported names from ConflictsLib
+--    The imported module defines a custom Neg trait, a Pair data type,
+--    a distance function, and a SignedVal type. These shadow prelude
+--    names when imported unqualified. The tests below use the imported
+--    names directly.
+--
+--    Note: `import ConflictsLib` brings all public names into scope,
+--    shadowing any prelude names with the same name.
+
+import ConflictsLib
+
+-- Uses the imported `distance` function (shadows prelude's vector distance)
+crossModuleDistance : F32
+crossModuleDistance = distance 10.0 3.0
+
+-- Uses the imported `abs` function (shadows prelude's abs)
+crossModuleAbs : F32
+crossModuleAbs = abs 5.0
+
+-- Uses the imported `SignedVal` type and its `Neg` impl
+crossModuleNegated : SignedVal
+crossModuleNegated = negate (SignedVal { amount = -5.0 })

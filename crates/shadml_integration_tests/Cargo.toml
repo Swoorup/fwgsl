@@ -16,4 +16,5 @@ shadml_diagnostics = { workspace = true }
 shadml_span = { workspace = true }
 shadml_syntax = { workspace = true }
 shadml_allocator = { workspace = true }
+shadml_bundler = { workspace = true }
 naga = { workspace = true }
