@@ -1,0 +1,10 @@
+trait Scale a where
+  type Output
+  scaleTo : a -> F32 -> Self.Output
+
+data Weight = Weight { grams : F32 }
+
+impl Scale Weight where
+  type Output = Weight
+  scaleTo w factor = Weight { grams = w.grams * factor }
+  scaleTo w factor = Weight { grams = w.grams * factor + 1.0 }

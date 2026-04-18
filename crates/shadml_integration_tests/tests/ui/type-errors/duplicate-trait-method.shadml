@@ -1,0 +1,3 @@
+trait Combine a where
+  combine : a -> a -> a
+  combine : a -> a -> a

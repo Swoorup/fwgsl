@@ -391,8 +391,20 @@ impl SemanticAnalyzer {
                     var_ids.iter().copied().map(Ty::Var).collect(),
                 )];
                 let mut trait_methods = Vec::new();
+                let mut seen_trait_methods: HashSet<String> = HashSet::new();
                 for m in methods {
                     let canonical_name = canonical_trait_method_name(name, &m.name);
+                    if seen_trait_methods.contains(&canonical_name) {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "Duplicate method '{}' in trait '{}'",
+                                m.name, name
+                            ))
+                            .with_label(Label::primary(m.span, "duplicate method declaration")),
+                        );
+                        continue;
+                    }
+                    seen_trait_methods.insert(canonical_name.clone());
                     let mut scope: HashMap<String, TyVarId> = vars
                         .iter()
                         .cloned()
@@ -473,11 +485,23 @@ impl SemanticAnalyzer {
                     }
                 }
                 let mut impl_methods = HashMap::new();
+                let mut seen_methods: HashSet<String> = HashSet::new();
                 for m in methods {
                     let logical_name = trait_name
                         .as_deref()
                         .map(|tname| canonical_trait_method_name(tname, &m.name))
                         .unwrap_or_else(|| m.name.clone());
+                    if seen_methods.contains(&logical_name) {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "Duplicate method '{}' in impl",
+                                m.name
+                            ))
+                            .with_label(Label::primary(m.span, "duplicate method definition")),
+                        );
+                        continue;
+                    }
+                    seen_methods.insert(logical_name.clone());
                     let mangled = mangle_instance_method(&logical_name, &type_suffix);
                     impl_methods.insert(logical_name.clone(), mangled.clone());
 

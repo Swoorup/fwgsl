@@ -1,0 +1,10 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Duplicate method 'scaleTo' in impl
+  --> duplicate-impl-method.shadml:10:3
+   |
+10 |   scaleTo w factor = Weight { grams = w.grams * factor + 1.0 }
+   |   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ duplicate method definition
+   |
