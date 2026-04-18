@@ -983,9 +983,18 @@ test p =
     #[test]
     fn assoc_type_same_name_as_data_type() {
         let source = r#"
-data Output = Output { value : F32 }
+data Output = MkOutput F32
+
+trait Scale a where
+  type Output
+  scaleTo : a -> F32 -> Self.Output
+
+impl Scale F32 where
+  type Output = F32
+  scaleTo x f = x * f
+
 test : F32
-test = 1.0 + 2.0
+test = scaleTo 2.0 3.0
 "#;
         let (_, has_errors) = parse_and_analyze(source);
         assert!(
@@ -996,13 +1005,14 @@ test = 1.0 + 2.0
 
     /// A trait associated type named the same as a type alias.
     /// `type Output` where `Output` is also a type alias for `F32`.
+    /// Bare `Output` resolves to the alias; `Self.Output` resolves to the associated type.
     #[test]
     fn assoc_type_same_name_as_type_alias() {
         let source = r#"
 alias Output = F32
 trait Combine a b where
   type Output
-  combine : a -> b -> Output
+  combine : a -> b -> Self.Output
 impl Combine F32 F32 where
   type Output = F32
   combine x y = x + y
@@ -1010,9 +1020,10 @@ test : F32
 test = combine 1.0 2.0
 "#;
         let (_, has_errors) = parse_and_analyze(source);
-        // In the current implementation, `Output` in the trait method signature
-        // is resolved as an associated type, not the alias.
-        let _ = has_errors;
+        assert!(
+            !has_errors,
+            "associated type 'Output' should not conflict with type alias 'Output'"
+        );
     }
 
     /// A data constructor with the same name as a top-level function.
@@ -1112,10 +1123,10 @@ test = Box 3.0
         let source = r#"
 trait Plus a b where
   type Output
-  plus : a -> b -> Output
+  plus : a -> b -> Self.Output
 trait Times a b where
   type Output
-  times : a -> b -> Output
+  times : a -> b -> Self.Output
 impl Plus F32 F32 where
   type Output = F32
   plus x y = x + y

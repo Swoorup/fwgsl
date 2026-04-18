@@ -89,7 +89,7 @@ addThreeResult = addThree 1.0 2.0 3.0
 
 trait Scale a where
   type Output
-  scaleTo : a -> F32 -> Output
+  scaleTo : a -> F32 -> Self.Output
 
 data Weight = Weight { grams : F32 }
 

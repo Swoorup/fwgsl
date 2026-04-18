@@ -42,6 +42,7 @@ enum SymbolKind {
     BuiltinType,
     DataType,
     TypeAlias,
+    AssociatedType,
     Constructor,
     TypeParameter,
     RecordField,
@@ -427,6 +428,7 @@ impl<'a> IndexBuilder<'a> {
                     name,
                     span,
                     methods,
+                    associated_types,
                     ..
                 } => {
                     let name_span = self.first_name_span(name, *span).unwrap_or(*span);
@@ -441,6 +443,20 @@ impl<'a> IndexBuilder<'a> {
                         container: Some(name.clone()),
                     });
                     self.top_level_types.insert(name.clone(), symbol_id);
+                    for at in associated_types {
+                        let at_span = self.first_name_span(&at.name, at.span).unwrap_or(at.span);
+                        let at_id = self.index.push_symbol(NewSymbol {
+                            name: at.name.clone(),
+                            namespace: Namespace::Type,
+                            kind: SymbolKind::AssociatedType,
+                            span: at_span,
+                            scope_span: whole_file,
+                            scope_depth: 0,
+                            visible_from: 0,
+                            container: Some(name.clone()),
+                        });
+                        self.top_level_types.insert(at.name.clone(), at_id);
+                    }
                     for m in methods {
                         let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
                         let mid = self.index.push_symbol(NewSymbol {
@@ -461,6 +477,7 @@ impl<'a> IndexBuilder<'a> {
                     tys,
                     methods,
                     span,
+                    associated_types,
                     ..
                 } => {
                     let container = match trait_name {
@@ -471,6 +488,20 @@ impl<'a> IndexBuilder<'a> {
                         ),
                         None => format!("impl {}", format_type(&tys[0])),
                     };
+                    for at in associated_types {
+                        let at_span = self.first_name_span(&at.name, at.span).unwrap_or(at.span);
+                        let at_id = self.index.push_symbol(NewSymbol {
+                            name: at.name.clone(),
+                            namespace: Namespace::Type,
+                            kind: SymbolKind::AssociatedType,
+                            span: at_span,
+                            scope_span: *span,
+                            scope_depth: 0,
+                            visible_from: 0,
+                            container: Some(container.clone()),
+                        });
+                        self.top_level_types.insert(at.name.clone(), at_id);
+                    }
                     for m in methods {
                         let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
                         let mid = self.index.push_symbol(NewSymbol {
@@ -494,6 +525,7 @@ impl<'a> IndexBuilder<'a> {
                     tys,
                     methods,
                     span,
+                    associated_types,
                     ..
                 } => {
                     let container = format!(
@@ -501,6 +533,20 @@ impl<'a> IndexBuilder<'a> {
                         trait_name,
                         tys.iter().map(format_type).collect::<Vec<_>>().join(" ")
                     );
+                    for at in associated_types {
+                        let at_span = self.first_name_span(&at.name, at.span).unwrap_or(at.span);
+                        let at_id = self.index.push_symbol(NewSymbol {
+                            name: at.name.clone(),
+                            namespace: Namespace::Type,
+                            kind: SymbolKind::AssociatedType,
+                            span: at_span,
+                            scope_span: *span,
+                            scope_depth: 0,
+                            visible_from: 0,
+                            container: Some(container.clone()),
+                        });
+                        self.top_level_types.insert(at.name.clone(), at_id);
+                    }
                     for m in methods {
                         let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
                         let mid = self.index.push_symbol(NewSymbol {
@@ -687,14 +733,30 @@ impl<'a> IndexBuilder<'a> {
                 self.walk_type(ty, frames);
                 self.walk_expr(value, frames);
             }
-            Decl::TraitDecl { methods, .. } => {
+            Decl::TraitDecl {
+                methods, associated_types, ..
+            } => {
+                for at in associated_types {
+                    if let Some(at_id) = self.top_level_types.get(&at.name).copied() {
+                        self.index
+                            .push_occurrence(at_id, at.span, OccurrenceRole::Definition);
+                    }
+                }
                 for m in methods {
                     self.walk_type(&m.ty, frames);
                 }
             }
-            Decl::ImplDecl { tys, methods, .. } => {
+            Decl::ImplDecl {
+                tys,
+                methods,
+                associated_types,
+                ..
+            } => {
                 for ty in tys {
                     self.walk_type(ty, frames);
+                }
+                for at in associated_types {
+                    self.walk_type(&at.ty, frames);
                 }
                 for m in methods {
                     if let Some(method_ty) = &m.ty {
@@ -703,9 +765,14 @@ impl<'a> IndexBuilder<'a> {
                     self.walk_callable(&m.name, &m.params, &m.body, &[], m.span, frames);
                 }
             }
-            Decl::BuiltinImplDecl { tys, .. } => {
+            Decl::BuiltinImplDecl {
+                tys, associated_types, ..
+            } => {
                 for ty in tys {
                     self.walk_type(ty, frames);
+                }
+                for at in associated_types {
+                    self.walk_type(&at.ty, frames);
                 }
             }
             Decl::ExternDecl { ty, .. } | Decl::BuiltinExternDecl { ty, .. } => {
@@ -981,8 +1048,23 @@ impl<'a> IndexBuilder<'a> {
                     self.walk_type(item, frames);
                 }
             }
-            Type::Proj(base, _, _) => self.walk_type(base, frames),
-            Type::Nat(_, _) | Type::Unit(_) => {}
+            Type::Proj(base, name, span) => {
+                self.walk_type(base, frames);
+                // Try to resolve the projected name as an associated type
+                if let Some(symbol_id) = self.top_level_types.get(name).copied() {
+                    let symbol = &self.index.symbols[symbol_id];
+                    if symbol.kind == SymbolKind::AssociatedType {
+                        // Compute the span of just the name token (after the dot)
+                        if let Some(name_span) =
+                            self.first_name_span(name, *span)
+                        {
+                            self.index
+                                .push_occurrence(symbol_id, name_span, OccurrenceRole::Reference);
+                        }
+                    }
+                }
+            }
+            Type::Nat(_, _) | Type::Unit(_) | Type::Self_(_) => {}
         }
     }
 
@@ -1807,6 +1889,7 @@ fn completion_kind_for_symbol(symbol: &Symbol) -> CompletionItemKind {
         SymbolKind::BuiltinType
         | SymbolKind::DataType
         | SymbolKind::TypeAlias
+        | SymbolKind::AssociatedType
         | SymbolKind::TypeParameter => {
             CompletionItemKind::TYPE_PARAMETER
         }
@@ -1957,6 +2040,7 @@ fn document_symbol_detail(state: &DocumentState<'_>, symbol: &Symbol) -> String 
         },
         SymbolKind::DataType => "data type".to_owned(),
         SymbolKind::TypeAlias => "type alias".to_owned(),
+        SymbolKind::AssociatedType => "associated type".to_owned(),
         SymbolKind::TypeParameter => "type parameter".to_owned(),
         SymbolKind::RecordField => "record field".to_owned(),
     }
@@ -1999,6 +2083,7 @@ fn document_symbol_signature(state: &DocumentState<'_>, symbol: &Symbol) -> Opti
         SymbolKind::BuiltinType
         | SymbolKind::DataType
         | SymbolKind::TypeAlias
+        | SymbolKind::AssociatedType
         | SymbolKind::TypeParameter => None,
         SymbolKind::RecordField => state.field_types.get(&symbol.name).cloned(),
         SymbolKind::Parameter | SymbolKind::LocalBinding | SymbolKind::PatternBinding => {
@@ -2054,6 +2139,10 @@ fn document_symbol_summary(state: &DocumentState<'_>, symbol: &Symbol) -> String
             }
         }
         SymbolKind::TypeAlias => "Named type alias from this document.".to_owned(),
+        SymbolKind::AssociatedType => match &symbol.container {
+            Some(container) => format!("Associated type of trait `{}`.", container),
+            None => "Associated type.".to_owned(),
+        },
         SymbolKind::Constructor => state
             .analyzer
             .constructors
@@ -2135,6 +2224,7 @@ fn symbol_detail(state: &IdeState<'_>, symbol: &Symbol) -> String {
         },
         SymbolKind::DataType => "data type".to_owned(),
         SymbolKind::TypeAlias => "type alias".to_owned(),
+        SymbolKind::AssociatedType => "associated type".to_owned(),
         SymbolKind::TypeParameter => "type parameter".to_owned(),
         SymbolKind::RecordField => "record field".to_owned(),
     }
@@ -2177,6 +2267,7 @@ fn symbol_signature(state: &IdeState<'_>, symbol: &Symbol) -> Option<String> {
         SymbolKind::BuiltinType
         | SymbolKind::DataType
         | SymbolKind::TypeAlias
+        | SymbolKind::AssociatedType
         | SymbolKind::TypeParameter => None,
         SymbolKind::RecordField => state.field_types.get(&symbol.name).cloned(),
         SymbolKind::Parameter | SymbolKind::LocalBinding | SymbolKind::PatternBinding => {
@@ -2232,6 +2323,10 @@ fn symbol_summary(state: &IdeState<'_>, symbol: &Symbol) -> String {
             }
         }
         SymbolKind::TypeAlias => "Named type alias from this document.".to_owned(),
+        SymbolKind::AssociatedType => match &symbol.container {
+            Some(container) => format!("Associated type of trait `{}`.", container),
+            None => "Associated type.".to_owned(),
+        },
         SymbolKind::Constructor => state
             .analyzer
             .constructors
@@ -2316,6 +2411,7 @@ fn format_type(ty: &Type) -> String {
         }
         Type::Unit(_) => "()".to_owned(),
         Type::Proj(base, name, _) => format!("{}.{}", format_type(base), name),
+        Type::Self_(_) => "Self".to_owned(),
     }
 }
 

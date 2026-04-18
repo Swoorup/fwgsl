@@ -1,0 +1,4 @@
+data Foo = Foo
+
+-- Self.Output is only valid inside a trait body
+foo : Foo -> Self.Output

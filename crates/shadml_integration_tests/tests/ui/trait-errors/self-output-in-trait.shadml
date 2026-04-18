@@ -1,0 +1,3 @@
+trait Combine a b where
+  type Output
+  combine : a -> b -> Self.Output

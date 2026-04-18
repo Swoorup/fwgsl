@@ -3039,8 +3039,36 @@ impl AstLowering {
                     .entry(name.clone())
                     .or_insert_with(|| fresh_var_id(&mut self.engine)),
             ),
+            Type::Self_(_) => {
+                // Standalone `Self` is invalid — only `Self.Output` is valid
+                // and handled in the Type::Proj arm. This arm is reached
+                // when `Self` appears without a projection.
+                Ty::Error
+            }
             Type::Proj(_base, name, _) => {
-                // Find the matching constraint trait for this associated type
+                // Self.Output: search constraint traits for a matching associated type
+                if matches!(_base.as_ref(), Type::Self_(_)) {
+                    if let Some((trait_name, trait_params)) =
+                        constraint_traits.iter().find_map(|(tn, tp)| {
+                            let trait_info = self.traits.get(tn)?;
+                            if trait_info.associated_types.iter().any(|n| n == name) {
+                                Some((tn.clone(), tp.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                    {
+                        return Ty::AssocProj {
+                            trait_params,
+                            name: name.clone(),
+                            trait_name,
+                        };
+                    }
+                    // Self.Name outside a trait body or with unknown associated type —
+                    // semantic analysis already reported errors, produce a placeholder.
+                    return Ty::Error;
+                }
+                // a.Output: find the matching constraint trait for this associated type
                 if let Some((trait_name, trait_params)) =
                     constraint_traits.iter().find_map(|(tn, tp)| {
                         let trait_info = self.traits.get(tn)?;
@@ -3116,6 +3144,7 @@ impl AstLowering {
                 Ty::Con(name.clone())
             }
             Type::Var(name, _) => Ty::Con(name.clone()),
+            Type::Self_(_) => Ty::Error,
             Type::Proj(_base, name, _) => Ty::Con(name.clone()),
             Type::Nat(n, _) => Ty::Nat(*n),
             Type::Arrow(a, b, _) => {

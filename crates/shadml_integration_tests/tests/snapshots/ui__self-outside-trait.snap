@@ -1,0 +1,10 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: `Self` is only valid inside trait bodies
+  --> self-outside-trait.shadml:4:14
+   |
+4 | foo : Foo -> Self.Output
+  |              ~~~~ `Self` outside trait context
+   |

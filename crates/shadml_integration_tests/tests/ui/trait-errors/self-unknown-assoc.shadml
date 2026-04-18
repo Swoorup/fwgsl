@@ -1,0 +1,4 @@
+trait Combine a b where
+  type Output
+  -- Foo is not an associated type of Combine
+  combine : a -> b -> Self.Foo

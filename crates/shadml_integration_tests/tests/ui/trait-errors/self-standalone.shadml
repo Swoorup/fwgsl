@@ -1,0 +1,4 @@
+trait Combine a b where
+  type Output
+  -- Standalone Self is not valid in type position
+  combine : a -> b -> Self

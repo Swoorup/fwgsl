@@ -1,0 +1,6 @@
+trait Scale a where
+  type Output
+  scale : a -> Self.Output
+impl Scale F32 where
+  type Outut = F32
+  scale w = w

@@ -1,7 +1,7 @@
 # Remaining Issues — Associated Types Implementation
 
 Created: 2026-04-17
-Progress: 10/23 issues
+Progress: 11/23 issues
 
 Code review (2026-04-17, updated 2026-04-18).
 
@@ -211,17 +211,15 @@ This function must handle every `HirExpr` variant. If a new variant is added, it
 
 ---
 
-## 18. Bare Associated Type Names Shadow Type Constructors
+## 18. Bare Associated Type Names Shadow Type Constructors — FIXED
 
-**Severity:** Medium
-**File:** `crates/shadml_semantic/src/lib.rs`, `convert_syntax_type_with_scope`
+**Status:** Fixed (2026-04-18)
 
-**Problem:**
-In `Type::Con(name, span)`, if `name` matches an associated type name, it's intercepted before the type alias/constructor check. An associated type named `Vec` would shadow the `Vec` type constructor, making `Vec<3, F32>` unrepresentable in that scope.
-
-**Impact:** Name collision between associated types and type constructors. Currently unlikely (only `Output` is used), but a latent bug.
-
-**Fix direction:** Check type aliases/constructors first, then check associated type names. Or require associated type names to be `UpperIdent` (already enforced) and warn about shadowing.
+**What changed:**
+- Bare names in type position now always resolve to top-level types (data, alias, bitfield, builtin)
+- Associated types are accessed via `Self.Output` (inside trait bodies) or `a.Output` (dot-projection)
+- Removed bare-name `assoc_ctx` checks from `Type::Con` and `Type::Var` arms in semantic and lowering
+- Added `KwSelf` keyword token, `Type::Self_` AST node, and full error diagnostics for misuse
 
 ---
 

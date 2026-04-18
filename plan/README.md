@@ -10,6 +10,7 @@
 - [agent-quality](agent-quality.md) — Improve agent.md solution quality
 
 ## Completed
+- [associated-types/self-output-and-resolution-fix](associated-types/self-output-and-resolution-fix.md) — Add `Self.Output` syntax, fix bare-name shadowing
 - [associated-types/associated-types-for-traits](associated-types/associated-types-for-traits.md) — Associated types migration (7 phases)
 - [lowering/fix-qualified-constraint-resolution](lowering/fix-qualified-constraint-resolution.md) — Fix constraint resolution in AST/HIR lowering
 - [lowering/fix-ast-lowering-constraint-propagation](lowering/fix-ast-lowering-constraint-propagation.md) — Fix constraint propagation in lower_expr

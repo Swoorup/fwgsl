@@ -601,7 +601,12 @@ impl<'a> Lexer<'a> {
         while !self.at_end() && is_ident_continue(self.peek()) {
             self.advance();
         }
-        self.emit(SyntaxKind::UpperIdent, start);
+        let text = std::str::from_utf8(&self.source[start..self.pos]).unwrap_or("");
+        if text == "Self" {
+            self.emit(SyntaxKind::KwSelf, start);
+        } else {
+            self.emit(SyntaxKind::UpperIdent, start);
+        }
     }
 
     /// Advance past a single UTF-8 codepoint.

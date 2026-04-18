@@ -507,6 +507,8 @@ pub enum Type {
     Unit(Span),
     /// Type projection: `a.Output` (associated type access)
     Proj(Box<Type>, String, Span),
+    /// `Self` keyword in type position (only valid as `Self.Output`)
+    Self_(Span),
 }
 
 #[derive(Debug, Clone)]
@@ -560,7 +562,8 @@ impl Type {
             | Type::Paren(_, s)
             | Type::Tuple(_, s)
             | Type::Unit(s)
-            | Type::Proj(_, _, s) => *s,
+            | Type::Proj(_, _, s)
+            | Type::Self_(s) => *s,
         }
     }
 }
@@ -3851,6 +3854,10 @@ impl Parser {
                 let name = self.text_of(&tok).to_owned();
                 self.parse_angle_type_args(Type::Con(name, tok.span))
             }
+            SyntaxKind::KwSelf => {
+                let tok = self.bump();
+                Type::Self_(tok.span)
+            }
             SyntaxKind::Ident => {
                 let tok = self.bump();
                 let name = self.text_of(&tok).to_owned();
@@ -3957,7 +3964,8 @@ impl Parser {
             | Type::Paren(_, span)
             | Type::Tuple(_, span)
             | Type::Unit(span)
-            | Type::Proj(_, _, span) => {
+            | Type::Proj(_, _, span)
+            | Type::Self_(span) => {
                 *span = span.merge(end.span);
             }
         }

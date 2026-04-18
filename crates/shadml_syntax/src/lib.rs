@@ -161,6 +161,7 @@ pub enum SyntaxKind {
     KwAs,
     KwWhen,
     KwCfg,
+    KwSelf,
 
     // ── CST node kinds ─────────────────────────────────────────────
     SourceFile,
@@ -255,7 +256,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     const FIRST_KEYWORD: Self = SyntaxKind::KwModule;
-    const LAST_KEYWORD: Self = SyntaxKind::KwCfg;
+    const LAST_KEYWORD: Self = SyntaxKind::KwSelf;
 
     const FIRST_OPERATOR: Self = SyntaxKind::Plus;
     const LAST_OPERATOR: Self = SyntaxKind::PipeForward;
@@ -482,6 +483,7 @@ impl fmt::Display for SyntaxKind {
             SyntaxKind::KwAs => "'as'",
             SyntaxKind::KwWhen => "'when'",
             SyntaxKind::KwCfg => "'cfg'",
+            SyntaxKind::KwSelf => "'Self'",
 
             // CST node kinds
             SyntaxKind::SourceFile => "source file",

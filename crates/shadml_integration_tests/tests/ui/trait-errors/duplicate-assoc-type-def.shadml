@@ -1,6 +1,6 @@
 trait Combine a b where
   type Output
-  combine : a -> b -> Output
+  combine : a -> b -> Self.Output
 impl Combine F32 F32 where
   type Output = F32
   type Output = I32

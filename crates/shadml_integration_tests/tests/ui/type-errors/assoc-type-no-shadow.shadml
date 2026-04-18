@@ -1,0 +1,8 @@
+-- Bare `Output` resolves to the data type, not the associated type.
+-- `Self.Output` resolves to the associated type.
+data Output = MkOutput F32
+
+trait Scale a where
+  type Output
+  scaleTo : a -> F32 -> Self.Output
+  makeOutput : F32 -> Output

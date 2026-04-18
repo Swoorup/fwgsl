@@ -119,7 +119,6 @@ pub struct DataTypeInfo {
 struct AssocTypeContext {
     trait_name: String,
     trait_var_ids: Vec<TyVarId>,
-    assoc_type_names: Vec<String>,
 }
 
 impl AssocTypeContext {
@@ -308,16 +307,6 @@ impl SemanticAnalyzer {
                     let mut seen_assoc: HashSet<String> = HashSet::new();
                     let mut assoc_type_names: Vec<String> = Vec::new();
                     for at in associated_types {
-                        // Check conflict with top-level type namespace
-                        if let Some(existing) = self.type_names.get(&at.name) {
-                            self.engine.diagnostics.push(
-                                Diagnostic::error(format!(
-                                    "Associated type '{}' conflicts with {} '{}'",
-                                    at.name, existing, at.name
-                                ))
-                                .with_label(Label::primary(at.span, "associated type name conflicts with top-level type")),
-                            );
-                        }
                         if seen_assoc.contains(&at.name) {
                             self.engine.diagnostics.push(
                                 Diagnostic::error(format!(
@@ -408,16 +397,12 @@ impl SemanticAnalyzer {
                     .iter()
                     .map(|_| fresh_var_id(&mut self.engine))
                     .collect();
-                let assoc_type_names: Vec<String> =
-                    associated_types.iter().map(|at| at.name.clone()).collect();
-                let assoc_ctx = if !assoc_type_names.is_empty() {
-                    Some(AssocTypeContext {
-                        trait_name: name.clone(),
-                        trait_var_ids: var_ids.clone(),
-                        assoc_type_names,
-                    })
-                } else {
-                    None
+                // Always create AssocTypeContext when in a trait body so that
+                // `Self` can resolve to the first type parameter and associated
+                // type projections like `Self.Output` can be handled.
+                let assoc_ctx = AssocTypeContext {
+                    trait_name: name.clone(),
+                    trait_var_ids: var_ids.clone(),
                 };
                 let mut trait_methods = Vec::new();
                 for m in methods {
@@ -430,7 +415,7 @@ impl SemanticAnalyzer {
                     let method_ty = self.convert_syntax_type_with_scope_assoc(
                         &m.ty,
                         &mut scope,
-                        assoc_ctx.as_ref(),
+                        Some(&assoc_ctx),
                     );
                     let scheme = Scheme::poly_with_constraints(
                         vec![Predicate {
@@ -599,6 +584,23 @@ impl SemanticAnalyzer {
                             );
                         }
 
+                        // Validate that method definitions belong to the trait
+                        let unknown_methods: Vec<&String> = impl_methods
+                            .keys()
+                            .filter(|name| !trait_info.methods.iter().any(|(m, _)| m == *name))
+                            .collect();
+                        if !unknown_methods.is_empty() {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "'{}' is not a method of trait '{}'",
+                                    unknown_methods.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("', '"),
+                                    tname
+                                ))
+                                .with_label(Label::primary(*span, "unknown method definition"))
+                                .with_help("remove it from the impl, or declare it in the trait"),
+                            );
+                        }
+
                         // Validate that all trait associated types have bindings.
                         let missing_assoc_types: Vec<&str> = trait_info
                             .associated_types
@@ -618,6 +620,25 @@ impl SemanticAnalyzer {
                                 .with_help(format!(
                                     "add `type {} = ...` to the impl block",
                                     missing_assoc_types.join(", type ")
+                                )),
+                            );
+                        }
+                        // Validate that associated type definitions belong to the trait
+                        let unknown_assoc_types: Vec<&str> = assoc_type_bindings
+                            .keys()
+                            .filter(|name| !trait_info.associated_types.iter().any(|n| n == *name))
+                            .map(String::as_str)
+                            .collect();
+                        if !unknown_assoc_types.is_empty() {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "'{}' is not an associated type of trait '{}'",
+                                    unknown_assoc_types.join("', '"), tname
+                                ))
+                                .with_label(Label::primary(*span, "unknown associated type definition"))
+                                .with_help(format!(
+                                    "remove `type {} = ...` from the impl, or declare it in the trait",
+                                    unknown_assoc_types.join(", type ")
                                 )),
                             );
                         }
@@ -714,6 +735,20 @@ impl SemanticAnalyzer {
                             );
                         }
                     }
+                    // Validate that method definitions belong to the trait
+                    for method in methods {
+                        let logical_name = canonical_trait_method_name(trait_name, &method.name);
+                        if !trait_info.methods.iter().any(|(m, _)| m == &logical_name) {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "'{}' is not a method of trait '{}'",
+                                    method.name, trait_name
+                                ))
+                                .with_label(Label::primary(method.span, "unknown method definition"))
+                                .with_help("remove it from the builtin impl, or declare it in the trait"),
+                            );
+                        }
+                    }
                     // Validate that all trait associated types have bindings.
                     let missing_assoc_types: Vec<&str> = trait_info
                         .associated_types
@@ -733,6 +768,25 @@ impl SemanticAnalyzer {
                             .with_help(format!(
                                 "add `type {} = ...` to the builtin impl block",
                                 missing_assoc_types.join(", type ")
+                            )),
+                        );
+                    }
+                    // Validate that associated type definitions belong to the trait
+                    let unknown_assoc_types: Vec<&str> = assoc_type_bindings
+                        .keys()
+                        .filter(|name| !trait_info.associated_types.iter().any(|n| n == *name))
+                        .map(String::as_str)
+                        .collect();
+                    if !unknown_assoc_types.is_empty() {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "'{}' is not an associated type of trait '{}'",
+                                unknown_assoc_types.join("', '"), trait_name
+                            ))
+                            .with_label(Label::primary(*span, "unknown associated type definition in builtin impl"))
+                            .with_help(format!(
+                                "remove `type {} = ...` from the builtin impl, or declare it in the trait",
+                                unknown_assoc_types.join(", type ")
                             )),
                         );
                     }
@@ -966,7 +1020,6 @@ impl SemanticAnalyzer {
                     Some(AssocTypeContext {
                         trait_name: constraint.trait_name.clone(),
                         trait_var_ids,
-                        assoc_type_names: trait_info.associated_types.clone(),
                     })
                 }
             })
@@ -999,12 +1052,6 @@ impl SemanticAnalyzer {
     ) -> Ty {
         let ty = match ty {
             Type::Con(name, span) => {
-                // If this name matches an associated type, produce AssocProj
-                if let Some(ctx) = assoc_ctx {
-                    if ctx.assoc_type_names.iter().any(|n| n == name) {
-                        return ctx.to_assoc_proj(name.clone());
-                    }
-                }
                 if let Some(expanded) = self.type_aliases.get(name).cloned() {
                     return expanded;
                 }
@@ -1021,12 +1068,6 @@ impl SemanticAnalyzer {
                 Ty::Con(name.clone())
             }
             Type::Var(name, _) => {
-                // If this name matches an associated type, produce AssocProj
-                if let Some(ctx) = assoc_ctx {
-                    if ctx.assoc_type_names.iter().any(|n| n == name) {
-                        return ctx.to_assoc_proj(name.clone());
-                    }
-                }
                 Ty::Var(
                     *scope
                         .entry(name.clone())
@@ -1088,6 +1129,28 @@ impl SemanticAnalyzer {
                 }
             }
             Type::Unit(_) => Ty::unit(),
+            Type::Self_(span) => {
+                // `Self` resolves to the first type parameter of the enclosing trait.
+                // When used as `Self.Output`, the Type::Proj arm handles the projection;
+                // the base `Self` is resolved here.
+                if let Some(ctx) = assoc_ctx {
+                    if let Some(first_id) = ctx.trait_var_ids.first() {
+                        Ty::Var(*first_id)
+                    } else {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error("`Self` used in trait with no type parameters")
+                                .with_label(Label::primary(*span, "`Self` here")),
+                        );
+                        Ty::Error
+                    }
+                } else {
+                    self.engine.diagnostics.push(
+                        Diagnostic::error("`Self` is only valid inside trait bodies")
+                            .with_label(Label::primary(*span, "`Self` outside trait context")),
+                    );
+                    Ty::Error
+                }
+            }
         };
         normalize_type_aliases(&ty)
     }

@@ -53,39 +53,39 @@ data Pair a b = Pair a b
 
 trait Add a b where
   type Output
-  (+) : a -> b -> Output
+  (+) : a -> b -> Self.Output
 
 trait Sub a b where
   type Output
-  (-) : a -> b -> Output
+  (-) : a -> b -> Self.Output
 
 trait Mul a b where
   type Output
-  (*) : a -> b -> Output
+  (*) : a -> b -> Self.Output
 
 trait Div a b where
   type Output
-  (/) : a -> b -> Output
+  (/) : a -> b -> Self.Output
 
 trait Mod a b where
   type Output
-  (%) : a -> b -> Output
+  (%) : a -> b -> Self.Output
 
 trait BitAnd a b where
   type Output
-  (&) : a -> b -> Output
+  (&) : a -> b -> Self.Output
 
 trait BitXor a b where
   type Output
-  (^) : a -> b -> Output
+  (^) : a -> b -> Self.Output
 
 trait Shl a b where
   type Output
-  (<<) : a -> b -> Output
+  (<<) : a -> b -> Self.Output
 
 trait Shr a b where
   type Output
-  (>>) : a -> b -> Output
+  (>>) : a -> b -> Self.Output
 
 trait BitNot a where
   (~) : a -> a

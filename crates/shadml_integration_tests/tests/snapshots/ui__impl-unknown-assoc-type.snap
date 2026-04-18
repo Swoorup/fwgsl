@@ -1,0 +1,19 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Incomplete implementation of trait 'Scale' for type 'F32': missing associated type(s): Output
+  --> impl-unknown-assoc-type.shadml:4:1
+   |
+4 | impl Scale F32 where
+  | ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ missing associated type definition
+   |
+   = help: add `type Output = ...` to the impl block
+
+error: 'Outut' is not an associated type of trait 'Scale'
+  --> impl-unknown-assoc-type.shadml:4:1
+   |
+4 | impl Scale F32 where
+  | ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ unknown associated type definition
+   |
+   = help: remove `type Outut = ...` from the impl, or declare it in the trait
