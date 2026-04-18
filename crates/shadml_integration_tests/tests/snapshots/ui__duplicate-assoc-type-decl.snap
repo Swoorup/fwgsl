@@ -1,0 +1,10 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Duplicate associated type 'Output' in trait 'Scale2'
+  --> duplicate-assoc-type-decl.shadml:3:3
+   |
+3 |   type Output
+  |   ~~~~~~~~~~~ duplicate associated type declaration
+   |

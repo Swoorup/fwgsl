@@ -1,0 +1,4 @@
+data Output = Output { tag : I32 }
+trait Scale a where
+  type Output
+  scaleTo : a -> F32 -> Output

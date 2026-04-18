@@ -1,0 +1,4 @@
+trait Scalable a where
+  scale : a -> F32 -> a
+
+data Scalable = Scalable { factor : F32 }

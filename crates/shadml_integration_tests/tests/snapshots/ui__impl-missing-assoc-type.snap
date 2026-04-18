@@ -1,0 +1,11 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Incomplete implementation of trait 'Combine' for type 'F32 F32': missing associated type(s): Output
+  --> impl-missing-assoc-type.shadml:4:1
+   |
+4 | impl Combine F32 F32 where
+  | ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ missing associated type definition
+   |
+   = help: add `type Output = ...` to the impl block

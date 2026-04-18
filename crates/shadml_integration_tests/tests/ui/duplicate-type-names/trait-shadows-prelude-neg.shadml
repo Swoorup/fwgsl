@@ -1,0 +1,2 @@
+trait Neg a where
+  negate : a -> a

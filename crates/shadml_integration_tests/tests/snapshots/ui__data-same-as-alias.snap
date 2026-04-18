@@ -1,0 +1,10 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Duplicate type name 'MyType': already declared as data type
+  --> data-same-as-alias.shadml:1:1
+   |
+1 | alias MyType = F32
+  | ~~~~~~~~~~~~~~~~~~~ duplicate type name
+   |

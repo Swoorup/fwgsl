@@ -1,0 +1,11 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Unknown constructor: Foo
+  --> unknown-constructor.shadml:2:5
+   |
+2 |   | Foo -> 0
+  |     ~~~~ not found
+   |
+   = help: declare it in a data definition before using it in a pattern

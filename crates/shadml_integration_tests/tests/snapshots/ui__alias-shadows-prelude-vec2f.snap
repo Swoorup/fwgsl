@@ -1,0 +1,10 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Duplicate type name 'Vec2f': already declared as type alias
+  --> alias-shadows-prelude-vec2f.shadml:1:1
+   |
+1 | alias Vec2f = Vec<2, I32>
+  | ~~~~~~~~~~~~~~~~~~~~~~~~~ duplicate type name
+   |

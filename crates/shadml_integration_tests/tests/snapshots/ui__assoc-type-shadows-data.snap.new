@@ -1,0 +1,74 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+assertion_line: 140
+expression: output
+---
+error: Associated type 'Output' conflicts with data type 'Output'
+  --> assoc-type-shadows-data.shadml:3:3
+   |
+3 |   type Output
+  |   ~~~~~~~~~~~ associated type name conflicts with top-level type
+   |
+
+error: Associated type 'Output' conflicts with data type 'Output'
+  --> assoc-type-shadows-data.shadml:4:31
+   |
+4 |   scaleTo : a -> F32 -> Output
+  |                               ~~~~~~~~~~~ associated type name conflicts with top-level type
+   |
+
+error: Associated type 'Output' conflicts with data type 'Output'
+  --> assoc-type-shadows-data.shadml:4:31
+   |
+4 |   scaleTo : a -> F32 -> Output
+  |                               ~~~~~~~~~~~ associated type name conflicts with top-level type
+   |
+
+error: Associated type 'Output' conflicts with data type 'Output'
+  --> assoc-type-shadows-data.shadml:4:31
+   |
+4 |   scaleTo : a -> F32 -> Output
+  |                               ~~~~~~~~~~~ associated type name conflicts with top-level type
+   |
+
+error: Associated type 'Output' conflicts with data type 'Output'
+  --> assoc-type-shadows-data.shadml:4:31
+   |
+4 |   scaleTo : a -> F32 -> Output
+  |                               ~~~~~~~~~~~ associated type name conflicts with top-level type
+   |
+
+error: Associated type 'Output' conflicts with data type 'Output'
+  --> assoc-type-shadows-data.shadml:4:31
+   |
+4 |   scaleTo : a -> F32 -> Output
+  |                               ~~~~~~~~~~~ associated type name conflicts with top-level type
+   |
+
+error: Associated type 'Output' conflicts with data type 'Output'
+  --> assoc-type-shadows-data.shadml:4:31
+   |
+4 |   scaleTo : a -> F32 -> Output
+  |                               ~~~~~~~~~~~ associated type name conflicts with top-level type
+   |
+
+error: Associated type 'Output' conflicts with data type 'Output'
+  --> assoc-type-shadows-data.shadml:4:31
+   |
+4 |   scaleTo : a -> F32 -> Output
+  |                               ~~~~~~~~~~~ associated type name conflicts with top-level type
+   |
+
+error: Associated type 'Output' conflicts with data type 'Output'
+  --> assoc-type-shadows-data.shadml:4:31
+   |
+4 |   scaleTo : a -> F32 -> Output
+  |                               ~~~~~~~~~~~ associated type name conflicts with top-level type
+   |
+
+error: Associated type 'Output' conflicts with data type 'Output'
+  --> assoc-type-shadows-data.shadml:4:31
+   |
+4 |   scaleTo : a -> F32 -> Output
+  |                               ~~~~~~~~~~~ associated type name conflicts with top-level type
+   |

@@ -1,0 +1,11 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Duplicate type name 'Option': already declared as data type
+  --> data-shadows-prelude-option.shadml:1:1
+   |
+1 | data Option = Option { chosen : F32 }
+  | ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ duplicate type name
+   |
+   = help: type names must be unique across data types, traits, aliases, builtin types, and bitfields

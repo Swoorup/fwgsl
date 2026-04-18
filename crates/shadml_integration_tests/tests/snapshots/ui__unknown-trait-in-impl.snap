@@ -1,0 +1,11 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Unknown trait 'Nonexistent' in impl declaration
+  --> unknown-trait-in-impl.shadml:1:1
+   |
+1 | impl Nonexistent F32 where
+  | ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ unknown trait
+   |
+   = help: define the trait with `trait Name a where ...` before writing an impl for it

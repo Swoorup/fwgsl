@@ -1,0 +1,27 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: bitfield 'TooWide' uses 33 bits, but base type allows only 32
+  --> width-exceeds-32.shadml:1:1
+   |
+1 | bitfield TooWide : U32 = TooWide {
+  | ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ too many bits
+   |
+   = help: reduce the number of fields or use a wider base type
+
+error: Type mismatch: expected `TooWide`, found `U32`
+  --> width-exceeds-32.shadml:8:1
+   |
+8 | test x = x
+  | ~~~~~~~~~~ expected `TooWide`, found `U32`
+   |
+   = help: add a type annotation or use a cast (toF32, toI32, toU32) to convert between types
+
+error: Type mismatch: expected `TooWide`, found `U32`
+  --> width-exceeds-32.shadml:8:1
+   |
+8 | test x = x
+  | ~~~~~~~~~~ expected `TooWide`, found `U32`
+   |
+   = help: add a type annotation or use a cast (toF32, toI32, toU32) to convert between types

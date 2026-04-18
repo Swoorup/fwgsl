@@ -1,0 +1,10 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Duplicate type name 'Scalable': already declared as data type
+  --> data-same-as-trait.shadml:1:1
+   |
+1 | trait Scalable a where
+  | ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ duplicate type name
+   |

@@ -1,0 +1,4 @@
+trait Scale2 a where
+  type Output
+  type Output
+  scaleTo : a -> F32 -> Output

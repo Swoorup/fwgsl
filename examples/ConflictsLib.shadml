@@ -1,30 +1,15 @@
 -- ConflictsLib.shadml — Module imported by conflicts.shadml
 --
--- Defines names that conflict with the prelude and with the main
--- conflicts example. Tests that cross-module name shadowing works
--- correctly: the importing module's definitions take precedence,
--- and the imported names are still available.
+-- Defines names that interact with the prelude. Since type-level names
+-- form a unified namespace, no type-level name here may clash with the
+-- prelude. Value-level names (functions, constructors) may shadow
+-- prelude value bindings.
 
 module ConflictsLib
 
--- Shadow a prelude trait with a custom one (Neg → negate)
--- The prelude's Neg trait defines the unary minus operator,
--- but this module defines Neg with a method named `negate`.
-trait Neg a where
-  negate : a -> a
-
--- A data type whose constructor shadows a prelude constructor (Pair)
--- The prelude defines `data Pair a b = Pair a b`; here we define
--- a flat Pair with no type parameters.
-data Pair = Pair { x : F32, y : F32 }
-
--- A type alias that shadows a prelude alias (Vec2f)
--- The prelude defines `alias Vec2f = Vec<2, F32>`;
--- here we define it as `Vec<2, I32>`.
-alias Vec2f = Vec<2, I32>
-
 -- A data type named after a prelude extern (clamp)
 -- The prelude has `extern clamp : a -> a -> a -> a`.
+-- `Clamp` as a data type is fine — it's a new type-level name.
 data Clamp = Clamp { lo : F32, hi : F32 }
 
 -- A function that shadows a prelude extern (distance)
@@ -37,13 +22,8 @@ distance a b = a - b
 abs : F32 -> F32
 abs x = x * x
 
--- Impl for our custom Neg trait
+-- A data type that implements the prelude's Add trait
 data SignedVal = SignedVal { amount : F32 }
 
-impl Neg SignedVal where
-  negate s = SignedVal { amount = 0.0 - s.amount }
-
--- Impl for the prelude's Add trait (which is still accessible)
--- even though this module also defines Neg differently.
 addSignedVal : SignedVal -> F32 -> SignedVal
 addSignedVal s f = SignedVal { amount = s.amount + f }

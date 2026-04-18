@@ -18,3 +18,6 @@ shadml_syntax = { workspace = true }
 shadml_allocator = { workspace = true }
 shadml_bundler = { workspace = true }
 naga = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }

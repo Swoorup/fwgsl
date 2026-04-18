@@ -4,12 +4,36 @@
 //! Collects data type definitions, constructor info, type signatures,
 //! and infers types for function bodies using Algorithm W (HM inference).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use shadml_diagnostics::{Diagnostic, DiagnosticSink, Label};
 use shadml_parser::parser::*;
 use shadml_span::Span;
 use shadml_typechecker::*;
+
+/// The kind of a type-level name, used for duplicate detection across the
+/// unified type namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypeNameKind {
+    DataType,
+    Trait,
+    Alias,
+    BuiltinType,
+    Bitfield,
+}
+
+impl fmt::Display for TypeNameKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TypeNameKind::DataType => write!(f, "data type"),
+            TypeNameKind::Trait => write!(f, "trait"),
+            TypeNameKind::Alias => write!(f, "type alias"),
+            TypeNameKind::BuiltinType => write!(f, "builtin type"),
+            TypeNameKind::Bitfield => write!(f, "bitfield"),
+        }
+    }
+}
 
 /// Information about a trait declaration.
 #[derive(Debug, Clone)]
@@ -78,6 +102,9 @@ pub struct SemanticAnalyzer {
     inferred_predicates: Vec<Predicate>,
     /// Bitfield field names: bitfield_type_name → list of field names.
     pub bitfield_field_names: HashMap<String, Vec<String>>,
+    /// Registry of all type-level names (data types, traits, aliases, builtin types, bitfields).
+    /// Used to detect duplicates across the unified type namespace.
+    type_names: HashMap<String, TypeNameKind>,
 }
 
 /// Information about a data type collected during semantic analysis.
@@ -123,6 +150,7 @@ impl SemanticAnalyzer {
             builtin_impls: Vec::new(),
             inferred_predicates: Vec::new(),
             bitfield_field_names: HashMap::new(),
+            type_names: HashMap::new(),
         }
     }
 
@@ -135,25 +163,60 @@ impl SemanticAnalyzer {
 
         // Pass 1: predeclare type names so aliases and data declarations in the
         // same module can refer to each other regardless of source order.
+        // Also check for duplicate type-level names across the unified namespace.
         for decl in &all_decls {
             match decl {
-                Decl::BuiltinTypeDecl { name, arity, .. } => {
-                    self.builtin_types.insert(name.clone(), *arity);
+                Decl::BuiltinTypeDecl { name, arity, span, .. } => {
+                    if let Some(existing) = self.type_names.get(name) {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "Duplicate type name '{}': already declared as {}",
+                                name, existing
+                            ))
+                            .with_label(Label::primary(*span, "duplicate type name")),
+                        );
+                    } else {
+                        self.type_names.insert(name.clone(), TypeNameKind::BuiltinType);
+                        self.builtin_types.insert(name.clone(), *arity);
+                    }
                 }
                 Decl::DataDecl {
-                    name, type_params, ..
+                    name, type_params, span, ..
                 } => {
-                    self.data_types.insert(
-                        name.clone(),
-                        DataTypeInfo {
-                            name: name.clone(),
-                            type_params: type_params.clone(),
-                            constructors: vec![],
-                        },
-                    );
+                    if let Some(existing) = self.type_names.get(name) {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "Duplicate type name '{}': already declared as {}",
+                                name, existing
+                            ))
+                            .with_label(Label::primary(*span, "duplicate type name"))
+                            .with_help("type names must be unique across data types, traits, aliases, builtin types, and bitfields"),
+                        );
+                    } else {
+                        self.type_names.insert(name.clone(), TypeNameKind::DataType);
+                        self.data_types.insert(
+                            name.clone(),
+                            DataTypeInfo {
+                                name: name.clone(),
+                                type_params: type_params.clone(),
+                                constructors: vec![],
+                            },
+                        );
+                    }
                 }
-                Decl::BitfieldDecl { name, .. } => {
-                    self.bitfield_field_names.entry(name.clone()).or_default();
+                Decl::BitfieldDecl { name, span, .. } => {
+                    if let Some(existing) = self.type_names.get(name) {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "Duplicate type name '{}': already declared as {}",
+                                name, existing
+                            ))
+                            .with_label(Label::primary(*span, "duplicate type name")),
+                        );
+                    } else {
+                        self.type_names.insert(name.clone(), TypeNameKind::Bitfield);
+                        self.bitfield_field_names.entry(name.clone()).or_default();
+                    }
                 }
                 _ => {}
             }
@@ -161,12 +224,23 @@ impl SemanticAnalyzer {
 
         // Pass 1b: collect type aliases (treated as synonyms for semantic purposes)
         for decl in &all_decls {
-            if let Decl::TypeAlias { name, ty, .. } = decl {
-                let alias_ty = self.convert_syntax_type(ty);
-                // Store the expanded type for alias resolution during type conversion
-                self.type_aliases.insert(name.clone(), alias_ty.ty.clone());
-                // Register the alias name as a type constructor
-                self.env.insert(name.clone(), alias_ty);
+            if let Decl::TypeAlias { name, ty, span, .. } = decl {
+                if let Some(existing) = self.type_names.get(name) {
+                    self.engine.diagnostics.push(
+                        Diagnostic::error(format!(
+                            "Duplicate type name '{}': already declared as {}",
+                            name, existing
+                        ))
+                        .with_label(Label::primary(*span, "duplicate type name")),
+                    );
+                } else {
+                    let alias_ty = self.convert_syntax_type(ty);
+                    self.type_names.insert(name.clone(), TypeNameKind::Alias);
+                    // Store the expanded type for alias resolution during type conversion
+                    self.type_aliases.insert(name.clone(), alias_ty.ty.clone());
+                    // Register the alias name as a type constructor
+                    self.env.insert(name.clone(), alias_ty);
+                }
             }
         }
 
@@ -180,11 +254,15 @@ impl SemanticAnalyzer {
                 ..
             } = decl
             {
-                self.register_data_type(name, type_params, constructors, *span);
+                // Only register constructors if this name wasn't flagged as a duplicate
+                if self.type_names.get(name) == Some(&TypeNameKind::DataType) {
+                    self.register_data_type(name, type_params, constructors, *span);
+                }
             }
         }
 
         // Pass 1d: collect bitfield metadata
+        // Note: bitfield names were already registered in type_names during Pass 1.
         for decl in &all_decls {
             if let Decl::BitfieldDecl {
                 name,
@@ -195,7 +273,10 @@ impl SemanticAnalyzer {
             {
                 let _base = self.convert_syntax_type(base_ty);
                 let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
-                self.bitfield_field_names.insert(name.clone(), field_names);
+                // Only update bitfield_field_names if this name wasn't flagged as a duplicate
+                if self.type_names.get(name) == Some(&TypeNameKind::Bitfield) {
+                    self.bitfield_field_names.insert(name.clone(), field_names);
+                }
             }
         }
 
@@ -206,25 +287,61 @@ impl SemanticAnalyzer {
                 name,
                 vars,
                 associated_types,
+                span,
                 ..
             } = decl
             {
-                let var_ids: Vec<TyVarId> = vars
-                    .iter()
-                    .map(|_| fresh_var_id(&mut self.engine))
-                    .collect();
-                let assoc_type_names: Vec<String> =
-                    associated_types.iter().map(|at| at.name.clone()).collect();
-                self.traits.insert(
-                    name.clone(),
-                    TraitInfo {
-                        name: name.clone(),
-                        vars: vars.clone(),
-                        var_ids,
-                        associated_types: assoc_type_names,
-                        methods: vec![],
-                    },
-                );
+                if let Some(existing) = self.type_names.get(name) {
+                    self.engine.diagnostics.push(
+                        Diagnostic::error(format!(
+                            "Duplicate type name '{}': already declared as {}",
+                            name, existing
+                        ))
+                        .with_label(Label::primary(*span, "duplicate type name")),
+                    );
+                } else {
+                    self.type_names.insert(name.clone(), TypeNameKind::Trait);
+                    let var_ids: Vec<TyVarId> = vars
+                        .iter()
+                        .map(|_| fresh_var_id(&mut self.engine))
+                        .collect();
+                    let mut seen_assoc: HashSet<String> = HashSet::new();
+                    let mut assoc_type_names: Vec<String> = Vec::new();
+                    for at in associated_types {
+                        // Check conflict with top-level type namespace
+                        if let Some(existing) = self.type_names.get(&at.name) {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "Associated type '{}' conflicts with {} '{}'",
+                                    at.name, existing, at.name
+                                ))
+                                .with_label(Label::primary(at.span, "associated type name conflicts with top-level type")),
+                            );
+                        }
+                        if seen_assoc.contains(&at.name) {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "Duplicate associated type '{}' in trait '{}'",
+                                    at.name, name
+                                ))
+                                .with_label(Label::primary(at.span, "duplicate associated type declaration")),
+                            );
+                        } else {
+                            seen_assoc.insert(at.name.clone());
+                            assoc_type_names.push(at.name.clone());
+                        }
+                    }
+                    self.traits.insert(
+                        name.clone(),
+                        TraitInfo {
+                            name: name.clone(),
+                            vars: vars.clone(),
+                            var_ids,
+                            associated_types: assoc_type_names,
+                            methods: vec![],
+                        },
+                    );
+                }
             }
         }
 
@@ -283,6 +400,10 @@ impl SemanticAnalyzer {
                 ..
             } = decl
             {
+                // Skip if this trait name was flagged as a duplicate in Pass 1e
+                if self.type_names.get(name) != Some(&TypeNameKind::Trait) {
+                    continue;
+                }
                 let var_ids: Vec<TyVarId> = vars
                     .iter()
                     .map(|_| fresh_var_id(&mut self.engine))
@@ -361,15 +482,25 @@ impl SemanticAnalyzer {
                     .collect::<Vec<_>>()
                     .join("__");
                 // Collect associated type bindings from AST
-                let assoc_type_bindings: HashMap<String, Ty> = associated_types
-                    .iter()
-                    .map(|at| {
-                        (
+                let mut seen_assoc: HashSet<String> = HashSet::new();
+                let mut assoc_type_bindings: HashMap<String, Ty> = HashMap::new();
+                for at in associated_types {
+                    if seen_assoc.contains(&at.name) {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "Duplicate associated type definition '{}' in impl",
+                                at.name
+                            ))
+                            .with_label(Label::primary(at.span, "duplicate associated type definition")),
+                        );
+                    } else {
+                        seen_assoc.insert(at.name.clone());
+                        assoc_type_bindings.insert(
                             at.name.clone(),
                             normalize_type_aliases(&self.convert_syntax_type(&at.ty).ty),
-                        )
-                    })
-                    .collect();
+                        );
+                    }
+                }
                 let mut impl_methods = HashMap::new();
                 for m in methods {
                     let logical_name = trait_name
@@ -528,15 +659,25 @@ impl SemanticAnalyzer {
                     .map(|ty| normalize_type_aliases(&self.convert_syntax_type(ty).ty))
                     .collect();
                 // Collect associated type bindings from AST
-                let assoc_type_bindings: HashMap<String, Ty> = associated_types
-                    .iter()
-                    .map(|at| {
-                        (
+                let mut seen_assoc: HashSet<String> = HashSet::new();
+                let mut assoc_type_bindings: HashMap<String, Ty> = HashMap::new();
+                for at in associated_types {
+                    if seen_assoc.contains(&at.name) {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "Duplicate associated type definition '{}' in impl",
+                                at.name
+                            ))
+                            .with_label(Label::primary(at.span, "duplicate associated type definition")),
+                        );
+                    } else {
+                        seen_assoc.insert(at.name.clone());
+                        assoc_type_bindings.insert(
                             at.name.clone(),
                             normalize_type_aliases(&self.convert_syntax_type(&at.ty).ty),
-                        )
-                    })
-                    .collect();
+                        );
+                    }
+                }
                 if impl_tys.iter().any(|ty| !ty.free_vars().is_empty()) {
                     self.engine.diagnostics.push(
                         Diagnostic::error(format!(

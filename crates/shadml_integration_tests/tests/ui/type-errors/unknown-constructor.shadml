@@ -1,0 +1,2 @@
+f x = match x
+  | Foo -> 0

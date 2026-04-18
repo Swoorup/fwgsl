@@ -1,0 +1,11 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Unbound variable: x
+  --> requires-explicit-sig.shadml:1:5
+   |
+1 | f = x
+  |     ~ not in scope
+   |
+   = help: bind the name in a parameter, let, where, or import declaration

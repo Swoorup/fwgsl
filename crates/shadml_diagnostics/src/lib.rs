@@ -3,6 +3,8 @@
 //! Provides structured diagnostics with severity levels, source labels,
 //! and miette integration for rich terminal rendering.
 
+use std::fmt;
+
 use shadml_span::Span;
 
 /// Severity level for a diagnostic.
@@ -136,6 +138,132 @@ impl Default for DiagnosticSink {
 }
 
 // ---------------------------------------------------------------------------
+// Plain-text diagnostic formatting (for UI test snapshots)
+// ---------------------------------------------------------------------------
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Severity::Error => write!(f, "error"),
+            Severity::Warning => write!(f, "warning"),
+            Severity::Info => write!(f, "info"),
+            Severity::Hint => write!(f, "hint"),
+        }
+    }
+}
+
+/// Convert a byte offset into a 1-based (line, column) pair.
+fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// Return the 1-indexed line at the given line number.
+fn source_line(source: &str, line: usize) -> &str {
+    source.lines().nth(line.wrapping_sub(1)).unwrap_or("")
+}
+
+/// Format diagnostics as a stable, human-readable string suitable for
+/// snapshot testing.
+///
+/// Diagnostics are sorted by their first label's span offset for
+/// deterministic output. Each diagnostic includes severity, message,
+/// a `-->` location line, source snippet with underline, and optional help.
+pub fn format_diagnostics(diagnostics: &[Diagnostic], source_name: &str, source: &str) -> String {
+    // Sort by first label span offset for determinism
+    let mut sorted: Vec<&Diagnostic> = diagnostics.iter().collect();
+    sorted.sort_by_key(|d| {
+        d.labels
+            .first()
+            .map(|l| l.span.start)
+            .unwrap_or(u32::MAX)
+    });
+
+    let mut out = String::new();
+    for (i, diag) in sorted.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+
+        // Severity + message
+        if let Some(ref code) = diag.code {
+            out.push_str(&format!("{}[{}]: {}", diag.severity, code, diag.message));
+        } else {
+            out.push_str(&format!("{}: {}", diag.severity, diag.message));
+        }
+        out.push('\n');
+
+        // Primary location and source snippet from first label
+        if let Some(label) = diag.labels.first() {
+            let (line, col) = byte_offset_to_line_col(source, label.span.start as usize);
+            out.push_str(&format!("  --> {}:{}:{}\n", source_name, line, col));
+
+            let src_line = source_line(source, line);
+            let line_num_width = format!("{}", line).len();
+            out.push_str(&format!("   |\n"));
+            out.push_str(&format!("{:width$} | {}\n", line, src_line, width = line_num_width));
+
+            // Underline: put tildes under the span
+            let span_len = if label.span.end > label.span.start {
+                label.span.end - label.span.start
+            } else {
+                1
+            };
+            let prefix = " ".repeat(col.wrapping_sub(1));
+            let underline = "~".repeat(span_len as usize);
+            out.push_str(&format!(
+                "{:width$} | {}{} {}\n",
+                "", prefix, underline, label.message, width = line_num_width
+            ));
+            out.push_str(&format!("   |\n"));
+        }
+
+        // Additional labels (secondary)
+        for label in diag.labels.iter().skip(1) {
+            let (line, col) = byte_offset_to_line_col(source, label.span.start as usize);
+            let src_line = source_line(source, line);
+            let line_num_width = format!("{}", line).len();
+            out.push_str(&format!(
+                "{:width$} | {}\n",
+                line,
+                src_line,
+                width = line_num_width
+            ));
+            let span_len = if label.span.end > label.span.start {
+                label.span.end - label.span.start
+            } else {
+                1
+            };
+            let prefix = " ".repeat(col.wrapping_sub(1));
+            let underline = "-".repeat(span_len as usize);
+            out.push_str(&format!(
+                "{:width$} | {}{} {}\n",
+                "", prefix, underline, label.message, width = line_num_width
+            ));
+        }
+
+        // Help text
+        if let Some(ref help) = diag.help {
+            out.push_str(&format!("   = help: {}\n", help));
+        }
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
 // miette integration
 // ---------------------------------------------------------------------------
 
@@ -227,8 +355,6 @@ impl miette::Diagnostic for MietteDiagnostic {
         Some(&self.src)
     }
 }
-
-use std::fmt;
 
 #[cfg(test)]
 mod tests {

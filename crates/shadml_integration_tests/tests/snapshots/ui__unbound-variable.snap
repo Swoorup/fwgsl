@@ -1,0 +1,11 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Unbound variable: y
+  --> unbound-variable.shadml:1:7
+   |
+1 | f x = y
+  |       ~ not in scope
+   |
+   = help: bind the name in a parameter, let, where, or import declaration

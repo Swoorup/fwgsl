@@ -1,0 +1,10 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Duplicate associated type definition 'Output' in impl
+  --> duplicate-assoc-type-def.shadml:6:3
+   |
+6 |   type Output = I32
+  |   ~~~~~~~~~~~~~~~~~~~~ duplicate associated type definition
+   |

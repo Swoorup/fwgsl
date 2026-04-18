@@ -1,0 +1,1 @@
+alias Vec2f = Vec<2, I32>

@@ -1,0 +1,1 @@
+data Option = Option { chosen : F32 }

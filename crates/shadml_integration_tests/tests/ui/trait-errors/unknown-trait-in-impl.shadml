@@ -1,0 +1,2 @@
+impl Nonexistent F32 where
+  foo x = x

@@ -1,0 +1,10 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: Duplicate type name 'Neg': already declared as trait
+  --> trait-shadows-prelude-neg.shadml:1:1
+   |
+1 | trait Neg a where
+  | ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ duplicate type name
+   |

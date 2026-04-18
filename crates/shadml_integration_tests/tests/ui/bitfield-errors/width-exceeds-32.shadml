@@ -1,0 +1,9 @@
+// ui-stage: lowering
+bitfield TooWide : U32 = TooWide {
+  a : 16,
+  b : 16,
+  c : 1,
+}
+
+test : TooWide -> U32
+test x = x
