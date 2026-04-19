@@ -1523,7 +1523,16 @@ pub fn build_goto_definition_with_prelude_flag(
     })?;
     let symbol = prelude_symbol(&state, token.text(source), token.kind)?;
     let prelude_source = shadml_parser::prelude_source();
-    let prelude_uri = Url::from_file_path(shadml_parser::prelude::prelude_path()).ok()?;
+    let prelude_uri = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Url::from_file_path(shadml_parser::prelude::prelude_path()).ok()?
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Url::parse("inmemory://shadml/prelude.shadml").ok()?
+        }
+    };
     let locations = symbol
         .definition_spans
         .iter()
