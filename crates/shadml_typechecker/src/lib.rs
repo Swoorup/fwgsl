@@ -324,6 +324,7 @@ impl fmt::Display for Ty {
             Ty::Nat(n) => write!(f, "{}", n),
             Ty::Error => write!(f, "<error>"),
             Ty::AssocProj { trait_params, name, trait_name } => {
+                debug_assert!(!trait_name.is_empty(), "AssocProj with empty trait_name should not reach Display");
                 let params = trait_params.iter()
                     .map(|t| t.to_string())
                     .collect::<Vec<_>>()
@@ -1300,5 +1301,150 @@ mod tests {
         env.insert("x".to_string(), Scheme::mono(Ty::i32()));
         assert!(env.lookup("x").is_some());
         assert!(env.lookup("y").is_none());
+    }
+
+    // ── AssocProj tests ───────────────────────────────────────────
+
+    fn assoc_proj(trait_name: &str, params: Vec<Ty>, name: &str) -> Ty {
+        Ty::AssocProj {
+            trait_params: params,
+            name: name.to_string(),
+            trait_name: trait_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_assoc_proj_contains_var() {
+        // Var in trait_params is found
+        let proj = assoc_proj("Add", vec![Ty::Var(0), Ty::f32()], "Output");
+        assert!(proj.contains_var(0));
+        // Var not present anywhere is not found
+        assert!(!proj.contains_var(99));
+        // Var in name/trait_name fields is NOT searched (they're strings, not type vars)
+        let proj2 = Ty::AssocProj {
+            trait_params: vec![Ty::f32()],
+            name: "Output".to_string(),
+            trait_name: "Add".to_string(),
+        };
+        assert!(!proj2.contains_var(99));
+    }
+
+    #[test]
+    fn test_assoc_proj_var_only_in_params_true() {
+        // When var appears only in trait_params, it's "only in assoc proj params"
+        let proj = assoc_proj("Add", vec![Ty::Var(0)], "Output");
+        assert!(proj.var_only_in_assoc_proj_params(0));
+    }
+
+    #[test]
+    fn test_assoc_proj_var_only_in_params_false_structural() {
+        // When var also appears structurally (in an arrow), returns false
+        let proj = assoc_proj("Add", vec![Ty::Var(0)], "Output");
+        let ty = Ty::arrow(Ty::Var(0), proj);
+        // var 0 is in both the arrow param (structural) and the AssocProj params
+        assert!(!ty.var_only_in_assoc_proj_params(0));
+    }
+
+    #[test]
+    fn test_assoc_proj_contains_var_structural() {
+        // AssocProj itself returns false for contains_var_structural —
+        // params are type-level inputs, not structural containment.
+        let proj = assoc_proj("Add", vec![Ty::Var(0)], "Output");
+        assert!(!proj.contains_var_structural(0));
+    }
+
+    #[test]
+    fn test_assoc_proj_apply_subst() {
+        // Substitution applies to trait_params only, preserves name/trait_name
+        let proj = assoc_proj("Add", vec![Ty::Var(0), Ty::Var(1)], "Output");
+        let mut subst = Substitution::new();
+        subst.insert(0, Ty::f32());
+        subst.insert(1, Ty::i32());
+        let result = proj.apply_subst(&subst);
+        assert_eq!(
+            result,
+            Ty::AssocProj {
+                trait_params: vec![Ty::f32(), Ty::i32()],
+                name: "Output".to_string(),
+                trait_name: "Add".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_assoc_proj_free_vars() {
+        // Collects free vars from trait_params
+        let proj = assoc_proj("Add", vec![Ty::Var(0), Ty::Var(1)], "Output");
+        let mut fv = proj.free_vars();
+        fv.sort();
+        assert_eq!(fv, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_assoc_proj_display() {
+        // Format: (Add<F32, F32>).Output
+        let proj = assoc_proj("Add", vec![Ty::f32(), Ty::f32()], "Output");
+        assert_eq!(format!("{}", proj), "(Add<F32, F32>).Output");
+    }
+
+    #[test]
+    fn test_unify_assoc_proj_matching() {
+        // Two AssocProj with same name/trait unify their params
+        let mut engine = InferEngine::new();
+        let a = engine.fresh_var();
+        let b = engine.fresh_var();
+        let proj1 = assoc_proj("Add", vec![a.clone(), b.clone()], "Output");
+        let proj2 = assoc_proj("Add", vec![Ty::f32(), Ty::i32()], "Output");
+        engine.unify(&proj1, &proj2, span());
+        assert!(!engine.diagnostics.has_errors());
+        assert_eq!(engine.finalize(&a), Ty::f32());
+        assert_eq!(engine.finalize(&b), Ty::i32());
+    }
+
+    #[test]
+    fn test_unify_assoc_proj_permissive() {
+        // AssocProj unifies with any type (permissive policy)
+        let mut engine = InferEngine::new();
+        let proj = assoc_proj("Add", vec![Ty::f32(), Ty::f32()], "Output");
+        let result_var = engine.fresh_var();
+        engine.unify(&proj, &result_var, span());
+        assert!(!engine.diagnostics.has_errors());
+    }
+
+    #[test]
+    fn test_unify_assoc_proj_occurs_bypass() {
+        // a = (Add<a, F32>).Output is NOT an infinite type
+        // (var only in assoc proj params)
+        let mut engine = InferEngine::new();
+        let a = engine.fresh_var();
+        let proj = assoc_proj("Add", vec![a.clone(), Ty::f32()], "Output");
+        engine.unify(&a, &proj, span());
+        assert!(!engine.diagnostics.has_errors(), "assoc proj occurs check should bypass");
+    }
+
+    #[test]
+    fn test_unify_assoc_proj_occurs_structural() {
+        // a = a -> (Add<a, F32>).Output IS an infinite type
+        // (var appears structurally in arrow)
+        let mut engine = InferEngine::new();
+        let a = engine.fresh_var();
+        let proj = assoc_proj("Add", vec![a.clone(), Ty::f32()], "Output");
+        let ty = Ty::arrow(a.clone(), proj);
+        engine.unify(&a, &ty, span());
+        assert!(engine.diagnostics.has_errors(), "structural occurs check should fire");
+    }
+
+    #[test]
+    fn test_unify_assoc_proj_different_trait() {
+        // Two AssocProj with different trait_name: permissive unification accepts
+        let mut engine = InferEngine::new();
+        let proj1 = assoc_proj("Add", vec![Ty::f32(), Ty::f32()], "Output");
+        let proj2 = assoc_proj("Mul", vec![Ty::f32(), Ty::f32()], "Output");
+        let result_var = engine.fresh_var();
+        // proj1 unifies with a var, proj2 unifies with the same var
+        engine.unify(&proj1, &result_var, span());
+        engine.unify(&proj2, &result_var, span());
+        // Permissive: both unify with the var without error
+        assert!(!engine.diagnostics.has_errors());
     }
 }

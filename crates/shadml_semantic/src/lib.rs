@@ -105,6 +105,8 @@ pub struct SemanticAnalyzer {
     /// Registry of all type-level names (data types, traits, aliases, builtin types, bitfields).
     /// Used to detect duplicates across the unified type namespace.
     type_names: HashMap<String, TypeNameKind>,
+    /// Mangled method names from all impls, pre-built for O(1) lookup.
+    impl_method_names: HashSet<String>,
 }
 
 /// Information about a data type collected during semantic analysis.
@@ -113,23 +115,6 @@ pub struct DataTypeInfo {
     pub name: String,
     pub type_params: Vec<String>,
     pub constructors: Vec<String>,
-}
-
-/// Context for resolving associated type names during type conversion.
-struct AssocTypeContext {
-    trait_name: String,
-    trait_var_ids: Vec<TyVarId>,
-}
-
-impl AssocTypeContext {
-    /// Build an `AssocProj` type using this context's trait parameters.
-    fn to_assoc_proj(&self, name: String) -> Ty {
-        Ty::AssocProj {
-            trait_params: self.trait_var_ids.iter().map(|&id| Ty::Var(id)).collect(),
-            name,
-            trait_name: self.trait_name.clone(),
-        }
-    }
 }
 
 impl SemanticAnalyzer {
@@ -150,6 +135,7 @@ impl SemanticAnalyzer {
             inferred_predicates: Vec::new(),
             bitfield_field_names: HashMap::new(),
             type_names: HashMap::new(),
+            impl_method_names: HashSet::new(),
         }
     }
 
@@ -397,13 +383,13 @@ impl SemanticAnalyzer {
                     .iter()
                     .map(|_| fresh_var_id(&mut self.engine))
                     .collect();
-                // Always create AssocTypeContext when in a trait body so that
+                // Always create constraint context when in a trait body so that
                 // `Self` can resolve to the first type parameter and associated
                 // type projections like `Self.Output` can be handled.
-                let assoc_ctx = AssocTypeContext {
-                    trait_name: name.clone(),
-                    trait_var_ids: var_ids.clone(),
-                };
+                let constraint_contexts: Vec<(String, Vec<Ty>)> = vec![(
+                    name.clone(),
+                    var_ids.iter().copied().map(Ty::Var).collect(),
+                )];
                 let mut trait_methods = Vec::new();
                 for m in methods {
                     let canonical_name = canonical_trait_method_name(name, &m.name);
@@ -415,7 +401,7 @@ impl SemanticAnalyzer {
                     let method_ty = self.convert_syntax_type_with_scope_assoc(
                         &m.ty,
                         &mut scope,
-                        Some(&assoc_ctx),
+                        &constraint_contexts,
                     );
                     let scheme = Scheme::poly_with_constraints(
                         vec![Predicate {
@@ -659,12 +645,16 @@ impl SemanticAnalyzer {
                         );
                     }
                 }
-                self.impls.push(ImplInfo {
+                let new_impl = ImplInfo {
                     trait_name: trait_name.clone(),
                     tys: impl_tys,
                     associated_type_bindings: assoc_type_bindings,
                     methods: impl_methods,
-                });
+                };
+                for mangled in new_impl.methods.values() {
+                    self.impl_method_names.insert(mangled.clone());
+                }
+                self.impls.push(new_impl);
             }
             if let Decl::BuiltinImplDecl {
                 trait_name,
@@ -995,44 +985,25 @@ impl SemanticAnalyzer {
             })
             .collect();
 
-        // Build AssocTypeContext from the constraints so that Type::Proj
-        // in the type body (e.g., `a.Output` in `Add a b => a -> b -> a.Output`)
-        // can be properly converted with all trait parameters.
-        let constraint_contexts: Vec<AssocTypeContext> = constraints
+        // Build constraint contexts from constraints that have associated types,
+        // so Type::Proj in the type body (e.g., `a.Output` in
+        // `Add a b => a -> b -> a.Output`) can be properly resolved.
+        let constraint_contexts: Vec<(String, Vec<Ty>)> = constraints
             .iter()
             .filter_map(|constraint| {
                 let trait_info = self.traits.get(&constraint.trait_name)?;
-                let trait_var_ids: Vec<TyVarId> = constraint
+                if trait_info.associated_types.is_empty() {
+                    return None;
+                }
+                let trait_params: Vec<Ty> = constraint
                     .tys
                     .iter()
-                    .map(|ty| {
-                        // Each constraint type should be a Var referring to a scope variable
-                        if let Type::Var(name, _) = ty {
-                            scope.get(name).copied().unwrap_or_else(|| fresh_var_id(&mut self.engine))
-                        } else {
-                            fresh_var_id(&mut self.engine)
-                        }
-                    })
+                    .map(|ty| self.convert_syntax_type_with_scope(ty, &mut scope))
                     .collect();
-                if trait_info.associated_types.is_empty() {
-                    None
-                } else {
-                    Some(AssocTypeContext {
-                        trait_name: constraint.trait_name.clone(),
-                        trait_var_ids,
-                    })
-                }
+                Some((constraint.trait_name.clone(), trait_params))
             })
             .collect();
-        let ty = if constraint_contexts.is_empty() {
-            self.convert_syntax_type_with_scope(ty, &mut scope)
-        } else {
-            // Use the first constraint with associated types as the context.
-            // For Type::Proj, we'll also search all contexts in the conversion.
-            self.convert_syntax_type_with_scope_assoc(
-                ty, &mut scope, constraint_contexts.first(),
-            )
-        };
+        let ty = self.convert_syntax_type_with_scope_assoc(ty, &mut scope, &constraint_contexts);
         Scheme::poly_with_constraints(predicates, scope_vars(&scope), ty)
     }
 
@@ -1041,14 +1012,14 @@ impl SemanticAnalyzer {
         ty: &Type,
         scope: &mut HashMap<String, TyVarId>,
     ) -> Ty {
-        self.convert_syntax_type_with_scope_assoc(ty, scope, None)
+        self.convert_syntax_type_with_scope_assoc(ty, scope, &[])
     }
 
     fn convert_syntax_type_with_scope_assoc(
         &mut self,
         ty: &Type,
         scope: &mut HashMap<String, TyVarId>,
-        assoc_ctx: Option<&AssocTypeContext>,
+        constraint_contexts: &[(String, Vec<Ty>)],
     ) -> Ty {
         let ty = match ty {
             Type::Con(name, span) => {
@@ -1074,48 +1045,67 @@ impl SemanticAnalyzer {
                         .or_insert_with(|| fresh_var_id(&mut self.engine)),
                 )
             }
-            Type::Proj(base, name, _) => {
-                let base_ty = self.convert_syntax_type_with_scope_assoc(base, scope, assoc_ctx);
-                if let Some(ctx) = assoc_ctx {
-                    // Use ALL trait parameters from the context, not just the base.
-                    // `a.Output` in `Add a b => ...` means AssocProj with
-                    // trait_params = [a, b], not just [a].
-                    ctx.to_assoc_proj(name.clone())
-                } else {
-                    // Fallback: try to find the trait by looking up which trait
-                    // has `base_ty` as a parameter and has an associated type `name`.
-                    if let Some((trait_name, trait_params)) =
-                        self.find_assoc_type_context(&base_ty, name)
-                    {
-                        Ty::AssocProj {
-                            trait_params,
-                            name: name.clone(),
-                            trait_name,
+            Type::Proj(_base, name, span) => {
+                // Collect all constraint contexts that have this associated type name
+                let mut matches: Vec<(String, Vec<Ty>)> = Vec::new();
+                for (tn, tp) in constraint_contexts.iter() {
+                    if let Some(trait_info) = self.traits.get(tn) {
+                        if trait_info.associated_types.iter().any(|n| n == name) {
+                            matches.push((tn.clone(), tp.clone()));
                         }
-                    } else {
-                        // Cannot determine which trait this associated type
-                        // belongs to. The AssocProj will remain unresolved
-                        // and likely produce a type error during inference.
-                        Ty::AssocProj {
-                            trait_params: vec![base_ty],
-                            name: name.clone(),
-                            trait_name: String::new(),
+                    }
+                }
+                match matches.len() {
+                    0 => {
+                        // No constraint context has this associated type.
+                        // Try global trait search as fallback.
+                        let base_ty = self.convert_syntax_type_with_scope_assoc(_base, scope, constraint_contexts);
+                        if let Some((trait_name, trait_params)) =
+                            self.find_assoc_type_context(&base_ty, name)
+                        {
+                            Ty::AssocProj { trait_params, name: name.clone(), trait_name }
+                        } else {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "cannot determine which trait `.{name}` refers to"
+                                ))
+                                .with_label(Label::primary(*span, "associated type projection"))
+                                .with_help("add a trait constraint (e.g., `Add a b =>`) to identify which trait's associated type is meant"),
+                            );
+                            Ty::Error
                         }
+                    }
+                    1 => Ty::AssocProj {
+                        trait_params: matches[0].1.clone(),
+                        name: name.clone(),
+                        trait_name: matches[0].0.clone(),
+                    },
+                    _ => {
+                        let trait_names: Vec<&str> = matches.iter().map(|(tn, _)| tn.as_str()).collect();
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "ambiguous associated type `.{name}` — found in traits: {}",
+                                trait_names.join(", ")
+                            ))
+                            .with_label(Label::primary(*span, "ambiguous projection"))
+                            .with_help("use qualified syntax to disambiguate"),
+                        );
+                        Ty::Error
                     }
                 }
             }
             Type::Nat(n, _) => Ty::Nat(*n),
             Type::Arrow(a, b, _) => {
-                let a = self.convert_syntax_type_with_scope_assoc(a, scope, assoc_ctx);
-                let b = self.convert_syntax_type_with_scope_assoc(b, scope, assoc_ctx);
+                let a = self.convert_syntax_type_with_scope_assoc(a, scope, constraint_contexts);
+                let b = self.convert_syntax_type_with_scope_assoc(b, scope, constraint_contexts);
                 Ty::arrow(a, b)
             }
             Type::App(f, a, _) => {
-                let f = self.convert_syntax_type_with_scope_assoc(f, scope, assoc_ctx);
-                let a = self.convert_syntax_type_with_scope_assoc(a, scope, assoc_ctx);
+                let f = self.convert_syntax_type_with_scope_assoc(f, scope, constraint_contexts);
+                let a = self.convert_syntax_type_with_scope_assoc(a, scope, constraint_contexts);
                 Ty::app(f, a)
             }
-            Type::Paren(inner, _) => self.convert_syntax_type_with_scope_assoc(inner, scope, assoc_ctx),
+            Type::Paren(inner, _) => self.convert_syntax_type_with_scope_assoc(inner, scope, constraint_contexts),
             Type::Tuple(elems, _) => {
                 if elems.is_empty() {
                     Ty::unit()
@@ -1123,7 +1113,7 @@ impl SemanticAnalyzer {
                     Ty::Tuple(
                         elems
                             .iter()
-                            .map(|e| self.convert_syntax_type_with_scope_assoc(e, scope, assoc_ctx))
+                            .map(|e| self.convert_syntax_type_with_scope_assoc(e, scope, constraint_contexts))
                             .collect(),
                     )
                 }
@@ -1133,9 +1123,9 @@ impl SemanticAnalyzer {
                 // `Self` resolves to the first type parameter of the enclosing trait.
                 // When used as `Self.Output`, the Type::Proj arm handles the projection;
                 // the base `Self` is resolved here.
-                if let Some(ctx) = assoc_ctx {
-                    if let Some(first_id) = ctx.trait_var_ids.first() {
-                        Ty::Var(*first_id)
+                if let Some((_, trait_params)) = constraint_contexts.first() {
+                    if let Some(first_param) = trait_params.first() {
+                        first_param.clone()
                     } else {
                         self.engine.diagnostics.push(
                             Diagnostic::error("`Self` used in trait with no type parameters")
@@ -1163,6 +1153,12 @@ impl SemanticAnalyzer {
             || self.builtin_types.contains_key(name)
             || self.bitfield_field_names.contains_key(name)
             || self.type_aliases.contains_key(name)
+    }
+
+    /// Check whether a name is a compiler-internal mangled impl method name.
+    /// Uses a pre-built HashSet for O(1) lookup instead of scanning all impls.
+    pub fn is_internal_impl_method_name(&self, name: &str) -> bool {
+        self.impl_method_names.contains(name)
     }
 
     /// Find a trait that has an associated type with the given name, and
@@ -1566,7 +1562,7 @@ impl SemanticAnalyzer {
             Expr::Lit(lit, _) => self.lit_type(lit),
 
             Expr::Var(name, span) => {
-                if is_internal_impl_method_name(&self.impls, name) {
+                if self.is_internal_impl_method_name(name) {
                     self.engine.diagnostics.push(
                         Diagnostic::error(format!(
                             "Internal impl method `{}` is not accessible from source",
@@ -2073,7 +2069,23 @@ pub fn format_type_suffix(ty: &Ty) -> String {
         Ty::Con(name) => name.clone(),
         Ty::App(f, a) => format!("{}_{}", format_type_suffix(f), format_type_suffix(a)),
         Ty::Nat(n) => format!("{}", n),
-        _ => "unknown".to_string(),
+        Ty::Tuple(elems) => elems
+            .iter()
+            .map(format_type_suffix)
+            .collect::<Vec<_>>()
+            .join("_"),
+        Ty::AssocProj { trait_name, name, .. } => {
+            debug_assert!(!trait_name.is_empty(), "AssocProj with empty trait_name should not reach mangling");
+            format!("{}_{}", trait_name.to_lowercase(), name.to_lowercase())
+        }
+        Ty::Arrow(_, _) => "fn".to_string(),
+        // Type variables can appear in impl type parameters before monomorphization.
+        // Format them as `t{id}` consistent with ty_to_mono_suffix_local.
+        Ty::Var(id) => format!("t{}", id),
+        // Forall types should be monomorphized away before mangling, but produce
+        // a readable suffix rather than panicking to support partial compilation.
+        Ty::Forall(_, body) => format_type_suffix(body),
+        Ty::Error => "error".to_string(),
     }
 }
 
@@ -2121,12 +2133,6 @@ fn resolve_impl_method_name(impls: &[ImplInfo], name: &str, receiver_ty: &Ty) ->
         .iter()
         .filter(|inst| inst.tys.len() == 1 && inst.tys[0] == *receiver_ty)
         .find_map(|inst| inst.methods.get(name).cloned())
-}
-
-pub fn is_internal_impl_method_name(impls: &[ImplInfo], name: &str) -> bool {
-    impls
-        .iter()
-        .any(|inst| inst.methods.values().any(|mangled| mangled == name))
 }
 
 fn resolve_unique_standalone_impl_method_name(impls: &[ImplInfo], name: &str) -> Option<String> {
@@ -2350,6 +2356,7 @@ where
 {
     match ty {
         Ty::AssocProj { trait_params, name, trait_name } => {
+            debug_assert!(!trait_name.is_empty(), "AssocProj with empty trait_name should not reach resolution");
             let resolved_params: Vec<Ty> = trait_params
                 .iter()
                 .map(|t| resolve_assoc_projections_with(t, lookup))
@@ -2387,7 +2394,9 @@ where
             vars.clone(),
             Box::new(resolve_assoc_projections_with(body, lookup)),
         ),
-        _ => ty.clone(),
+        // Leaf types that cannot contain AssocProj — pass through unchanged.
+        // Exhaustive match ensures new Ty variants cause a compile error here.
+        Ty::Var(_) | Ty::Con(_) | Ty::Nat(_) | Ty::Error => ty.clone(),
     }
 }
 

@@ -1,5 +1,12 @@
 ---
 source: crates/shadml_integration_tests/tests/ui.rs
+assertion_line: 140
 expression: output
 ---
-
+error: cannot determine which trait `.Foo` refers to
+  --> self-unknown-assoc.shadml:4:23
+   |
+4 |   combine : a -> b -> Self.Foo
+  |                       ~~~~~~~~ associated type projection
+   |
+   = help: add a trait constraint (e.g., `Add a b =>`) to identify which trait's associated type is meant

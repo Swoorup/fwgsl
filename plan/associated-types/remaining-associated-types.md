@@ -1,7 +1,7 @@
 # Remaining Issues — Associated Types Implementation
 
 Created: 2026-04-17
-Progress: 11/23 issues
+Progress: 17/23 issues
 
 Code review (2026-04-17, updated 2026-04-18).
 
@@ -20,33 +20,25 @@ Code review (2026-04-17, updated 2026-04-18).
 
 ---
 
-## 2. Empty-String `trait_name` Sentinel Creates Unresolvable `AssocProj`
+## 2. Empty-String `trait_name` Sentinel Creates Unresolvable `AssocProj` — FIXED
 
-**Severity:** Medium-High
-**Files:**
-- `crates/shadml_semantic/src/lib.rs`, ~line 875
-- `crates/shadml_ast_lowering/src/lib.rs`, ~line 3143
+**Status:** Fixed (2026-04-19)
 
-**Problem:**
-When `Type::Proj(base, name, span)` is encountered and no matching trait context is found (e.g., `x.Output` without a constraint like `Add a b =>`), the code creates an `AssocProj` with `trait_name: String::new()`. This sentinel is never handled downstream — resolution functions match on `trait_name` and silently fail against `""`.
-
-**Impact:** Silent failures for `x.Output` without a trait constraint. Could produce cryptic downstream errors.
-
-**Fix direction:** Emit a diagnostic error at conversion time: "cannot determine which trait `.{name}` refers to — add a constraint like `SomeTrait a =>`."
+**What changed:**
+- Both semantic and lowering crates now emit a diagnostic error + return `Ty::Error` instead of creating `AssocProj` with empty `trait_name`
+- Added `debug_assert!(!trait_name.is_empty())` in `Display` for `AssocProj` (typechecker) and `resolve_assoc_projections_with` (semantic)
+- The UI test `self-unknown-assoc` now correctly reports the error
 
 ---
 
-## 3. Incomplete Mangling for `AssocProj` Risks Symbol Collisions
+## 3. Incomplete Mangling for `AssocProj` Risks Symbol Collisions — FIXED
 
-**Severity:** Medium
-**File:** `crates/shadml_ast_lowering/src/lib.rs`, ~line 4401
+**Status:** Fixed (2026-04-19)
 
-**Problem:**
-`ty_to_mono_suffix_local` for `AssocProj` only uses the name: `name.to_lowercase()`. This ignores `trait_name` and `trait_params`. Two traits with same-named associated types would collide.
-
-**Impact:** Symbol collision in generated WGSL if two traits define an associated type with the same name.
-
-**Fix direction:** Include `trait_name`: `format!("{}_{}", trait_name.to_lowercase(), name.to_lowercase())`. Or verify that AssocProj is always resolved before reaching this code path and document that.
+**What changed:**
+- `ty_to_mono_suffix_local` for `AssocProj` now includes `trait_name`: `format!("{}_{}", trait_name.to_lowercase(), name.to_lowercase())`
+- Added `debug_assert!(!trait_name.is_empty())` in the same arm
+- Added documentation comment on `mono_mangled_function_name` noting that unresolved `AssocProj` indicates an earlier pipeline error
 
 ---
 
@@ -60,15 +52,17 @@ When `Type::Proj(base, name, span)` is encountered and no matching trait context
 
 ---
 
-## 5. Magic-String `"type"` Keyword Check in Parser
+## 5. Magic-String `"type"` Keyword Check in Parser — FIXED
 
-**Severity:** Medium
-**File:** `crates/shadml_parser/src/parser.rs`, ~lines 2143, 2479, 2580
+**Status:** Fixed (2026-04-19)
 
-**Problem:**
-`type` keyword checked via `text_of(&current_token()) == "type"` on `Ident` tokens. Fragile: if `type` ever becomes a proper `SyntaxKind::KwType`, these checks silently break. The `builtin type` dispatch (~line 2048) has no `UpperIdent` guard, so `builtin typefoo` misroutes.
-
-**Fix direction:** Add `KwType` to `SyntaxKind` and lex `type` as a keyword token (consistent with `impl`, `trait`, `where`).
+**What changed:**
+- Added `SyntaxKind::KwType` to the keyword enum (between `KwCfg` and `KwSelf`, preserving `is_keyword()` range)
+- Added `"type" => Some(SyntaxKind::KwType)` to `keyword_from_str`
+- Added `SyntaxKind::KwType => "'type'"` to `Display` impl
+- Replaced all 4 magic-string checks in the parser with `SyntaxKind::KwType` pattern matching
+- `parse_builtin_type_decl` now uses `self.expect(SyntaxKind::KwType)` instead of `self.expect(SyntaxKind::Ident)` + runtime string validation
+- Added test assertions for `is_keyword()` and `keyword_from_str("type")`
 
 ---
 
@@ -130,15 +124,15 @@ Every call allocates a new `Vec<Ty>` by normalizing every parameter. Called freq
 
 ---
 
-## 11. `resolve_hir_expr_assoc_projections` Fragility
+## 11. `resolve_hir_expr_assoc_projections` Fragility — FIXED
 
-**Severity:** Medium
-**File:** `crates/shadml_ast_lowering/src/lib.rs`, ~lines 3980–4040
+**Status:** Fixed (2026-04-19)
 
-**Problem:**
-This function must handle every `HirExpr` variant. If a new variant is added, it silently drops subtrees. It's also conceptually redundant with `finalize_expr` + `finalize_resolve` — its existence suggests finalization is being called at the wrong time for specialized functions.
-
-**Fix direction:** Either make `finalize_expr` handle specialized functions correctly (eliminating this function), or add an exhaustive `HirExpr` match with a `#[non_exhaustive]` guard or `unreachable!()` for unknown variants.
+**What changed:**
+- Extracted `map_hir_expr_types<F>(expr: HirExpr, f: &F)` — a generic traversal that applies a type-mapping function to every type annotation in an `HirExpr` tree
+- Reimplemented `resolve_hir_expr_assoc_projections` as a 4-line function delegating to `map_hir_expr_types`
+- Added documentation comment on `mono_mangled_function_name` and `map_hir_expr_types` noting the relationship with `finalize_expr`
+- Rust's exhaustiveness check ensures new `HirExpr` variants update both `map_hir_expr_types` and `finalize_expr`
 
 ---
 
@@ -197,17 +191,18 @@ This function must handle every `HirExpr` variant. If a new variant is added, it
 
 ---
 
-## 17. `AssocTypeContext` Only Uses First Constraint With Associated Types
+## 17. `AssocTypeContext` Only Uses First Constraint With Associated Types — FIXED
 
-**Severity:** Medium
-**File:** `crates/shadml_semantic/src/lib.rs`, ~line 794
+**Status:** Fixed (2026-04-19)
 
-**Problem:**
-`constraint_contexts.first()` is used to select the context for `AssocProj` conversion. If multiple constraints have associated types (e.g., `Add a b, Mul a b =>`), only the first is used. A `Type::Proj(base, name, _)` with `name = "Output"` would always pick the first constraint's trait, even if `Output` belongs to the second.
-
-**Impact:** Wrong `AssocProj.trait_name` for associated types that belong to non-first constraints.
-
-**Fix direction:** When converting `Type::Proj`, search all constraint contexts for one whose associated type names include `name`. If ambiguous, require the user to disambiguate.
+**What changed:**
+- Deleted `AssocTypeContext` struct and its `to_assoc_proj` method
+- Replaced single `Option<&AssocTypeContext>` with `&[(String, Vec<Ty>)]` (trait name + trait params), matching the lowering crate's pattern
+- `convert_syntax_type_sig` now always calls `convert_syntax_type_with_scope_assoc` with all constraint contexts (empty slice when none)
+- `Type::Proj` arm now searches all constraint contexts for matching associated type names
+- Detects ambiguity when multiple constraints have the same associated type name, emitting a diagnostic: "ambiguous associated type `.Output` — found in traits: Add, Mul"
+- Fallback global trait search (`find_assoc_type_context`) still used when no constraint context has the associated type
+- `Type::Self_` arm now uses `constraint_contexts.first()` instead of `assoc_ctx`
 
 ---
 
@@ -223,17 +218,24 @@ This function must handle every `HirExpr` variant. If a new variant is added, it
 
 ---
 
-## 19. No Unit Tests for `AssocProj` in Typechecker
+## 19. No Unit Tests for `AssocProj` in Typechecker — FIXED
 
-**Severity:** Medium
-**File:** `crates/shadml_typechecker/src/lib.rs`
+**Status:** Fixed (2026-04-19)
 
-**Problem:**
-Zero test coverage for `AssocProj` behavior: `contains_var`, `free_vars`, `apply_subst`, `var_only_in_assoc_proj_params`, `contains_var_structural`, `Display`, unification (both same-name and catch-all arms), and the occurs-check bypass.
-
-**Impact:** Subtle regressions could go undetected. The `contains_var_structural` and `var_only_in_assoc_proj_params` functions have particularly subtle semantics that need test coverage.
-
-**Fix direction:** Add unit tests for each `AssocProj` behavior in the typechecker test module.
+**What changed:**
+- Added 11 comprehensive unit tests covering all `AssocProj` behaviors:
+  - `test_assoc_proj_contains_var` — finds var in `trait_params`, not in `name`/`trait_name`
+  - `test_assoc_proj_var_only_in_params_true` — returns true when var is only in params
+  - `test_assoc_proj_var_only_in_params_false_structural` — returns false when var also appears structurally
+  - `test_assoc_proj_contains_var_structural` — returns false for AssocProj (params are type-level inputs)
+  - `test_assoc_proj_apply_subst` — substitution applies to `trait_params` only, preserves `name`/`trait_name`
+  - `test_assoc_proj_free_vars` — collects free vars from `trait_params`
+  - `test_assoc_proj_display` — format: `(Add<F32, F32>).Output`
+  - `test_unify_assoc_proj_matching` — two AssocProj with same name/trait unify params
+  - `test_unify_assoc_proj_permissive` — AssocProj unifies with any type
+  - `test_unify_assoc_proj_occurs_bypass` — `a = (Add<a, F32>).Output` is NOT an infinite type
+  - `test_unify_assoc_proj_occurs_structural` — `a = a -> (Add<a, F32>).Output` IS an infinite type
+  - `test_unify_assoc_proj_different_trait` — permissive unification accepts different traits
 
 ---
 

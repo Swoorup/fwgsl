@@ -2048,7 +2048,7 @@ impl Parser {
         match self.peek_non_trivia() {
             SyntaxKind::KwExtern => self.parse_builtin_extern_decl(start),
             SyntaxKind::KwImpl => self.parse_builtin_impl_decl(start),
-            SyntaxKind::Ident if self.text_of(self.current_token()) == "type" => {
+            SyntaxKind::KwType => {
                 self.parse_builtin_type_decl(start)
             }
             _ => {
@@ -2067,13 +2067,7 @@ impl Parser {
     }
 
     fn parse_builtin_type_decl(&mut self, start: u32) -> Decl {
-        let type_tok = self.expect(SyntaxKind::Ident);
-        if self.text_of(&type_tok) != "type" {
-            self.diagnostics.push(
-                Diagnostic::error("expected `type` after `builtin`")
-                    .with_label(Label::primary(type_tok.span, "expected `type`")),
-            );
-        }
+        self.expect(SyntaxKind::KwType);
         self.skip_trivia();
         let name_tok = self.expect(SyntaxKind::UpperIdent);
         let name = self.text_of(&name_tok).to_owned();
@@ -3793,8 +3787,7 @@ impl Parser {
     /// Returns `Some(AssociatedTypeDef)` if the current position matches,
     /// `None` otherwise (without consuming tokens).
     fn try_parse_assoc_type_def(&mut self) -> Option<AssociatedTypeDef> {
-        if self.at(SyntaxKind::Ident)
-            && self.text_of(&self.current_token()) == "type"
+        if self.at(SyntaxKind::KwType)
             && self.peek_after_current() == SyntaxKind::UpperIdent
         {
             let type_start = self.current_span().start;
@@ -3823,8 +3816,7 @@ impl Parser {
     /// Returns `Some(AssociatedTypeDecl)` if the current position matches,
     /// `None` otherwise (without consuming tokens).
     fn try_parse_assoc_type_decl(&mut self) -> Option<AssociatedTypeDecl> {
-        if self.at(SyntaxKind::Ident)
-            && self.text_of(&self.current_token()) == "type"
+        if self.at(SyntaxKind::KwType)
             && self.peek_after_current() == SyntaxKind::UpperIdent
         {
             let type_start = self.current_span().start;

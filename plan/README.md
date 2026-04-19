@@ -1,7 +1,8 @@
 # Plans
 
 ## Active
-- [associated-types/remaining-associated-types](associated-types/remaining-associated-types.md) — 22 open issues from associated types migration
+- [associated-types/remaining-associated-types](associated-types/remaining-associated-types.md) — 6 open issues from associated types migration (17/23 fixed)
+- [associated-types/perf-and-readability](associated-types/perf-and-readability.md) — Performance and readability improvements for associated types pipeline
 - [associated-types/multi-param-future](associated-types/multi-param-future.md) — Future improvements for multi-parameter traits
 - [improve-type-signatures](improve-type-signatures.md) — Better type signature rendering
 - [port-wgsl-bindgen-examples](port-wgsl-bindgen-examples.md) — Port examples from wgsl_bindgen

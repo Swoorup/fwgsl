@@ -1247,7 +1247,7 @@ pub fn build_completions_with_prelude_flag(
 
     if context != CompletionContext::Attribute {
         for (label, scheme) in state.analyzer.env.iter() {
-            if shadml_semantic::is_internal_impl_method_name(&state.analyzer.impls, label)
+            if state.analyzer.is_internal_impl_method_name(label)
                 || seen.contains(label)
                 || !matches_prefix(label, &prefix)
                 || !is_word_completion(label)

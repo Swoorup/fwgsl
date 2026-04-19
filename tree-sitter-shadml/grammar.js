@@ -25,10 +25,9 @@ module.exports = grammar({
     [$.function_declaration],
     [$.type_signature],
     [$.attribute],
-    [$.function_type, $.type_application],
     [$.type_constraint, $.type_constructor],
-    [$.type_constraint, $._simple_type],
-    [$.type_constraint, $.type_application],
+    [$.assoc_type_decl],
+    [$.assoc_type_def],
   ],
 
   rules: {
@@ -49,6 +48,8 @@ module.exports = grammar({
         $.cfg_declaration,
         $.type_signature,
         $.function_declaration,
+        $.builtin_type_declaration,
+        $.builtin_impl_declaration,
       ),
 
     // -- Module & imports ---------------------------------------------------
@@ -156,7 +157,10 @@ module.exports = grammar({
       )),
 
     _trait_member: ($) =>
-      choice($.type_signature, $.function_declaration),
+      choice($.type_signature, $.function_declaration, $.assoc_type_decl),
+
+    assoc_type_decl: ($) =>
+      seq("type", field("name", $.upper_identifier), optional(choice($._layout_semicolon, $._layout_end))),
 
     impl_declaration: ($) =>
       prec.right(seq(
@@ -169,7 +173,10 @@ module.exports = grammar({
       )),
 
     _impl_member: ($) =>
-      choice($.type_signature, $.function_declaration),
+      choice($.type_signature, $.function_declaration, $.assoc_type_def),
+
+    assoc_type_def: ($) =>
+      seq("type", field("name", $.upper_identifier), "=", field("type", $._type), optional(choice($._layout_semicolon, $._layout_end))),
 
     // -- Bitfield ------------------------------------------------------------
 
@@ -203,6 +210,38 @@ module.exports = grammar({
           // Bool or enum-inferred: `name : Bool` or `name : CapStyle`
           field("type", $.upper_identifier),
         ),
+      ),
+
+    // -- Builtin declarations -----------------------------------------------
+
+    builtin_type_declaration: ($) =>
+      seq("builtin", "type", field("name", $.upper_identifier), optional(field("arity", $.integer_literal)), optional(choice($._layout_semicolon, $._layout_end))),
+
+    builtin_impl_declaration: ($) =>
+      prec.right(seq(
+        "builtin", "impl",
+        field("trait", $.upper_identifier),
+        repeat($._simple_type),
+        "where",
+        repeat($._builtin_impl_member),
+        optional($._layout_end),
+      )),
+
+    _builtin_impl_member: ($) =>
+      choice($.assoc_type_def, $.builtin_method_def),
+
+    builtin_method_def: ($) =>
+      seq(
+        field("name", choice($.identifier, $.operator_name)),
+        "=",
+        field("lowering", $.builtin_lowering),
+        optional($._layout_semicolon),
+      ),
+
+    builtin_lowering: ($) =>
+      choice(
+        seq($.identifier, "(", $.identifier, ")"),
+        seq($.identifier, $.operator_name),
       ),
 
     // -- Const ---------------------------------------------------------------
@@ -318,11 +357,15 @@ module.exports = grammar({
         $.tuple_type,
         $.unit_type,
         $.parenthesized_type,
+        $.self_type,
+        $.type_projection,
       ),
 
     type_literal: ($) => $.integer_literal,
 
     type_constructor: ($) => $.upper_identifier,
+
+    self_type: ($) => "Self",
 
     type_variable: ($) => $.identifier,
 
@@ -340,6 +383,8 @@ module.exports = grammar({
             $.tuple_type,
             $.unit_type,
             $.parenthesized_type,
+            $.self_type,
+            $.type_projection,
           ),
         )),
       ),
@@ -351,6 +396,9 @@ module.exports = grammar({
 
     parenthesized_type: ($) =>
       seq("(", $._type, ")"),
+
+    type_projection: ($) =>
+      prec.left(4, seq($._simple_type, ".", field("name", $.upper_identifier))),
 
     // -- Patterns ------------------------------------------------------------
 
@@ -608,7 +656,7 @@ module.exports = grammar({
 
     // -- Comments -----------------------------------------------------------
 
-    line_comment: ($) => token(seq("--", /.*/)),
+    line_comment: ($) => token(choice(seq("--", /.*/), seq("//", /.*/))),
 
     block_comment: ($) =>
       token(seq("{-", /[\s\S]*?/, "-}")),

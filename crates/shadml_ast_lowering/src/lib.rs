@@ -3045,7 +3045,7 @@ impl AstLowering {
                 // when `Self` appears without a projection.
                 Ty::Error
             }
-            Type::Proj(_base, name, _) => {
+            Type::Proj(_base, name, span) => {
                 // Self.Output: search constraint traits for a matching associated type
                 if matches!(_base.as_ref(), Type::Self_(_)) {
                     if let Some((trait_name, trait_params)) =
@@ -3085,17 +3085,14 @@ impl AstLowering {
                         trait_name,
                     }
                 } else {
-                    // Fallback: cannot determine the trait for this
-                    // associated type projection. This typically means
-                    // the type signature uses `x.Output` without a
-                    // constraint like `Add a b => ...` that identifies
-                    // which trait's `Output` is meant.
-                    let base_ty = self.convert_syntax_type_with_scope_assoc(_base, scope, constraint_traits);
-                    Ty::AssocProj {
-                        trait_params: vec![base_ty],
-                        name: name.clone(),
-                        trait_name: String::new(),
-                    }
+                    self.engine.diagnostics.push(
+                        shadml_diagnostics::Diagnostic::error(format!(
+                            "cannot determine which trait `.{name}` refers to"
+                        ))
+                        .with_label(shadml_diagnostics::Label::primary(*span, "associated type projection"))
+                        .with_help("add a trait constraint (e.g., `Add a b =>`) to identify which trait's associated type is meant"),
+                    );
+                    Ty::Error
                 }
             }
             Type::Nat(n, _) => Ty::Nat(*n),
@@ -3928,149 +3925,143 @@ fn substitute_ty_vars(ty: &Ty, subst: &HashMap<TyVarId, Ty>) -> Ty {
     }
 }
 
+/// Apply a type transformation to every type annotation in an `HirExpr`,
+/// recursively processing sub-expressions. Preserves expression structure.
+///
+/// Both this function and `finalize_expr` traverse `HirExpr` variants.
+/// This function only applies the type mapping; `finalize_expr` additionally
+/// does method dispatch rewrites. If a new `HirExpr` variant is added,
+/// Rust's exhaustiveness check ensures BOTH functions are updated.
+fn map_hir_expr_types<F>(expr: HirExpr, f: &F) -> HirExpr
+where
+    F: Fn(&Ty) -> Ty,
+{
+    match expr {
+        HirExpr::Lit(lit, ty, span) => HirExpr::Lit(lit, f(&ty), span),
+        HirExpr::Var(name, ty, span) => HirExpr::Var(name, f(&ty), span),
+        HirExpr::Tuple(items, ty, span) => HirExpr::Tuple(
+            items.into_iter().map(|item| map_hir_expr_types(item, f)).collect(),
+            f(&ty),
+            span,
+        ),
+        HirExpr::TupleIndex(base, index, ty, span) => HirExpr::TupleIndex(
+            Box::new(map_hir_expr_types(*base, f)),
+            index,
+            f(&ty),
+            span,
+        ),
+        HirExpr::App(func, arg, ty, span) => HirExpr::App(
+            Box::new(map_hir_expr_types(*func, f)),
+            Box::new(map_hir_expr_types(*arg, f)),
+            f(&ty),
+            span,
+        ),
+        HirExpr::Let(binds, body, ty, span) => HirExpr::Let(
+            binds.into_iter()
+                .map(|(name, expr)| (name, map_hir_expr_types(expr, f)))
+                .collect(),
+            Box::new(map_hir_expr_types(*body, f)),
+            f(&ty),
+            span,
+        ),
+        HirExpr::Case(scrutinee, arms, ty, span) => HirExpr::Case(
+            Box::new(map_hir_expr_types(*scrutinee, f)),
+            arms.into_iter()
+                .map(|arm| HirCaseArm {
+                    pattern: arm.pattern,
+                    guard: arm.guard.map(|guard| map_hir_expr_types(guard, f)),
+                    body: map_hir_expr_types(arm.body, f),
+                })
+                .collect(),
+            f(&ty),
+            span,
+        ),
+        HirExpr::If(cond, then_expr, else_expr, ty, span) => HirExpr::If(
+            Box::new(map_hir_expr_types(*cond, f)),
+            Box::new(map_hir_expr_types(*then_expr, f)),
+            Box::new(map_hir_expr_types(*else_expr, f)),
+            f(&ty),
+            span,
+        ),
+        HirExpr::BinOp(op, lhs, rhs, ty, span) => HirExpr::BinOp(
+            op,
+            Box::new(map_hir_expr_types(*lhs, f)),
+            Box::new(map_hir_expr_types(*rhs, f)),
+            f(&ty),
+            span,
+        ),
+        HirExpr::UnaryNeg(inner, ty, span) => HirExpr::UnaryNeg(
+            Box::new(map_hir_expr_types(*inner, f)),
+            f(&ty),
+            span,
+        ),
+        HirExpr::UnaryNot(inner, ty, span) => HirExpr::UnaryNot(
+            Box::new(map_hir_expr_types(*inner, f)),
+            f(&ty),
+            span,
+        ),
+        HirExpr::UnaryBitNot(inner, ty, span) => HirExpr::UnaryBitNot(
+            Box::new(map_hir_expr_types(*inner, f)),
+            f(&ty),
+            span,
+        ),
+        HirExpr::ConstructorCall(name, tag, args, ty, span) => HirExpr::ConstructorCall(
+            name,
+            tag,
+            args.into_iter().map(|arg| map_hir_expr_types(arg, f)).collect(),
+            f(&ty),
+            span,
+        ),
+        HirExpr::FieldAccess(base, field, ty, span) => HirExpr::FieldAccess(
+            Box::new(map_hir_expr_types(*base, f)),
+            field,
+            f(&ty),
+            span,
+        ),
+        HirExpr::Index(base, index, ty, span) => HirExpr::Index(
+            Box::new(map_hir_expr_types(*base, f)),
+            Box::new(map_hir_expr_types(*index, f)),
+            f(&ty),
+            span,
+        ),
+        HirExpr::Loop(loop_name, bindings, body, ty, span) => HirExpr::Loop(
+            loop_name,
+            bindings.into_iter()
+                .map(|(name, expr)| (name, map_hir_expr_types(expr, f)))
+                .collect(),
+            Box::new(map_hir_expr_types(*body, f)),
+            f(&ty),
+            span,
+        ),
+        HirExpr::BitfieldConstruct(name, fields, ty, span) => HirExpr::BitfieldConstruct(
+            name,
+            fields.into_iter()
+                .map(|(field_name, expr)| (field_name, map_hir_expr_types(expr, f)))
+                .collect(),
+            f(&ty),
+            span,
+        ),
+        HirExpr::BitfieldUpdate(name, base, fields, ty, span) => HirExpr::BitfieldUpdate(
+            name,
+            Box::new(map_hir_expr_types(*base, f)),
+            fields.into_iter()
+                .map(|(field_name, expr)| (field_name, map_hir_expr_types(expr, f)))
+                .collect(),
+            f(&ty),
+            span,
+        ),
+    }
+}
+
 /// Resolve `AssocProj` types with concrete `trait_params` in a HIR expression.
 fn resolve_hir_expr_assoc_projections(
     expr: HirExpr,
     impls: &[shadml_semantic::ImplInfo],
     builtin_impls: &[shadml_semantic::BuiltinImplInfo],
 ) -> HirExpr {
-    let resolve = |ty: &Ty| -> Ty {
+    map_hir_expr_types(expr, &|ty| {
         shadml_semantic::resolve_assoc_projections_with_impls(ty, impls, builtin_impls)
-    };
-    match expr {
-        HirExpr::Lit(lit, ty, span) => HirExpr::Lit(lit, resolve(&ty), span),
-        HirExpr::Var(name, ty, span) => HirExpr::Var(name, resolve(&ty), span),
-        HirExpr::Tuple(items, ty, span) => HirExpr::Tuple(
-            items
-                .into_iter()
-                .map(|item| resolve_hir_expr_assoc_projections(item, impls, builtin_impls))
-                .collect(),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::TupleIndex(base, index, ty, span) => HirExpr::TupleIndex(
-            Box::new(resolve_hir_expr_assoc_projections(*base, impls, builtin_impls)),
-            index,
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::App(func, arg, ty, span) => HirExpr::App(
-            Box::new(resolve_hir_expr_assoc_projections(*func, impls, builtin_impls)),
-            Box::new(resolve_hir_expr_assoc_projections(*arg, impls, builtin_impls)),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::Let(binds, body, ty, span) => HirExpr::Let(
-            binds
-                .into_iter()
-                .map(|(name, expr)| {
-                    (name, resolve_hir_expr_assoc_projections(expr, impls, builtin_impls))
-                })
-                .collect(),
-            Box::new(resolve_hir_expr_assoc_projections(*body, impls, builtin_impls)),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::Case(scrutinee, arms, ty, span) => HirExpr::Case(
-            Box::new(resolve_hir_expr_assoc_projections(*scrutinee, impls, builtin_impls)),
-            arms.into_iter()
-                .map(|arm| HirCaseArm {
-                    pattern: arm.pattern,
-                    guard: arm.guard.map(|guard| {
-                        resolve_hir_expr_assoc_projections(guard, impls, builtin_impls)
-                    }),
-                    body: resolve_hir_expr_assoc_projections(arm.body, impls, builtin_impls),
-                })
-                .collect(),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::If(cond, then_expr, else_expr, ty, span) => HirExpr::If(
-            Box::new(resolve_hir_expr_assoc_projections(*cond, impls, builtin_impls)),
-            Box::new(resolve_hir_expr_assoc_projections(*then_expr, impls, builtin_impls)),
-            Box::new(resolve_hir_expr_assoc_projections(*else_expr, impls, builtin_impls)),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::BinOp(op, lhs, rhs, ty, span) => HirExpr::BinOp(
-            op,
-            Box::new(resolve_hir_expr_assoc_projections(*lhs, impls, builtin_impls)),
-            Box::new(resolve_hir_expr_assoc_projections(*rhs, impls, builtin_impls)),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::UnaryNeg(inner, ty, span) => HirExpr::UnaryNeg(
-            Box::new(resolve_hir_expr_assoc_projections(*inner, impls, builtin_impls)),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::UnaryNot(inner, ty, span) => HirExpr::UnaryNot(
-            Box::new(resolve_hir_expr_assoc_projections(*inner, impls, builtin_impls)),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::UnaryBitNot(inner, ty, span) => HirExpr::UnaryBitNot(
-            Box::new(resolve_hir_expr_assoc_projections(*inner, impls, builtin_impls)),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::ConstructorCall(name, tag, args, ty, span) => HirExpr::ConstructorCall(
-            name,
-            tag,
-            args.into_iter()
-                .map(|arg| resolve_hir_expr_assoc_projections(arg, impls, builtin_impls))
-                .collect(),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::FieldAccess(base, field, ty, span) => HirExpr::FieldAccess(
-            Box::new(resolve_hir_expr_assoc_projections(*base, impls, builtin_impls)),
-            field,
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::Index(base, index, ty, span) => HirExpr::Index(
-            Box::new(resolve_hir_expr_assoc_projections(*base, impls, builtin_impls)),
-            Box::new(resolve_hir_expr_assoc_projections(*index, impls, builtin_impls)),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::Loop(loop_name, bindings, body, ty, span) => HirExpr::Loop(
-            loop_name,
-            bindings
-                .into_iter()
-                .map(|(name, expr)| {
-                    (name, resolve_hir_expr_assoc_projections(expr, impls, builtin_impls))
-                })
-                .collect(),
-            Box::new(resolve_hir_expr_assoc_projections(*body, impls, builtin_impls)),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::BitfieldConstruct(name, fields, ty, span) => HirExpr::BitfieldConstruct(
-            name,
-            fields
-                .into_iter()
-                .map(|(field_name, expr)| {
-                    (field_name, resolve_hir_expr_assoc_projections(expr, impls, builtin_impls))
-                })
-                .collect(),
-            resolve(&ty),
-            span,
-        ),
-        HirExpr::BitfieldUpdate(name, base, fields, ty, span) => HirExpr::BitfieldUpdate(
-            name,
-            Box::new(resolve_hir_expr_assoc_projections(*base, impls, builtin_impls)),
-            fields
-                .into_iter()
-                .map(|(field_name, expr)| {
-                    (field_name, resolve_hir_expr_assoc_projections(expr, impls, builtin_impls))
-                })
-                .collect(),
-            resolve(&ty),
-            span,
-        ),
-    }
+    })
 }
 
 fn substitute_pattern_ty_vars(pattern: HirPattern, subst: &HashMap<TyVarId, Ty>) -> HirPattern {
@@ -4253,6 +4244,11 @@ fn rename_hir_app_head(expr: HirExpr, new_name: &str, new_ty: Ty, span: Span) ->
     }
 }
 
+/// Produce a mangled name for a monomorphized function.
+///
+/// `AssocProj` types should be resolved to concrete types before reaching
+/// this function. An unresolved `AssocProj` in mangling indicates an earlier
+/// pipeline error where associated type resolution did not complete.
 fn mono_mangled_function_name(name: &str, concrete_args: &[Ty]) -> String {
     let mut mangled = name.to_string();
     for ty in concrete_args {
@@ -4317,7 +4313,10 @@ fn ty_to_mono_suffix_local(ty: &Ty) -> String {
             .join("_"),
         Ty::Forall(_, body) => ty_to_mono_suffix_local(body),
         Ty::Error => "error".to_string(),
-        Ty::AssocProj { name, .. } => name.to_lowercase(),
+        Ty::AssocProj { name, trait_name, .. } => {
+            debug_assert!(!trait_name.is_empty(), "AssocProj with empty trait_name should not reach mangling");
+            format!("{}_{}", trait_name.to_lowercase(), name.to_lowercase())
+        }
     }
 }
 

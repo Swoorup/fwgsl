@@ -161,6 +161,7 @@ pub enum SyntaxKind {
     KwAs,
     KwWhen,
     KwCfg,
+    KwType,
     KwSelf,
 
     // ── CST node kinds ─────────────────────────────────────────────
@@ -341,6 +342,7 @@ pub fn keyword_from_str(s: &str) -> Option<SyntaxKind> {
         "as" => Some(SyntaxKind::KwAs),
         "when" => Some(SyntaxKind::KwWhen),
         "cfg" => Some(SyntaxKind::KwCfg),
+        "type" => Some(SyntaxKind::KwType),
         _ => None,
     }
 }
@@ -483,6 +485,7 @@ impl fmt::Display for SyntaxKind {
             SyntaxKind::KwAs => "'as'",
             SyntaxKind::KwWhen => "'when'",
             SyntaxKind::KwCfg => "'cfg'",
+            SyntaxKind::KwType => "'type'",
             SyntaxKind::KwSelf => "'Self'",
 
             // CST node kinds
@@ -586,6 +589,7 @@ mod tests {
         assert!(SyntaxKind::KwModule.is_keyword());
         assert!(SyntaxKind::KwDeriving.is_keyword());
         assert!(SyntaxKind::KwLet.is_keyword());
+        assert!(SyntaxKind::KwType.is_keyword());
         assert!(!SyntaxKind::Ident.is_keyword());
         assert!(!SyntaxKind::Plus.is_keyword());
     }
@@ -621,6 +625,7 @@ mod tests {
         assert_eq!(keyword_from_str("uniform"), Some(SyntaxKind::KwUniform));
         assert_eq!(keyword_from_str("storage"), Some(SyntaxKind::KwStorage));
         assert_eq!(keyword_from_str("deriving"), Some(SyntaxKind::KwDeriving));
+        assert_eq!(keyword_from_str("type"), Some(SyntaxKind::KwType));
         assert_eq!(keyword_from_str("notakeyword"), None);
         assert_eq!(keyword_from_str(""), None);
     }
