@@ -163,6 +163,7 @@ pub enum SyntaxKind {
     KwCfg,
     KwType,
     KwSelf,
+    KwImmediate,
 
     // ── CST node kinds ─────────────────────────────────────────────
     SourceFile,
@@ -343,6 +344,7 @@ pub fn keyword_from_str(s: &str) -> Option<SyntaxKind> {
         "when" => Some(SyntaxKind::KwWhen),
         "cfg" => Some(SyntaxKind::KwCfg),
         "type" => Some(SyntaxKind::KwType),
+        "immediate" => Some(SyntaxKind::KwImmediate),
         _ => None,
     }
 }
@@ -487,6 +489,7 @@ impl fmt::Display for SyntaxKind {
             SyntaxKind::KwCfg => "'cfg'",
             SyntaxKind::KwType => "'type'",
             SyntaxKind::KwSelf => "'Self'",
+            SyntaxKind::KwImmediate => "'immediate'",
 
             // CST node kinds
             SyntaxKind::SourceFile => "source file",

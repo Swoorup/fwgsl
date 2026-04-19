@@ -241,6 +241,10 @@ fn walk_type(ty: &MirType, reachable: &mut ReachableSet) {
             walk_type(inner, reachable)
         }
         MirType::Mat(_, _, inner) => walk_type(inner, reachable),
+        MirType::Texture2d(inner)
+        | MirType::Texture2dMultisampled(inner)
+        | MirType::Texture2dArray(inner) => walk_type(inner, reachable),
+        MirType::BindingArray(inner, _) => walk_type(inner, reachable),
         _ => {}
     }
 }

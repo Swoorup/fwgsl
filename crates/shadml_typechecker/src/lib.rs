@@ -29,6 +29,14 @@ pub mod ty_name {
     // Resource wrappers
     pub const UNIFORM: &str = "Uniform";
     pub const STORAGE: &str = "Storage";
+
+    // Texture & sampler types
+    pub const TEXTURE_2D: &str = "Texture2d";
+    pub const TEXTURE_2D_MS: &str = "Texture2dMultisampled";
+    pub const TEXTURE_2D_ARRAY: &str = "Texture2dArray";
+    pub const SAMPLER: &str = "Sampler";
+    pub const SAMPLER_COMPARISON: &str = "SamplerComparison";
+    pub const BINDING_ARRAY: &str = "BindingArray";
 }
 
 /// Unique type variable identifier.

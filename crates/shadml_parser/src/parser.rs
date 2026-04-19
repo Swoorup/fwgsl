@@ -309,6 +309,10 @@ pub enum BindingAddressSpace {
     StorageRead,
     /// `storage(read_write)` — storage buffer (read-write)
     StorageReadWrite,
+    /// `immediate` — push constants, no @group/@binding
+    Immediate,
+    /// Opaque resource (texture/sampler) — no address space keyword
+    Opaque,
 }
 
 /// An associated type declaration inside a `trait` body: `type Output`
@@ -1109,20 +1113,26 @@ impl Parser {
                     self.eat_layout_semi();
                     self.skip_trivia();
 
-                    // Skip optional type signature (e.g. `main : ComputeInput -> ()`)
-                    if self.at(SyntaxKind::Ident) {
+                    // Parse optional type signature (e.g. `vsMain : VertexInput -> VertexOutput`)
+                    // and preserve it as a separate declaration so it is registered in the
+                    // type environment.  Without this, parameter types default to I32.
+                    let type_sig_decl = if self.at(SyntaxKind::Ident) {
                         let saved = self.pos;
                         let name_tok = self.bump();
                         self.skip_trivia();
                         if self.at(SyntaxKind::Colon) {
                             let name = self.text_of(&name_tok).to_owned();
-                            let _ty_sig = self.parse_type_sig(name, name_tok.span.start);
+                            let ty_sig = self.parse_type_sig(name, name_tok.span.start);
                             self.eat_layout_semi();
                             self.skip_trivia();
+                            Some(ty_sig)
                         } else {
                             self.pos = saved;
+                            None
                         }
-                    }
+                    } else {
+                        None
+                    };
 
                     // Now parse the actual function declaration
                     self.skip_trivia();
@@ -1148,14 +1158,22 @@ impl Parser {
                     let body = self.parse_expr();
 
                     let span = self.span_from(start);
-                    Some(Decl::EntryPoint {
+                    let entry_decl = Decl::EntryPoint {
                         attributes,
                         name,
                         params,
                         body,
                         span,
                         comments: vec![],
-                    })
+                    };
+                    if let Some(ty_sig) = type_sig_decl {
+                        // Return the type signature first, then the entry point
+                        // on the next parse_decl() call.
+                        self.pending_decls.push(entry_decl);
+                        Some(ty_sig)
+                    } else {
+                        Some(entry_decl)
+                    }
                 }
             }
             SyntaxKind::KwModule => Some(self.parse_module_decl()),
@@ -1167,6 +1185,11 @@ impl Parser {
             SyntaxKind::KwUniform | SyntaxKind::KwStorage => {
                 // Bare `uniform`/`storage` without `@group(...)` — parse as binding
                 // with default group(0) binding(0). This supports shorthand usage.
+                let start = self.current_span().start;
+                Some(self.parse_binding_body(start, 0, 0))
+            }
+            SyntaxKind::KwImmediate => {
+                // `immediate name : Type` — push constant without @group/@binding
                 let start = self.current_span().start;
                 Some(self.parse_binding_body(start, 0, 0))
             }
@@ -2234,17 +2257,12 @@ impl Parser {
                 // `storage` without parens — default is read (consistent with WGSL)
                 BindingAddressSpace::StorageRead
             }
+        } else if self.at(SyntaxKind::KwImmediate) {
+            self.bump();
+            BindingAddressSpace::Immediate
         } else {
-            // Fallback: emit an error and default to uniform
-            let tok = self.bump();
-            self.diagnostics.push(
-                Diagnostic::error(format!(
-                    "expected 'uniform' or 'storage', found '{}'",
-                    self.text_of(&tok)
-                ))
-                .with_label(Label::primary(tok.span, "expected 'uniform' or 'storage'")),
-            );
-            BindingAddressSpace::Uniform
+            // Bare name after @group/@binding — opaque resource (texture/sampler)
+            BindingAddressSpace::Opaque
         };
         self.skip_trivia();
 

@@ -37,6 +37,20 @@ builtin type Scalar 1
 -- | Short alias for `Scalar`.
 builtin type Sca 1
 
+-- Texture & sampler types (opaque resource types)
+-- | 2D texture with element type parameter (e.g. Texture2d F32 → texture_2d<f32>).
+builtin type Texture2d 1
+-- | Multisampled 2D texture with element type parameter.
+builtin type Texture2dMultisampled 1
+-- | 2D texture array with element type parameter.
+builtin type Texture2dArray 1
+-- | Sampler type (filtering).
+builtin type Sampler 0
+-- | Comparison sampler type.
+builtin type SamplerComparison 0
+-- | Runtime-sized binding array with element type and count parameters.
+builtin type BindingArray 2
+
 -- Data types
 
 -- | Optional value.
@@ -718,13 +732,16 @@ extern storageBarrier   : () -> ()
 extern workgroupBarrier : () -> ()
 
 -- Texture operations (compiler-special codegen)
--- Note: Texture types use opaque type names. Full texture support
--- requires additional type-system work for sampler/texture types.
 
-extern textureSample      : a -> b -> Vec<2, F32> -> Vec<4, F32>
-extern textureLoad        : a -> Vec<2, I32> -> I32 -> Vec<4, F32>
-extern textureStore       : a -> Vec<2, I32> -> Vec<4, F32> -> ()
-extern textureDimensions  : a -> Vec<2, U32>
+extern textureSample        : Texture2d F32 -> Sampler -> Vec<2, F32> -> Vec<4, F32>
+extern textureSampleArray   : Texture2dArray F32 -> Sampler -> Vec<2, F32> -> I32 -> Vec<4, F32>
+extern textureLoad          : Texture2d F32 -> Vec<2, I32> -> I32 -> Vec<4, F32>
+extern textureLoadMsaa      : Texture2dMultisampled F32 -> Vec<2, I32> -> I32 -> Vec<4, F32>
+extern textureLoadArray     : Texture2dArray F32 -> Vec<2, I32> -> I32 -> I32 -> Vec<4, F32>
+extern textureStore         : Texture2d F32 -> Vec<2, I32> -> Vec<4, F32> -> ()
+extern textureDimensions    : Texture2d F32 -> Vec<2, U32>
+extern textureDimensionsMsaa : Texture2dMultisampled F32 -> Vec<2, U32>
+extern textureDimensionsArray : Texture2dArray F32 -> Vec<2, U32>
 
 -- Atomic operations (for atomic<u32> / atomic<i32> in storage/workgroup)
 

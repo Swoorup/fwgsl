@@ -53,6 +53,10 @@ pub enum AddressSpace {
     Uniform,
     StorageRead,
     StorageReadWrite,
+    /// `var<immediate>` — push constants (no @group/@binding)
+    Immediate,
+    /// Opaque resource (texture/sampler) — no address space keyword
+    Opaque,
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +106,18 @@ pub enum MirType<'a> {
     Array(&'a MirType<'a>, u32),
     /// `array<T>` (unsized / runtime-sized storage array)
     RuntimeArray(&'a MirType<'a>),
+    /// `texture_2d<f32>`
+    Texture2d(&'a MirType<'a>),
+    /// `texture_multisampled_2d<f32>`
+    Texture2dMultisampled(&'a MirType<'a>),
+    /// `texture_2d_array<f32, N>`
+    Texture2dArray(&'a MirType<'a>),
+    /// `sampler`
+    Sampler,
+    /// `sampler_comparison`
+    SamplerComparison,
+    /// `binding_array<T, N>`
+    BindingArray(&'a MirType<'a>, u32),
     /// The unit type — no WGSL representation (used for void returns).
     Unit,
 }
@@ -118,6 +134,12 @@ impl fmt::Display for MirType<'_> {
             MirType::Struct(name) => write!(f, "{}", name),
             MirType::Array(inner, len) => write!(f, "array<{}, {}>", inner, len),
             MirType::RuntimeArray(inner) => write!(f, "array<{}>", inner),
+            MirType::Texture2d(inner) => write!(f, "texture_2d<{}>", inner),
+            MirType::Texture2dMultisampled(inner) => write!(f, "texture_multisampled_2d<{}>", inner),
+            MirType::Texture2dArray(inner) => write!(f, "texture_2d_array<{}>", inner),
+            MirType::Sampler => write!(f, "sampler"),
+            MirType::SamplerComparison => write!(f, "sampler_comparison"),
+            MirType::BindingArray(inner, count) => write!(f, "binding_array<{}, {}>", inner, count),
             MirType::Unit => write!(f, "void"),
         }
     }
@@ -297,6 +319,13 @@ impl<'a> MirExpr<'a> {
                 let name = arena.alloc_str(&ty.to_string());
                 MirExpr::Call(name, vec![], ty.clone())
             }
+            // Opaque types don't have default values — they are resources
+            MirType::Texture2d(_)
+            | MirType::Texture2dMultisampled(_)
+            | MirType::Texture2dArray(_)
+            | MirType::Sampler
+            | MirType::SamplerComparison
+            | MirType::BindingArray(..) => MirExpr::Lit(MirLit::I32(0)),
             MirType::Unit => MirExpr::Lit(MirLit::I32(0)),
         }
     }

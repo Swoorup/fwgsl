@@ -6,6 +6,22 @@
 
 use shadml_mir::*;
 
+/// Map shadml-internal overloaded texture function names to their WGSL equivalents.
+///
+/// shadml uses distinct names for each overload (e.g. `textureLoadMsaa`)
+/// because the type environment cannot store multiple schemes per name.
+/// WGSL uses the same name for all overloads, resolved by argument types.
+fn wgsl_builtin_name(name: &str) -> &str {
+    match name {
+        "textureSampleArray" => "textureSample",
+        "textureLoadMsaa" => "textureLoad",
+        "textureLoadArray" => "textureLoad",
+        "textureDimensionsMsaa" => "textureDimensions",
+        "textureDimensionsArray" => "textureDimensions",
+        _ => name,
+    }
+}
+
 fn sanitize_identifier(name: &str) -> String {
     // Split into base name and count of trailing primes
     let prime_count = name.chars().rev().take_while(|&c| c == '\'').count();
@@ -257,20 +273,43 @@ impl WgslEmitter {
     // -----------------------------------------------------------------------
 
     fn emit_global(&mut self, g: &MirGlobal) {
-        let addr_space = match g.address_space {
-            AddressSpace::Uniform => "uniform",
-            AddressSpace::StorageRead => "storage, read",
-            AddressSpace::StorageReadWrite => "storage, read_write",
-        };
-        self.write(&format!(
-            "@group({}) @binding({}) var<{}> {}: {};",
-            g.group,
-            g.binding,
-            addr_space,
-            sanitize_identifier(&g.name),
-            self.format_type(&g.ty),
-        ));
-        self.newline();
+        match g.address_space {
+            AddressSpace::Uniform | AddressSpace::StorageRead | AddressSpace::StorageReadWrite => {
+                let addr_space = match g.address_space {
+                    AddressSpace::Uniform => "uniform",
+                    AddressSpace::StorageRead => "storage, read",
+                    AddressSpace::StorageReadWrite => "storage, read_write",
+                    _ => unreachable!(),
+                };
+                self.write(&format!(
+                    "@group({}) @binding({}) var<{}> {}: {};",
+                    g.group,
+                    g.binding,
+                    addr_space,
+                    sanitize_identifier(&g.name),
+                    self.format_type(&g.ty),
+                ));
+                self.newline();
+            }
+            AddressSpace::Immediate => {
+                self.write(&format!(
+                    "var<immediate> {}: {};",
+                    sanitize_identifier(&g.name),
+                    self.format_type(&g.ty),
+                ));
+                self.newline();
+            }
+            AddressSpace::Opaque => {
+                self.write(&format!(
+                    "@group({}) @binding({}) var {}: {};",
+                    g.group,
+                    g.binding,
+                    sanitize_identifier(&g.name),
+                    self.format_type(&g.ty),
+                ));
+                self.newline();
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -394,23 +433,30 @@ impl WgslEmitter {
 
     fn emit_stmt(&mut self, stmt: &MirStmt) {
         match stmt {
-            MirStmt::Let(name, _ty, expr) => {
-                self.write_indent();
-                self.write(&format!("let {} = ", sanitize_identifier(name)));
-                self.emit_expr(expr);
-                self.write(";");
-                self.newline();
+            MirStmt::Let(name, ty, expr) => {
+                // Unit-typed lets are side-effect markers; WGSL has no void type.
+                if !matches!(ty, MirType::Unit) {
+                    self.write_indent();
+                    self.write(&format!("let {} = ", sanitize_identifier(name)));
+                    self.emit_expr(expr);
+                    self.write(";");
+                    self.newline();
+                }
             }
             MirStmt::Var(name, ty, expr) => {
-                self.write_indent();
-                self.write(&format!(
-                    "var {}: {} = ",
-                    sanitize_identifier(name),
-                    self.format_type(ty)
-                ));
-                self.emit_expr(expr);
-                self.write(";");
-                self.newline();
+                // Unit-typed variables are side-effect markers (e.g. from loops on void).
+                // WGSL has no `void` type, so skip the declaration as a safety net.
+                if !matches!(ty, MirType::Unit) {
+                    self.write_indent();
+                    self.write(&format!(
+                        "var {}: {} = ",
+                        sanitize_identifier(name),
+                        self.format_type(ty)
+                    ));
+                    self.emit_expr(expr);
+                    self.write(";");
+                    self.newline();
+                }
             }
             MirStmt::Assign(name, expr) => {
                 self.write_indent();
@@ -440,11 +486,9 @@ impl WgslEmitter {
                     self.emit_stmt(s);
                 }
                 self.indent -= 1;
-                if else_stmts.is_empty() {
-                    self.write_indent();
-                    self.write("}");
-                    self.newline();
-                } else {
+                // Only emit the else clause if there are statements to emit.
+                // Empty else blocks are invalid in WGSL compute entry points.
+                if !else_stmts.is_empty() {
                     self.write_indent();
                     self.write("} else {");
                     self.newline();
@@ -453,6 +497,10 @@ impl WgslEmitter {
                         self.emit_stmt(s);
                     }
                     self.indent -= 1;
+                    self.write_indent();
+                    self.write("}");
+                    self.newline();
+                } else {
                     self.write_indent();
                     self.write("}");
                     self.newline();
@@ -586,12 +634,17 @@ impl WgslEmitter {
                 if is_type_constructor_call(name, ty) {
                     self.write(&self.format_type(ty));
                 } else {
-                    self.write(&sanitize_identifier(name));
+                    self.write(&sanitize_identifier(wgsl_builtin_name(name)));
                 }
                 self.write("(");
+                // arrayLength in WGSL takes a pointer argument: arrayLength(&buf)
+                let needs_addr_of = *name == "arrayLength";
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         self.write(", ");
+                    }
+                    if needs_addr_of && i == 0 {
+                        self.write("&");
                     }
                     self.emit_expr_prec(arg, 0);
                 }

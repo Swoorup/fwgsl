@@ -15,6 +15,35 @@ use shadml_allocator::Allocator;
 use shadml_hir::*;
 use shadml_typechecker::{ty_name, Ty};
 
+/// Map a single swizzle character to its column index (x→0, y→1, z→2, w→3).
+fn swizzle_to_index(c: char) -> Option<usize> {
+    match c {
+        'x' | 'r' => Some(0),
+        'y' | 'g' => Some(1),
+        'z' | 'b' => Some(2),
+        'w' | 'a' => Some(3),
+        _ => None,
+    }
+}
+
+/// Extract Mat type info: Mat rows cols scalar -> Some((rows, cols, scalar))
+fn extract_mat_type(ty: &Ty) -> Option<(u8, u8, Ty)> {
+    if let Ty::App(f, scalar) = &ty {
+        if let Ty::App(g, cols) = f.as_ref() {
+            if let Ty::App(con, rows) = g.as_ref() {
+                if let (Ty::Con(name), Ty::Nat(r), Ty::Nat(c)) =
+                    (con.as_ref(), rows.as_ref(), cols.as_ref())
+                {
+                    if name == ty_name::MAT {
+                        return Some((*r as u8, *c as u8, scalar.as_ref().clone()));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 use crate::*;
 
 /// Bitfield field metadata used during lowering.
@@ -733,6 +762,8 @@ fn ty_to_mir_type_inner<'a>(
             ty_name::F32 => Ok(MirType::F32),
             ty_name::BOOL => Ok(MirType::Bool),
             ty_name::UNIT => Ok(MirType::Unit),
+            ty_name::SAMPLER => Ok(MirType::Sampler),
+            ty_name::SAMPLER_COMPARISON => Ok(MirType::SamplerComparison),
             other => {
                 if let Some(ctx) = ctx {
                     if let Some(mir_ty) = ctx.resolve_type_con(other) {
@@ -751,12 +782,38 @@ fn ty_to_mir_type_inner<'a>(
                 }
             }
             match f.as_ref() {
+                // Texture/sampler types with one type parameter
+                Ty::Con(name) if name == ty_name::TEXTURE_2D => {
+                    let elem = ty_to_mir_type_inner(arena, arg, ctx)?;
+                    Ok(MirType::Texture2d(arena.alloc(elem)))
+                }
+                Ty::Con(name) if name == ty_name::TEXTURE_2D_MS => {
+                    let elem = ty_to_mir_type_inner(arena, arg, ctx)?;
+                    Ok(MirType::Texture2dMultisampled(arena.alloc(elem)))
+                }
+                Ty::Con(name) if name == ty_name::TEXTURE_2D_ARRAY => {
+                    let elem = ty_to_mir_type_inner(arena, arg, ctx)?;
+                    Ok(MirType::Texture2dArray(arena.alloc(elem)))
+                }
                 // Unsized array: Tensor<T> (single application, no Nat dimension)
                 Ty::Con(name) if name == ty_name::TENSOR => {
                     let elem = ty_to_mir_type_inner(arena, arg, ctx)?;
                     Ok(MirType::RuntimeArray(arena.alloc(elem)))
                 }
                 Ty::App(ff, n) => match (ff.as_ref(), n.as_ref()) {
+                    // BindingArray<T, N>: App(App(Con("BindingArray"), T), N)
+                    // Handles both App(App(Con("BindingArray"), Con("T")), Nat(N))
+                    // and App(App(Con("BindingArray"), App(Con("T"), Con("F32"))), Nat(N))
+                    (Ty::Con(name), _) if name == ty_name::BINDING_ARRAY => {
+                        if let Ty::Nat(count) = arg.as_ref() {
+                            let elem = ty_to_mir_type_inner(arena, n, ctx)?;
+                            let count = u32::try_from(*count)
+                                .map_err(|_| format!("BindingArray count out of range: {}", count))?;
+                            Ok(MirType::BindingArray(arena.alloc(elem), count))
+                        } else {
+                            Err(format!("BindingArray expects a natural number count, got: {}", arg))
+                        }
+                    }
                     (Ty::App(fff, nn), Ty::Nat(m)) => {
                         if let (Ty::Con(name), Ty::Nat(n)) = (fff.as_ref(), nn.as_ref()) {
                             if name == ty_name::MAT {
@@ -962,6 +1019,12 @@ fn lower_hir_expr_to_stmts<'a>(
                 return Ok((vec![], select_expr));
             }
 
+            // Unit-typed if-else: no result temp needed, just emit side effects.
+            if result_ty == MirType::Unit {
+                let stmt = MirStmt::If(cond_mir, then_stmts, else_stmts);
+                return Ok((vec![stmt], MirExpr::default_value(ctx.arena, &result_ty)));
+            }
+
             // Complex branches: fall back to var tmp; if (cond) { ... } else { ... }
             let tmp_name = ctx.arena.alloc_str(&format!("_if_tmp_{}", _span.start));
 
@@ -985,28 +1048,42 @@ fn lower_hir_expr_to_stmts<'a>(
 
         HirExpr::Case(scrutinee, arms, ty, _span) => {
             let result_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
-            let tmp_name = ctx.arena.alloc_str(&format!("_case_tmp_{}", _span.start));
+            let is_unit = result_ty == MirType::Unit;
             let scrut_mir = lower_hir_expr(scrutinee, ctx)?;
             let scrut_ty = ty_to_mir_type_with_ctx(scrutinee.ty(), Some(ctx))?;
             let scrut_name = ctx.arena.alloc_str(&format!("_scrut_{}", _span.start));
 
-            let mut stmts = vec![
-                MirStmt::Let(scrut_name, scrut_ty.clone(), scrut_mir),
-                MirStmt::Var(
+            let mut stmts = vec![MirStmt::Let(scrut_name, scrut_ty.clone(), scrut_mir)];
+
+            if !is_unit {
+                let tmp_name = ctx.arena.alloc_str(&format!("_case_tmp_{}", _span.start));
+                stmts.push(MirStmt::Var(
                     tmp_name,
                     result_ty.clone(),
                     MirExpr::default_value(ctx.arena, &result_ty),
-                ),
-            ];
+                ));
 
-            // Build if-else chain from arms
-            let if_chain = lower_case_arms(scrut_name, &scrut_ty, arms, tmp_name, ctx)?;
+                // Build if-else chain from arms
+                let if_chain =
+                    lower_case_arms(scrut_name, &scrut_ty, arms, tmp_name, is_unit, ctx)?;
 
-            if let Some(stmt) = if_chain {
-                stmts.push(stmt);
+                if let Some(stmt) = if_chain {
+                    stmts.push(stmt);
+                }
+
+                Ok((stmts, MirExpr::Var(tmp_name, result_ty)))
+            } else {
+                // Unit-typed match: no result temp needed, just emit side effects.
+                let tmp_name = ctx.arena.alloc_str(""); // unused placeholder
+                let if_chain =
+                    lower_case_arms(scrut_name, &scrut_ty, arms, tmp_name, is_unit, ctx)?;
+
+                if let Some(stmt) = if_chain {
+                    stmts.push(stmt);
+                }
+
+                Ok((stmts, MirExpr::default_value(ctx.arena, &result_ty)))
             }
-
-            Ok((stmts, MirExpr::Var(tmp_name, result_ty)))
         }
 
         // Check for writeAt calls which become IndexAssign statements
@@ -1186,6 +1263,22 @@ fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>,
         }
 
         HirExpr::FieldAccess(inner_expr, field, ty, _span) => {
+            // Matrix column access: mat.x -> mat[0], mat.y -> mat[1], etc.
+            if field.len() == 1 {
+                if let Some((rows, _cols, _scalar)) = extract_mat_type(&inner_expr.ty()) {
+                    if let Some(col_index) = swizzle_to_index(field.chars().next().unwrap()) {
+                        if col_index < _cols as usize {
+                            let mir_expr = lower_hir_expr(inner_expr, ctx)?;
+                            return Ok(MirExpr::Index(
+                                ctx.arena.alloc(mir_expr),
+                                ctx.arena.alloc(MirExpr::Lit(MirLit::U32(col_index as u32))),
+                                MirType::Vec(rows, ctx.arena.alloc(MirType::F32)),
+                            ));
+                        }
+                    }
+                }
+            }
+
             // Check if this is a bitfield field access
             let inner_ty = inner_expr.ty();
             if let Ty::Con(type_name) = inner_ty {
@@ -1776,6 +1869,7 @@ fn lower_case_arms<'a>(
     scrut_ty: &MirType<'a>,
     arms: &[HirCaseArm],
     result_name: &'a str,
+    is_unit: bool,
     ctx: &LowerCtx<'a>,
 ) -> Result<Option<MirStmt<'a>>, String> {
     if arms.is_empty() {
@@ -1796,7 +1890,9 @@ fn lower_case_arms<'a>(
 
             for arm in arms {
                 let (mut body_stmts, body_expr) = lower_hir_expr_to_stmts(&arm.body, ctx)?;
-                body_stmts.push(MirStmt::Assign(result_name, body_expr));
+                if !is_unit {
+                    body_stmts.push(MirStmt::Assign(result_name, body_expr));
+                }
 
                 match &arm.pattern {
                     HirPattern::Lit(HirLit::Int(v)) => {
@@ -1864,7 +1960,9 @@ fn lower_case_arms<'a>(
 
     for arm in arms.iter().rev() {
         let (mut body_stmts, body_expr) = lower_hir_expr_to_stmts(&arm.body, ctx)?;
-        body_stmts.push(MirStmt::Assign(result_name, body_expr));
+        if !is_unit {
+            body_stmts.push(MirStmt::Assign(result_name, body_expr));
+        }
 
         // Lower the optional guard expression.
         // Guard may reference pattern-bound variables, so it must be evaluated
@@ -2124,6 +2222,8 @@ fn lower_hir_binding<'a>(res: &HirBinding, ctx: &LowerCtx<'a>) -> Option<MirGlob
         "Uniform" => AddressSpace::Uniform,
         "StorageRead" => AddressSpace::StorageRead,
         "StorageReadWrite" => AddressSpace::StorageReadWrite,
+        "Immediate" => AddressSpace::Immediate,
+        "Opaque" => AddressSpace::Opaque,
         s if s.contains("Storage") => AddressSpace::StorageReadWrite,
         _ => AddressSpace::Uniform,
     };

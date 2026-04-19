@@ -254,10 +254,16 @@ impl AstLowering {
                                 "Uniform".to_string()
                             }
                             shadml_parser::parser::BindingAddressSpace::StorageRead => {
-                                "Storage".to_string()
+                                "StorageRead".to_string()
                             }
                             shadml_parser::parser::BindingAddressSpace::StorageReadWrite => {
                                 "Storage".to_string()
+                            }
+                            shadml_parser::parser::BindingAddressSpace::Immediate => {
+                                "Immediate".to_string()
+                            }
+                            shadml_parser::parser::BindingAddressSpace::Opaque => {
+                                "Opaque".to_string()
                             }
                         },
                         group: *group,
@@ -2382,6 +2388,28 @@ impl AstLowering {
                             );
                         }
                     }
+
+                    // Matrix column access: mat.x -> Vec<rows, scalar>
+                    if field.len() == 1 {
+                        if let Some((rows, cols, scalar)) = shadml_semantic::extract_mat_type(&expr_ty_final) {
+                            let col_index = shadml_semantic::swizzle_index(field.chars().next().unwrap());
+                            if col_index < cols as usize {
+                                let result_ty = Ty::app(
+                                    Ty::app(Ty::Con(ty_name::VEC.into()), Ty::Nat(rows as u64)),
+                                    scalar,
+                                );
+                                return (
+                                    HirExpr::FieldAccess(
+                                        Box::new(hir_expr),
+                                        field.clone(),
+                                        result_ty.clone(),
+                                        *span,
+                                    ),
+                                    result_ty,
+                                );
+                            }
+                        }
+                    }
                 }
 
                 // 2. Method-call syntax sugar: `x.method` → `method x`
@@ -2457,8 +2485,27 @@ impl AstLowering {
             }
 
             Expr::Index(base, index, span) => {
-                let (hir_base, _base_ty) = self.lower_expr(base, env);
+                let (hir_base, base_ty) = self.lower_expr(base, env);
                 let (hir_index, _idx_ty) = self.lower_expr(index, env);
+                let base_ty_final = self.finalize_resolve(&base_ty);
+
+                // Matrix column indexing: mat[i] -> Vec<rows, scalar>
+                if let Some((rows, _cols, scalar)) = shadml_semantic::extract_mat_type(&base_ty_final) {
+                    let result_ty = Ty::app(
+                        Ty::app(Ty::Con(ty_name::VEC.into()), Ty::Nat(rows as u64)),
+                        scalar,
+                    );
+                    return (
+                        HirExpr::Index(
+                            Box::new(hir_base),
+                            Box::new(hir_index),
+                            result_ty.clone(),
+                            *span,
+                        ),
+                        result_ty,
+                    );
+                }
+
                 let result_ty = self.engine.fresh_var();
                 (
                     HirExpr::Index(

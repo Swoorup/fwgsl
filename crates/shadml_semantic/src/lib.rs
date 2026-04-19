@@ -1833,6 +1833,28 @@ impl SemanticAnalyzer {
                             }
                         }
                     }
+
+                    // Matrix column access: mat.x -> Vec<rows, scalar> (single-char swizzle)
+                    if field.len() == 1 {
+                        if let Some((rows, cols, scalar)) = extract_mat_type(&base_ty) {
+                            let col_index = swizzle_index(field.chars().next().unwrap());
+                            if col_index < cols as usize {
+                                return Ty::app(
+                                    Ty::app(Ty::Con(ty_name::VEC.into()), Ty::Nat(rows as u64)),
+                                    scalar,
+                                );
+                            } else {
+                                self.engine.diagnostics.push(
+                                    Diagnostic::error(format!(
+                                        "column index '{}' out of bounds for mat{}{}",
+                                        field, rows, cols
+                                    ))
+                                    .with_label(Label::primary(*span, "out of bounds column access")),
+                                );
+                                return Ty::Error;
+                            }
+                        }
+                    }
                 }
 
                 // Method-call syntax sugar: `x.method` → `method x`
@@ -1903,8 +1925,18 @@ impl SemanticAnalyzer {
             }
 
             Expr::Index(base, index, _span) => {
-                let _ = self.infer_expr(base, env, active_constraints);
+                let base_ty = self.infer_expr(base, env, active_constraints);
+                let base_ty = self.engine.finalize(&base_ty);
                 let _ = self.infer_expr(index, env, active_constraints);
+
+                // Matrix column indexing: mat[i] -> Vec<rows, scalar>
+                if let Some((rows, _cols, scalar)) = extract_mat_type(&base_ty) {
+                    return Ty::app(
+                        Ty::app(Ty::Con(ty_name::VEC.into()), Ty::Nat(rows as u64)),
+                        scalar,
+                    );
+                }
+
                 self.engine.fresh_var()
             }
 
@@ -2540,7 +2572,7 @@ pub fn is_swizzle(field: &str) -> bool {
 }
 
 /// Get the component index for a swizzle character.
-fn swizzle_index(c: char) -> usize {
+pub fn swizzle_index(c: char) -> usize {
     match c {
         'x' | 'r' => 0,
         'y' | 'g' => 1,
