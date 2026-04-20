@@ -1,6 +1,6 @@
 # shadml Language Specification
 
-**Version:** 0.1.0
+**Version:** 0.2.0
 **Status:** Working draft
 
 shadml is a purely functional language that compiles to WGSL (WebGPU Shading Language). It provides Haskell-inspired syntax with indentation-sensitive layout, Hindley-Milner type inference, algebraic data types, pattern matching, and traits — all targeting the GPU via WGSL code generation.
@@ -53,6 +53,7 @@ module  where   import  data    alias   extern  uniform  storage
 trait   impl    let     in      case    of      match
 if      then    else    do      forall  infixl  infixr
 infix   deriving  bitfield  const  loop  as  when  cfg
+builtin  type  Self  immediate
 ```
 
 ### 1.4 Integer Literals
@@ -241,7 +242,7 @@ alias Vec4f = Vec<4, F32>
 alias MyArray = Array<F32, 10>
 ```
 
-Type aliases are expanded during semantic analysis. The `alias` keyword is the only way to declare type aliases (`type` and `newtype` are not supported).
+Type aliases are expanded during semantic analysis. The `alias` keyword is the only way to declare type aliases (`newtype` is not supported). The `type` keyword is reserved for associated type declarations within trait and impl bodies.
 Capitalized names in type position are not implicit aliases: if you want a shorthand like `Vec3F`, write `alias Vec3F = Vec<3, F32>` explicitly.
 
 ### 3.9 Type Variables
@@ -256,17 +257,56 @@ identity x = x
 
 ### 3.10 Binding Address Spaces
 
-Binding declarations use `uniform` or `storage` keywords to specify the address space:
+Binding declarations use an address space keyword to specify the storage class:
+
+| Address Space | WGSL | Description |
+|--------------|------|-------------|
+| `uniform` | `var<uniform>` | Uniform buffer (read-only) |
+| `storage` | `var<storage>` | Storage buffer (read-only, default) |
+| `storage(read)` | `var<storage, read>` | Storage buffer (explicit read-only) |
+| `storage(read_write)` | `var<storage, read_write>` | Storage buffer (read-write) |
+| `immediate` | `var<immediate>` | Push constants (small read-only data passed per-draw) |
+| *(bare name)* | `var` | Opaque handle (textures, samplers, binding arrays) |
+
+When a `@group` / `@binding` declaration omits all address space keywords, the binding is an **opaque handle** (`BindingAddressSpace::Opaque`). This is the correct form for textures, samplers, and binding arrays — WGSL resources that are not buffers:
 
 ```
-uniform       -- Uniform buffer (read-only)
-storage       -- Storage buffer (read-only, default)
-storage(read_write) -- Storage buffer (read-write)
+@group(0) @binding(0) myTexture  : Texture2d F32        -- opaque
+@group(0) @binding(1) mySampler : Sampler              -- opaque
+@group(0) @binding(2) uniform   frameData : FrameData  -- uniform buffer
+@group(0) @binding(3) immediate params : PushConstants  -- push constants
 ```
 
 The inner type `T` is stored directly — no wrapper types are needed.
 
-### 3.11 Dependent Dimensions (Nat)
+### 3.11 Texture Types
+
+```
+Texture2d F32            -- 2D texture → texture_2d<f32>
+Texture2dMultisampled F32 -- 2D multisampled texture → texture_2d<f32>
+Texture2dArray F32       -- 2D texture array → texture_2d_array<f32, num>
+```
+
+Texture types are declared as `builtin type` in the prelude. They take a single type parameter (the sample type, always `F32` in current WGSL). `Texture2dArray` additionally carries an array size via type application.
+
+### 3.12 Sampler Types
+
+```
+Sampler              -- sampler → sampler
+SamplerComparison    -- comparison sampler → sampler_comparison
+```
+
+Sampler types are declared as `builtin type` in the prelude. They take no type parameters.
+
+### 3.13 Binding Array Type
+
+```
+BindingArray T N     -- e.g. BindingArray (Texture2d F32) 8 → binding_array<texture_2d<f32>, 8>
+```
+
+Binding arrays group multiple resources of the same type under a single binding slot. They are declared as `builtin type` in the prelude with arity 2. `T` is the element type (typically a texture or sampler) and `N` is the array size.
+
+### 3.14 Dependent Dimensions (Nat)
 
 Natural number literals in type position (`2`, `3`, `4`) are `Ty::Nat` values used for vector/matrix/array dimensions:
 
@@ -301,7 +341,7 @@ lighting : Light a => a -> Vec<3, F32> -> Vec<3, F32>
 The constraint head may contain multiple type arguments:
 
 ```
-scale : Mul (Vec 3 F32) F32 (Vec 3 F32) => Vec 3 F32 -> F32 -> Vec 3 F32
+scale : Mul (Vec 3 F32) F32 => Vec 3 F32 -> F32 -> (Mul (Vec 3 F32) F32).Output
 ```
 
 Trait-origin calls participate in ordinary type inference. If a top-level
@@ -447,20 +487,86 @@ extern sin : a -> a
 extern vec2 : a -> a -> Vec<2, a>
 ```
 
-### 4.8 Binding Declarations
+### 4.8 Builtin Declarations
+
+The `builtin` keyword introduces compiler-internal declarations that are not user-definable but are needed for the prelude to wire up WGSL primitives.
+
+#### 4.8.1 Builtin Type Declarations
+
+```
+builtin type Name Arity
+```
+
+Declares a compiler-recognized type constructor with its arity (number of type parameters). These types are not `data` declarations — they have no constructors in the shadml sense. Instead, they are opaque types that map directly to WGSL built-in types:
+
+```
+builtin type Vec 2
+builtin type Texture2d 1
+builtin type Sampler 0
+builtin type BindingArray 2
+```
+
+The prelude uses this mechanism to register `Vec`, `Mat`, `Texture2d`, `Texture2dMultisampled`, `Texture2dArray`, `Sampler`, `SamplerComparison`, `BindingArray`, `Scalar`, and others.
+
+#### 4.8.2 Builtin Extern Declarations
+
+```
+builtin extern name : Type = lowering
+```
+
+Declares a built-in extern with a lowering specification that tells the compiler how to emit the function in WGSL. The `lowering` specification has three forms:
+
+| Form | Description | Example |
+|------|-------------|---------|
+| `native_binop (+)` | Binary operator in WGSL | `builtin extern (+) : ... = native_binop (+)` |
+| `native_unary (-)` | Unary operator in WGSL | `builtin extern negate : ... = native_unary (-)` |
+| `intrinsic sin` | WGSL builtin function | `builtin extern sin : ... = intrinsic sin` |
+
+`native_binop` and `native_unary` lower to WGSL operator syntax. `intrinsic` lowers to a WGSL builtin function call.
+
+#### 4.8.3 Builtin Impl Declarations
+
+```
+builtin impl TraitName T1 ... Tn where
+  type AssocType = ConcreteType;
+  methodName = lowering
+```
+
+Declares a built-in trait implementation with associated type definitions and lowering specifications. Used in the prelude to wire primitive types to operator traits:
+
+```
+builtin impl Add F32 F32 where
+  type Output = F32;
+  (+) = native_binop (+)
+
+builtin impl Neg F32 where
+  type Output = F32;
+  negate = native_unary (-)
+```
+
+The `lowering` specifications use the same forms as `builtin extern`: `native_binop`, `native_unary`, and `intrinsic`.
+
+### 4.9 Binding Declarations
 
 ```
 @group(G) @binding(B) uniform name : T
 @group(G) @binding(B) storage name : T
+@group(G) @binding(B) storage(read) name : T
 @group(G) @binding(B) storage(read_write) name : T
+@group(G) @binding(B) immediate name : T
+@group(G) @binding(B) name : T
 ```
 
-Declares a GPU resource binding. The address space is specified by `uniform` or `storage` keywords.
+Declares a GPU resource binding. The address space is specified by `uniform`, `storage`, or `immediate` keywords.
 Bare `storage` defaults to read-only access (consistent with WGSL). Use `storage(read_write)` for read-write access.
+Use `immediate` for push constants — small read-only data passed per-draw/dispatch call.
+When no address space keyword is present, the binding is an **opaque handle** (used for textures, samplers, and binding arrays).
 
 ```
 @group(0) @binding(0) uniform             frame     : FrameData
 @group(1) @binding(0) storage(read_write) particles : Array<Particle>
+@group(2) @binding(0)                     myTexture : Texture2d F32
+@group(0) @binding(0) immediate           params    : PushConstants
 ```
 
 #### Group Block Sugar
@@ -472,19 +578,24 @@ When multiple bindings share a group, the group can be specified once with inden
   @binding(0) uniform             frame     : FrameData
   @binding(1) uniform             params    : DrawParams
   @binding(2) storage(read_write) output    : Array<Vec<4, F32>, 64>
+@group(1)
+  @binding(0) myTexture  : Texture2d F32
+  @binding(1) mySampler  : Sampler
+@group(0)
+  @binding(3) immediate params : PushConstants
 ```
 
-This is equivalent to writing `@group(0)` on each line. The indented bindings inherit the group number.
+This is equivalent to writing the `@group` on each line. The indented bindings inherit the group number.
 
-### 4.9 Trait Declarations
-
-See [Section 9: Traits](#9-traits-and-implementations).
-
-### 4.10 Impl Declarations
+### 4.10 Trait Declarations
 
 See [Section 9: Traits](#9-traits-and-implementations).
 
-### 4.11 Entry Point Declarations
+### 4.11 Impl Declarations
+
+See [Section 9: Traits](#9-traits-and-implementations).
+
+### 4.12 Entry Point Declarations
 
 Entry points are function declarations preceded by stage attributes:
 
@@ -506,7 +617,7 @@ Additional attributes: `@workgroup_size(x, y, z)`
 
 A type signature is required before the entry point definition.
 
-### 4.12 Module Declarations
+### 4.13 Module Declarations
 
 ```
 module Name.Path
@@ -514,7 +625,7 @@ module Name.Path
 
 Optional header. If absent, the module name is derived from the file path. See [Section 10: Module System](#10-module-system).
 
-### 4.13 Import Declarations
+### 4.14 Import Declarations
 
 ```
 import Foo
@@ -765,7 +876,19 @@ The swizzle length determines the result type:
 - 1 component → scalar
 - 2+ components → vector of that length
 
-### 5.17 Method-Call Syntax Sugar
+### 5.17 Matrix Column Access
+
+Single-character swizzle names on matrices (`mat.x`, `mat.y`, `mat.z`, `mat.w`) access the corresponding **column** as a vector:
+
+```
+mat.x             -- first column → Vec<rows, scalar>
+mat.y             -- second column → Vec<rows, scalar>
+mat[i]            -- index access also returns Vec<rows, scalar>
+```
+
+For a `Mat<R, C, T>`, column access returns `Vec<R, T>`. In the MIR, `.x`/`.y` on matrices are lowered to index access with a literal column index (0, 1, 2, 3).
+
+### 5.18 Method-Call Syntax Sugar
 
 ```
 x.method y      -- desugars to: method x y
@@ -778,21 +901,21 @@ Dot syntax is defined as **receiver-first call sugar**, not as a separate dispat
 
 Priority: **swizzle** > **matching impl method** > **in-scope function call** > **struct field access**.
 
-### 5.18 Index Access
+### 5.19 Index Access
 
 ```
 arr[i]
 buffer[toU32 idx]
 ```
 
-### 5.19 Vec Literals
+### 5.20 Vec Literals
 
 ```
 [1.0, 2.0, 3.0]    -- desugars to: vec3 1.0 2.0 3.0
 [x, y]              -- desugars to: vec2 x y
 ```
 
-### 5.20 Parenthesized Expressions
+### 5.21 Parenthesized Expressions
 
 ```
 (x + y)
@@ -800,7 +923,7 @@ buffer[toU32 idx]
 (-expr)             -- negation (not operator section)
 ```
 
-### 5.20 Backtick Infix
+### 5.22 Backtick Infix
 
 ```
 a `max` b           -- desugars to: max a b
@@ -808,7 +931,7 @@ a `max` b           -- desugars to: max a b
 
 Any function can be used as an infix operator by enclosing it in backticks.
 
-### 5.21 Dollar Application
+### 5.23 Dollar Application
 
 ```
 f $ g x             -- desugars to: f (g x)
@@ -980,9 +1103,23 @@ shadml uses a constraint-based Hindley-Milner type inference engine:
 - `App(f1, a1)` unifies with `App(f2, a2)` by unifying components
 - `Tuple(elems1)` unifies with `Tuple(elems2)` if lengths match, by unifying elements
 - `Nat(a)` unifies with `Nat(b)` only if `a == b`
+- `AssocProj` unifies with any type (permissive — resolution is deferred to predicate solving)
 - `Error` unifies with anything (error recovery)
 
-### 8.3 Type Constructor Normalization
+### 8.3 Associated Type Projections
+
+Associated type projections appear in type positions and are resolved to concrete types by looking up matching trait implementations:
+
+```
+(Add F32 F32).Output     -- projects the Output associated type of Add for F32 and F32
+(Self.Output)            -- within a trait body, refers to the trait's own Output
+```
+
+Internally, the type system represents these as `Ty::AssocProj { trait_params, name, trait_name }`. During type inference, `AssocProj` unifies permissively with any type. Concrete resolution happens during predicate solving — when a matching `impl` is found, the projection is replaced with the concrete type defined in that impl.
+
+Ambiguous projections (where no impl can be found or multiple impls match) emit a diagnostic: "ambiguous associated type `.X`".
+
+### 8.4 Type Constructor Normalization
 
 Surface type names are normalized to canonical forms:
 
@@ -994,7 +1131,7 @@ Surface type names are normalized to canonical forms:
 | `Sca`, `Scalar` | `Scalar` (identity: `Scalar F32` = `F32`) |
 | `Options`, `Option` | `Option` |
 
-### 8.4 Type Schemes
+### 8.5 Type Schemes
 
 Polymorphic types are represented as schemes with quantified variables:
 
@@ -1005,7 +1142,7 @@ Scheme { vars: [0], ty: Arrow(Var(0), Var(0)) }
 
 Each time a polymorphic name is used, its scheme is instantiated with fresh type variables, enabling type-safe reuse.
 
-### 8.5 Constructor Types
+### 8.6 Constructor Types
 
 Data type constructors are assigned types during registration:
 
@@ -1031,34 +1168,41 @@ data Point = Point { x : F32, y : F32 }
 
 ```
 trait TraitName t1 ... tn where
+  type AssocTypeName
   methodName : type
   ...
 ```
 
-Traits define interfaces with method signatures:
+Traits define interfaces with method signatures and optional associated type declarations. Associated types are declared with the `type` keyword inside the trait body and referenced via `Self.TypeName` within method signatures:
 
 ```
-trait Add a b c where
-  (+) : a -> b -> c
+trait Add a b where
+  type Output
+  (+) : a -> b -> Self.Output
 ```
+
+Binary operator traits use associated types to describe their result type. The `Self` keyword refers to the trait itself within the trait body, so `Self.Output` means "the `Output` associated type of this trait instance."
 
 ### 9.2 Trait Implementation
 
 ```
 impl TraitName T1 ... Tn where
-  methodName : T1 -> ...
+  type AssocTypeName = ConcreteType;
   methodName args = body
   ...
 ```
 
-Example:
+Implementations must provide concrete types for all associated type declarations, followed by method definitions:
 
 ```
-impl Add Fp64 Fp64 Fp64 where
+impl Add Fp64 Fp64 where
+  type Output = Fp64;
   (+) a b =
     let s = twoSum a.high b.high
     in quickTwoSum (s.high, s.low + a.low + b.low)
 ```
+
+Associated type definitions use `type Name = Type;` syntax with a semicolon terminator.
 
 ### 9.3 Standalone Implementations
 
@@ -1107,66 +1251,123 @@ with a diagnostic in the spirit of:
 Trait impl heads must be concrete: blanket impls like `impl Convert ...` are not supported
 ```
 
-### 9.4 Operator Overloading
+### 9.4 Associated Type Projections
+
+Outside of trait bodies, associated types are referenced using dot-projection syntax on the trait parameters:
+
+```
+(Add a b).Output       -- the Output of Add for types a and b
+(Add F32 F32).Output    -- resolves to F32
+(Add Vec3 F32).Output   -- resolves to Vec3
+```
+
+The type system represents these as `Ty::AssocProj { trait_params, name, trait_name }`. During inference, `AssocProj` unifies permissively with any type. Resolution occurs during predicate solving — when a matching `impl` is found, the projection is replaced with the concrete type.
+
+Within trait bodies, `Self.TypeName` is used to reference the trait's own associated types.
+
+### 9.5 Operator Overloading
 
 **Arithmetic operator traits:** `Add` (`+`), `Sub` (`-`), `Mul` (`*`), `Div` (`/`), `Mod` (`%`).
 
 **Bitwise operator traits:** `BitAnd` (`&`), `BitXor` (`^`), `Shl` (`<<`), `Shr` (`shr`), `BitNot` (`bitnot`), `Neg` (`negate`).
 
-Operators on primitive types (I32, U32, F32) use native WGSL operators. Operators on user-defined types dispatch through trait implementations:
+Binary operator traits use **associated types** for their result type. The prelude defines them as:
 
 ```
-impl Add Fp64 Fp64 Fp64 where
+trait Add a b where
+  type Output
+  (+) : a -> b -> Self.Output
+
+trait Sub a b where
+  type Output
+  (-) : a -> b -> Self.Output
+
+trait Mul a b where
+  type Output
+  (*) : a -> b -> Self.Output
+
+trait Div a b where
+  type Output
+  (/) : a -> b -> Self.Output
+
+trait Mod a b where
+  type Output
+  (%) : a -> b -> Self.Output
+
+trait BitAnd a b where
+  type Output
+  (&) : a -> b -> Self.Output
+
+trait BitXor a b where
+  type Output
+  (^) : a -> b -> Self.Output
+
+trait Shl a b where
+  type Output
+  (<<) : a -> b -> Self.Output
+
+trait Shr a b where
+  type Output
+  shr : a -> b -> Self.Output
+```
+
+Unary operator traits use a single parameter:
+
+```
+trait BitNot a where
+  type Output
+  bitnot : a -> Self.Output
+
+trait Neg a where
+  type Output
+  negate : a -> Self.Output
+```
+
+Operators on primitive types (I32, U32, F32) use native WGSL operators via `builtin impl` declarations. Operators on user-defined types dispatch through trait implementations:
+
+```
+impl Add Fp64 Fp64 where
+  type Output = Fp64;
   (+) a b = ...
 
 -- Now x + y where x, y : Fp64 calls the trait method
 
-impl BitAnd Mask Mask Mask where
+impl BitAnd Mask Mask where
+  type Output = Mask;
   (&) a b = Mask { bits = a.bits & b.bits }
 
 -- Now a & b where a, b : Mask calls bitand_Mask
 
 impl BitNot Mask where
+  type Output = Mask;
   bitnot a = Mask { bits = ~a.bits }
 
 -- Now ~a where a : Mask calls bitnot_Mask
 
 impl Neg Wrapper where
+  type Output = Wrapper;
   negate a = Wrapper { val = -a.val }
 
 -- Now -a where a : Wrapper calls negate_Wrapper
 ```
 
+The associated type design allows heterogeneous operator relations while keeping the trait parameter list focused on operand types. The result type is determined by the impl:
+
+```
+-- Vec * scalar → Vec
+impl Mul (Vec 3 F32) F32 where
+  type Output = Vec 3 F32;
+  (*) v s = v * splat3 s
+
+-- scalar * Vec → Vec
+impl Mul F32 (Vec 3 F32) where
+  type Output = Vec 3 F32;
+  (*) s v = splat3 s * v
+```
+
 The operator method syntax uses parenthesized operator names: `(+)`, `(-)`, `(*)`, `(&)`, `(^)`, `(<<)`, etc. Non-operator trait methods like `shr`, `bitnot`, and `negate` use plain names.
 
-The working implementation models binary operator traits as **multi-parameter
-traits**. This allows the language to express heterogeneous relations such as:
-
-```
-Vec<n, a> * a -> Vec<n, a>
-a * Vec<n, a> -> Vec<n, a>
-Mat<r, c, a> * Vec<c, a> -> Vec<r, a>
-```
-
-WGSL supports several such heterogeneous arithmetic forms, but shadml
-describes them at the trait level first and only then lowers resolved builtin
-cases to WGSL operators or helper expansion.
-
-The operator traits have the shape:
-
-```
-trait Add a b c where (+) : a -> b -> c
-trait Sub a b c where (-) : a -> b -> c
-trait Mul a b c where (*) : a -> b -> c
-trait Div a b c where (/) : a -> b -> c
-trait Mod a b c where (%) : a -> b -> c
-trait BitAnd a b c where (&) : a -> b -> c
-trait BitXor a b c where (^) : a -> b -> c
-trait Shl a b c where (<<) : a -> b -> c
-trait Shr a b c where shr : a -> b -> c
-```
-
-### 9.5 Dispatch Mechanism
+### 9.6 Dispatch Mechanism
 
 Generic functions that use trait-dispatched operations may infer predicates
 during expression typing. For example:
@@ -1178,13 +1379,13 @@ add x y = x + y
 infers a constrained type in the shape:
 
 ```
-add : Add a b c => a -> b -> c
+add : Add a b => a -> b -> (Add a b).Output
 ```
 
 For top-level bindings, such constrained types must be written explicitly:
 
 ```
-add : Add a b c => a -> b -> c
+add : Add a b => a -> b -> (Add a b).Output
 add x y = x + y
 ```
 
@@ -1200,6 +1401,8 @@ Local `let` / `where` bindings may retain inferred constrained schemes without
 an explicit signature in the current design.
 
 Trait dispatch is **fully static** — no vtables or runtime dispatch. Impl methods are compiled as regular functions with mangled names (e.g., `add_Fp64`). At trait resolution time, `Var(method)` is rewritten to `Var(mangled_name)` based on the resolved type of the operands.
+
+Associated type projections are resolved during lowering. When a concrete impl is found, `(Add T1 T2).Output` is replaced by the concrete type defined in the impl's `type Output = ...` definition.
 
 Trait impl resolution uses the fully resolved concrete **full impl head** and
 requires an exact match. There is no partial-ordering rule between impls
@@ -1502,6 +1705,10 @@ fn fsMain(input: VertexOutput) -> @location(0) vec4<f32> { ... }
 ```
 @group(G) @binding(B) uniform             name : T
 @group(G) @binding(B) storage(read_write) name : Array<T>
+@group(G) @binding(B) storage              name : Array<T>
+@group(G) @binding(B) immediate            name : T
+@group(G) @binding(B)                      name : Texture2d F32
+@group(G) @binding(B)                      name : Sampler
 ```
 
 Compiles to WGSL:
@@ -1509,9 +1716,65 @@ Compiles to WGSL:
 ```wgsl
 @group(G) @binding(B) var<uniform> name: T;
 @group(G) @binding(B) var<storage, read_write> name: array<T>;
+@group(G) @binding(B) var<storage, read> name: array<T>;
+@group(G) @binding(B) var<immediate> name: T;
+@group(G) @binding(B) var name: texture_2d<f32>;
+@group(G) @binding(B) var name: sampler;
 ```
 
-### 13.5 Resource Operations
+### 13.5 Push Constants (Immediates)
+
+The `immediate` address space maps to WGSL `var<immediate>`, providing small read-only data passed per-draw or per-dispatch call. This is shadml's equivalent of WebGPU push constants:
+
+```
+data PushConstants = PushConstants {
+  color : Vec<4, F32>,
+  time  : F32,
+}
+
+@group(0) @binding(0) immediate imm : PushConstants
+
+main : ComputeInput -> ()
+@compute @workgroup_size(64, 1, 1)
+main input =
+  let color = imm.color
+  in ...
+```
+
+Compiles to:
+
+```wgsl
+struct PushConstants {
+  color : vec4<f32>,
+  time  : f32,
+}
+
+var<immediate> imm : PushConstants;
+```
+
+Push constant size limits and alignment follow the WebGPU/WGSL specification for the `immediate` address space.
+
+### 13.6 Texture and Sampler Bindings
+
+Textures and samplers use the opaque binding address space (no keyword before the name):
+
+```
+@group(0) @binding(0) myTexture  : Texture2d F32
+@group(0) @binding(1) mySampler  : Sampler
+@group(0) @binding(2) myTexArray : BindingArray (Texture2d F32) 8
+@group(0) @binding(3) mySampArray : BindingArray Sampler 4
+```
+
+Compiles to:
+
+```wgsl
+@group(0) @binding(0) var myTexture: texture_2d<f32>;
+@group(0) @binding(1) var mySampler: sampler;
+@group(0) @binding(2) var myTexArray: binding_array<texture_2d<f32>, 8>;
+@group(0) @binding(3) var mySampArray: binding_array<sampler, 4>;
+```
+
+### 13.7 Resource Operations
 
 | shadml | WGSL | Description |
 |-------|------|-------------|
@@ -1536,26 +1799,55 @@ data Pair a b = Pair a b
 
 **Arithmetic:**
 ```
-trait Add a b c where (+) : a -> b -> c
-trait Sub a b c where (-) : a -> b -> c
-trait Mul a b c where (*) : a -> b -> c
-trait Div a b c where (/) : a -> b -> c
-trait Mod a b c where (%) : a -> b -> c
+trait Add a b where
+  type Output
+  (+) : a -> b -> Self.Output
+
+trait Sub a b where
+  type Output
+  (-) : a -> b -> Self.Output
+
+trait Mul a b where
+  type Output
+  (*) : a -> b -> Self.Output
+
+trait Div a b where
+  type Output
+  (/) : a -> b -> Self.Output
+
+trait Mod a b where
+  type Output
+  (%) : a -> b -> Self.Output
 ```
 
 **Bitwise:**
 ```
-trait BitAnd a b c where (&) : a -> b -> c
-trait BitXor a b c where (^) : a -> b -> c
-trait Shl a b c where (<<) : a -> b -> c
-trait Shr a b c where shr : a -> b -> c
-trait BitNot a where bitnot : a -> a
-trait Neg a where negate : a -> a
+trait BitAnd a b where
+  type Output
+  (&) : a -> b -> Self.Output
+
+trait BitXor a b where
+  type Output
+  (^) : a -> b -> Self.Output
+
+trait Shl a b where
+  type Output
+  (<<) : a -> b -> Self.Output
+
+trait Shr a b where
+  type Output
+  shr : a -> b -> Self.Output
+
+trait BitNot a where
+  type Output
+  bitnot : a -> Self.Output
+
+trait Neg a where
+  type Output
+  negate : a -> Self.Output
 ```
 
-These are the current prelude-facing forms. They allow the semantic layer to
-represent heterogeneous operator relations before lowering them to builtin
-WGSL arithmetic or user-defined impl calls.
+Binary operator traits take two type parameters (the operand types) and declare an associated `Output` type. Unary operator traits take one type parameter. This allows heterogeneous operator relations while keeping the result type determined by the implementation.
 
 ### 14.3 Arithmetic Operators
 
@@ -1613,6 +1905,7 @@ extern foldRange : I32 -> I32 -> a -> (a -> I32 -> a) -> a
 
 ```
 sin  cos  abs  fract  floor  sign  sqrt  log  log2  exp  ceil  round  trunc  negate
+saturate  inverseSqrt  asin  acos  sinh  cosh  tanh  asinh  acosh  atanh
 ```
 
 All have type `a -> a`.
@@ -1620,10 +1913,10 @@ All have type `a -> a`.
 ### 14.9 Math Functions (Binary)
 
 ```
-max  min  step  mod  pow  reflect  atan  atan2
+max  min  step  mod  pow  reflect  atan  atan2  ldexp
 ```
 
-All have type `a -> a -> a`.
+All have type `a -> a -> a` except `ldexp` (which takes a scalar and an integer exponent).
 
 ### 14.10 Math Functions (Ternary)
 
@@ -1631,6 +1924,7 @@ All have type `a -> a -> a`.
 clamp     : a -> a -> a -> a
 mix       : a -> a -> b -> a
 smoothstep : a -> a -> b -> a
+fma       : a -> a -> a -> a
 ```
 
 ### 14.11 Vector Operations
@@ -1642,16 +1936,37 @@ dot       : Vec<n, a> -> Vec<n, a> -> a
 distance  : Vec<n, a> -> Vec<n, a> -> a
 cross     : Vec<3, a> -> Vec<3, a> -> Vec<3, a>
 select    : a -> a -> Bool -> a
+faceForward : Vec<n, a> -> Vec<n, a> -> Vec<n, a> -> Vec<n, a>
+refract   : Vec<n, a> -> Vec<n, a> -> a -> Vec<n, a>
 ```
 
-### 14.12 Packing / Unpacking
+### 14.12 Vector Component Access
 
 ```
-unpack4x8unorm : U32 -> Vec<4, F32>
-pack4x8unorm   : Vec<4, F32> -> U32
+vecX : Vec<n, a> -> a
+vecY : Vec<n, a> -> a
+vecZ : Vec<n, a> -> a
+vecW : Vec<n, a> -> a
 ```
 
-### 14.13 Vector Constructors
+Extract the x/y/z/w component of a vector.
+
+### 14.13 Packing / Unpacking
+
+```
+unpack4x8unorm   : U32 -> Vec<4, F32>
+pack4x8unorm     : Vec<4, F32> -> U32
+unpack4x8snorm   : U32 -> Vec<4, F32>
+pack4x8snorm     : Vec<4, F32> -> U32
+unpack2x16float  : U32 -> Vec<2, F32>
+pack2x16float    : Vec<2, F32> -> U32
+unpack2x16unorm  : U32 -> Vec<2, F32>
+pack2x16unorm    : Vec<2, F32> -> U32
+unpack2x16snorm  : U32 -> Vec<2, F32>
+pack2x16snorm    : Vec<2, F32> -> U32
+```
+
+### 14.14 Vector Constructors
 
 ```
 vec2 : a -> a -> Vec<2, a>
@@ -1662,7 +1977,7 @@ splat3 : a -> Vec<3, a>
 splat4 : a -> Vec<4, a>
 ```
 
-### 14.14 Fragment Shader Derivatives
+### 14.15 Fragment Shader Derivatives
 
 ```
 dpdx  dpdy  dpdxCoarse  dpdxFine  dpdyCoarse  dpdyFine  fwidth  fwidthCoarse  fwidthFine
@@ -1670,7 +1985,7 @@ dpdx  dpdy  dpdxCoarse  dpdxFine  dpdyCoarse  dpdyFine  fwidth  fwidthCoarse  fw
 
 All have type `a -> a`.
 
-### 14.15 Type Cast Builtins
+### 14.16 Type Cast Builtins
 
 | shadml | WGSL | Type |
 |-------|------|------|
@@ -1679,12 +1994,74 @@ All have type `a -> a`.
 | `toU32 x` | `u32(x)` | `a -> U32` |
 | `toBool x` | `bool(x)` | `a -> Bool` |
 
-### 14.16 Resource Operations
+### 14.17 Resource Operations
 
 | shadml | Behavior |
 |-------|----------|
 | `load x` | Identity (reads resource value) |
 | `writeAt buf idx val` | `buf[idx] = val` |
+
+### 14.18 Angle Conversion
+
+```
+radians : a -> a    -- degrees to radians
+degrees : a -> a    -- radians to degrees
+```
+
+### 14.19 Integer Bit Operations
+
+```
+countOneBits         : a -> a    -- counts set bits (popcount)
+countLeadingZeros    : a -> a    -- counts leading zero bits
+countTrailingZeros  : a -> a    -- counts trailing zero bits
+reverseBits          : a -> a    -- reverses bits
+firstTrailingBit    : a -> a    -- finds first trailing set bit
+firstLeadingBit     : a -> a    -- finds first leading set bit
+extractBits          : a -> a -> a -> a    -- extracts bit field
+insertBits           : a -> a -> a -> a -> a    -- inserts bit field
+```
+
+### 14.20 Synchronization Barriers
+
+```
+storageBarrier   : () -> ()    -- storageBarrier() in WGSL
+workgroupBarrier : () -> ()    -- workgroupBarrier() in WGSL
+```
+
+### 14.21 Texture Operations
+
+| shadml | WGSL | Type |
+|-------|------|------|
+| `textureSample t s coords` | `textureSample(t, s, coords)` | Texture sampling |
+| `textureSampleArray t s coords idx` | `textureSample(t, s, coords, idx)` | Texture array sampling |
+| `textureLoad t coords` | `textureLoad(t, coords)` | Texel read (no sampler) |
+| `textureLoadMsaa t coords sample` | `textureLoad(t, coords, sample)` | Multisampled texel read |
+| `textureLoadArray t coords idx` | `textureLoad(t, vec3(coords, idx))` | Texture array texel read |
+| `textureStore t coords val` | `textureStore(t, coords, val)` | Write texel |
+| `textureDimensions t` | `textureDimensions(t)` | Texture size |
+| `textureDimensionsMsaa t` | `textureDimensions(t)` | Multisampled texture size |
+| `textureDimensionsArray t` | `textureDimensions(t)` | Texture array size |
+
+### 14.22 Atomic Operations
+
+```
+atomicLoad    : a -> a                 -- atomic load
+atomicStore   : a -> a -> ()           -- atomic store
+atomicAdd     : a -> a -> a            -- atomic add (returns old value)
+atomicSub     : a -> a -> a            -- atomic subtract
+atomicMax     : a -> a -> a            -- atomic max
+atomicMin     : a -> a -> a            -- atomic min
+atomicAnd     : a -> a -> a            -- atomic AND
+atomicOr      : a -> a -> a            -- atomic OR
+atomicXor     : a -> a -> a            -- atomic XOR
+atomicExchange : a -> a -> a           -- atomic exchange
+```
+
+### 14.23 Array Length
+
+```
+arrayLength : Array<a> -> I32    -- arrayLength() in WGSL
+```
 
 ---
 
@@ -1719,9 +2096,10 @@ If the program has `import` declarations, the module resolver:
 The `SemanticAnalyzer`:
 - Registers data types and their constructors
 - Registers type aliases
-- Registers traits and impls
+- Registers traits and impls (including associated type declarations and definitions)
 - Performs name resolution
 - Runs Hindley-Milner type inference on all expressions
+- Resolves associated type projections via predicate solving
 - Validates type correctness of all match arms, guards, let bindings
 - Desugars tuple parameters and call sites
 - Handles method-call sugar resolution
@@ -1731,6 +2109,7 @@ The `SemanticAnalyzer`:
 The `AstLowering` phase:
 - Lowers AST expressions to typed HIR expressions
 - Resolves trait methods to mangled concrete function names
+- Resolves associated type projections to concrete types via impl lookup
 - Resolves operator overloading (BinOp → App for user-defined types)
 - Beta-reduces lambda applications
 - Desugars pipeline `|>` to function application
@@ -1784,6 +2163,12 @@ The codegen emits valid WGSL text:
 | `Mat<R, C, T>` | `matRxC<T>` |
 | `Array<T, N>` | `array<T, N>` |
 | `Array<T>` | `array<T>` |
+| `Texture2d F32` | `texture_2d<f32>` |
+| `Texture2dMultisampled F32` | `texture_2d<f32>` |
+| `Texture2dArray F32` | `texture_2d_array<f32, num>` |
+| `Sampler` | `sampler` |
+| `SamplerComparison` | `sampler_comparison` |
+| `BindingArray T N` | `binding_array<T, N>` |
 | `()` | (no return type) |
 | User struct | `StructName` |
 
@@ -1872,6 +2257,8 @@ loop {
 | `shadml_hir` | High-level IR (typed, desugared) |
 | `shadml_mir` | Mid-level IR (imperative, WGSL-close) + HIR→MIR lowering |
 | `shadml_wgsl_codegen` | MIR → WGSL text emission |
+| `shadml_bundler` | Multi-file compilation, dependency resolution, entry-point splitting |
+| `shadml_bindgen` | Rust code generation (GPU structs, binding reflection, pipeline helpers) |
 | `shadml_ide` | IDE features (completions, hover, goto-def, references) |
 | `shadml_formatter` | Token-stream based code formatter |
 | `shadml_language_server` | LSP server (tower-lsp over stdin/stdout) |
@@ -1956,7 +2343,91 @@ The `shadml_wasm` crate compiles to `wasm32-unknown-unknown` and exports:
 - Note: Tree-sitter has limitations with indentation-sensitive multi-line constructs (no external scanner)
 - LSP semantic tokens provide the most accurate highlighting
 
----
+### 17.7 Bundler
+
+The `shadml_bundler` crate compiles multi-file shadml projects:
+
+- Reads a `shadml.toml` configuration file
+- Resolves module imports and dependencies
+- Compiles all entry-point shaders through the full pipeline
+- Supports splitting output by entry point (`split_entry_points = true`)
+- Outputs compiled WGSL to a configurable `output_dir`
+
+### 17.8 Bindgen
+
+The `shadml_bindgen` crate generates Rust source code from compiled shadml shaders. It provides:
+
+- **Binding reflection**: `BindingReflection`, `BindGroupReflection`, `EntryReflection` structs with group/index, address space, type, and push-constant sizes
+- **GPU structs**: `#[repr(C)]` structs with `bytemuck` derives, matching WGSL struct layouts (size, alignment, field offsets)
+- **Pipeline helpers**: `create_render_pipeline()` and `create_compute_pipeline()` methods that build wgpu pipeline layouts
+- **Embedded WGSL**: Shader source embedded as string constants (debug or minified)
+- **Push constant helpers**: `ImmediatesGpu` type aliases, `PUSH_CONSTANT_SIZE` constants, and `set_immediates()` / `set_immediates_compute()` methods
+- **ABI hashing**: `abi_hash` and `interface_hash` fields for detecting incompatible shader changes
+
+#### Generated Code Example
+
+For each entry point, the bindgen generates:
+- A Rust module with GPU structs, bind group layouts, and pipeline creation methods
+- Compile-time assertions for struct size and alignment
+- Type aliases for immediate (push constant) data
+
+### 17.9 Configuration (`shadml.toml`)
+
+The bundler and bindgen are configured via `shadml.toml`:
+
+```toml
+[bundle]
+source_roots = ["shaders"]
+output_dir = "dist"
+split_entry_points = true
+features = []
+preserve_comments = false
+
+[[entry]]
+file = "shaders/GradientTriangle.shadml"
+
+[rust]
+output = "src/generated/shaders.rs"
+emit_rerun_if_changed = true
+source_mode = "EmbeddedDebug"
+type_map = "Plain"
+
+[[rust.profile]]
+name = "base"
+features = []
+```
+
+**`[bundle]` options:**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `source_roots` | `[String]` | `["."]` | Directories to search for imported modules |
+| `output_dir` | `String` | `"dist"` | Directory for compiled WGSL output |
+| `features` | `[String]` | `[]` | Feature flags to enable |
+| `preserve_comments` | `bool` | `false` | Preserve source comments in WGSL output |
+| `split_entry_points` | `bool` | `false` | Write one WGSL file per entry point |
+
+**`[[entry]]` options:**
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `file` | `String` | Path to the shadml source file (required) |
+
+**`[rust]` options:**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `output` | `String` | required | Output path for generated Rust file |
+| `emit_rerun_if_changed` | `bool` | `true` | Emit `cargo:rerun-if-changed` directives |
+| `source_mode` | `String` | `"EmbeddedDebug"` | `"EmbeddedDebug"`, `"EmbeddedMinified"`, `"RuntimeBlob"`, or `"ServerFetch"` |
+| `type_map` | `String` | `"Plain"` | `"Plain"`, `"Glam"`, or `"Nalgebra"` — maps Vec/Mat types to Rust crate types |
+
+**`[[rust.profile]]` options:**
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `name` | `String` | Profile name (required) |
+| `features` | `[String]` | Feature flags enabled for this profile |
 
 ## Appendix A: Complete Example
 
@@ -1994,8 +2465,8 @@ main input =
 | Native WGSL switch/case for integer patterns | Implemented |
 | Multi-value or-patterns | Implemented |
 | Named tail-recursive loops | Implemented |
-| Traits with static dispatch | Implemented |
-| Operator overloading | Implemented |
+| Traits with associated types and static dispatch | Implemented |
+| Operator overloading (via associated types) | Implemented |
 | Module system (file = module) | Implemented |
 | Conditional compilation (`when cfg.x`) | Implemented |
 | Bitfields with typed fields | Implemented |
@@ -2004,10 +2475,16 @@ main input =
 | Method-call syntax sugar | Implemented |
 | Vec swizzle patterns | Implemented |
 | Vec literal syntax (`[a, b, c]`) | Implemented |
+| Matrix column access via swizzle | Implemented |
 | Tuple desugaring | Implemented |
 | Struct-based entry point I/O | Implemented |
 | Compute / vertex / fragment stages | Implemented |
+| Texture and sampler bindings | Implemented |
+| Binding arrays | Implemented |
+| Push constants / immediates (`var<immediate>`) | Implemented |
 | Dead code elimination | Implemented |
+| Bundler (multi-file compilation, entry-point splitting) | Implemented |
+| Bindgen (Rust code generation, GPU structs, pipeline helpers) | Implemented |
 | LSP (diagnostics, completions, hover, goto-def, references) | Implemented |
 | Code formatter | Implemented |
 | WASM compilation target | Implemented |
