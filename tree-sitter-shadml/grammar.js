@@ -41,6 +41,7 @@ module.exports = grammar({
         $.type_alias,
         $.extern_declaration,
         $.binding_declaration,
+        $.immediate_declaration,
         $.trait_declaration,
         $.impl_declaration,
         $.bitfield_declaration,
@@ -138,10 +139,21 @@ module.exports = grammar({
     binding_entry: ($) =>
       seq(
         "@", "binding", "(", $.expression, ")",
-        field("space", choice("uniform", seq("storage", optional(seq("(", $.identifier, ")"))))),
+        field("space", optional(choice("uniform", seq("storage", optional(seq("(", $.identifier, ")")))))),
         field("name", $.identifier),
         ":",
         field("type", $._type),
+      ),
+
+    // -- Immediate (push constant) declarations -----------------------------
+
+    immediate_declaration: ($) =>
+      seq(
+        "immediate",
+        field("name", $.identifier),
+        ":",
+        field("type", $._type),
+        optional($._layout_end),
       ),
 
     // -- Trait / impl --------------------------------------------------------
@@ -285,6 +297,7 @@ module.exports = grammar({
 
     type_signature: ($) =>
       seq(
+        repeat($.attribute),
         field("name", choice($.identifier, $.operator_name)),
         ":",
         field("type", $._type),
@@ -486,7 +499,10 @@ module.exports = grammar({
       prec.right(-1, seq("\\", repeat1($.pattern), "->", $.expression)),
 
     loop_expression: ($) =>
-      prec.right(-1, seq("loop", $.expression)),
+      prec.right(-1, seq("loop", field("name", $.identifier), repeat($.loop_binding), "in", field("body", $.expression))),
+
+    loop_binding: ($) =>
+      seq("(", field("name", $.identifier), "=", field("init", $.expression), ")"),
 
     do_expression: ($) =>
       prec.right(-1, seq("do", $.expression)),

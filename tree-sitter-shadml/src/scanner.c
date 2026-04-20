@@ -69,7 +69,9 @@ static bool is_decl_keyword(const char *ident, unsigned len) {
          (len == 4 && strncmp(ident, "when", 4) == 0) ||
          (len == 6 && strncmp(ident, "import", 6) == 0) ||
          (len == 6 && strncmp(ident, "module", 6) == 0) ||
-         (len == 4 && strncmp(ident, "else", 4) == 0);
+         (len == 4 && strncmp(ident, "else", 4) == 0) ||
+         (len == 9 && strncmp(ident, "immediate", 9) == 0) ||
+         (len == 7 && strncmp(ident, "storage", 7) == 0);
 }
 
 bool tree_sitter_shadml_external_scanner_scan(void *payload, TSLexer *lexer,
