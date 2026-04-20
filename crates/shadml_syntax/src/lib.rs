@@ -164,6 +164,7 @@ pub enum SyntaxKind {
     KwType,
     KwSelf,
     KwImmediate,
+    KwRender,
 
     // ── CST node kinds ─────────────────────────────────────────────
     SourceFile,
@@ -194,6 +195,9 @@ pub enum SyntaxKind {
 
     Attribute,
     AttrArg,
+
+    /// Render block: `render name { use Module; bindings; entry_points }`
+    RenderBlock,
 
     // ── Expression nodes ───────────────────────────────────────────
     ExprApp,
@@ -258,7 +262,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     const FIRST_KEYWORD: Self = SyntaxKind::KwModule;
-    const LAST_KEYWORD: Self = SyntaxKind::KwSelf;
+    const LAST_KEYWORD: Self = SyntaxKind::KwRender;
 
     const FIRST_OPERATOR: Self = SyntaxKind::Plus;
     const LAST_OPERATOR: Self = SyntaxKind::PipeForward;
@@ -345,6 +349,7 @@ pub fn keyword_from_str(s: &str) -> Option<SyntaxKind> {
         "cfg" => Some(SyntaxKind::KwCfg),
         "type" => Some(SyntaxKind::KwType),
         "immediate" => Some(SyntaxKind::KwImmediate),
+        "render" => Some(SyntaxKind::KwRender),
         _ => None,
     }
 }
@@ -490,6 +495,7 @@ impl fmt::Display for SyntaxKind {
             SyntaxKind::KwType => "'type'",
             SyntaxKind::KwSelf => "'Self'",
             SyntaxKind::KwImmediate => "'immediate'",
+            SyntaxKind::KwRender => "'render'",
 
             // CST node kinds
             SyntaxKind::SourceFile => "source file",
@@ -519,6 +525,8 @@ impl fmt::Display for SyntaxKind {
 
             SyntaxKind::Attribute => "attribute",
             SyntaxKind::AttrArg => "attribute argument",
+
+            SyntaxKind::RenderBlock => "render block",
 
             SyntaxKind::ExprApp => "function application",
             SyntaxKind::ExprInfix => "infix expression",

@@ -117,6 +117,36 @@ pub struct DataTypeInfo {
     pub constructors: Vec<String>,
 }
 
+/// Iterate over module-scope declarations plus render-block entries.
+/// Render blocks themselves are transparent: their inner entries are yielded
+/// as if they were module-scope declarations.  This eliminates the need for
+/// separate render-block loops in passes that only care about entries.
+fn all_entries_including_render_blocks<'a>(
+    decls: &'a [&'a Decl],
+) -> impl Iterator<Item = &'a Decl> {
+    decls.iter().copied().flat_map(|decl| {
+        let mut v = vec![decl];
+        if let Decl::RenderBlock { entries, .. } = decl {
+            v.extend(entries.iter());
+        }
+        v.into_iter()
+    })
+}
+
+/// Iterate over module-scope declarations plus render-block bindings and entries.
+fn all_decls_and_render_block_contents<'a>(
+    decls: &'a [&'a Decl],
+) -> impl Iterator<Item = &'a Decl> {
+    decls.iter().copied().flat_map(|decl| {
+        let mut v = vec![decl];
+        if let Decl::RenderBlock { bindings, entries, .. } = decl {
+            v.extend(bindings.iter());
+            v.extend(entries.iter());
+        }
+        v.into_iter()
+    })
+}
+
 impl SemanticAnalyzer {
     pub fn new() -> Self {
         Self {
@@ -149,7 +179,8 @@ impl SemanticAnalyzer {
         // Pass 1: predeclare type names so aliases and data declarations in the
         // same module can refer to each other regardless of source order.
         // Also check for duplicate type-level names across the unified namespace.
-        for decl in &all_decls {
+        // Render-block entries are included transparently.
+        for decl in all_entries_including_render_blocks(&all_decls) {
             match decl {
                 Decl::BuiltinTypeDecl { name, arity, span, .. } => {
                     if let Some(existing) = self.type_names.get(name) {
@@ -230,7 +261,8 @@ impl SemanticAnalyzer {
         }
 
         // Pass 1c: collect data types and constructors
-        for decl in &all_decls {
+        // Render-block entries are included transparently.
+        for decl in all_entries_including_render_blocks(&all_decls) {
             if let Decl::DataDecl {
                 name,
                 type_params,
@@ -321,7 +353,8 @@ impl SemanticAnalyzer {
         }
 
         // Pass 2: collect type signatures
-        for decl in &all_decls {
+        // Render-block bindings and entries are included transparently.
+        for decl in all_decls_and_render_block_contents(&all_decls) {
             if let Decl::TypeSig {
                 name,
                 constraints,
@@ -849,9 +882,10 @@ impl SemanticAnalyzer {
                     params,
                     body,
                     span,
+                    attributes,
                     ..
                 } => {
-                    self.check_function(name, params, body, &[], *span);
+                    self.check_entry_point(name, params, body, *span, attributes, /* is_render_block */ false);
                 }
                 Decl::ImplDecl {
                     trait_name,
@@ -894,6 +928,27 @@ impl SemanticAnalyzer {
                             trait_name.is_none(),
                         );
                     }
+                }
+                Decl::RenderBlock {
+                    entries,
+                    span,
+                    ..
+                } => {
+                    // Type-check entry points inside the render block
+                    for rb_decl in entries {
+                        if let Decl::EntryPoint {
+                            name,
+                            params,
+                            body,
+                            span: epan,
+                            attributes,
+                            ..
+                        } = rb_decl
+                        {
+                            self.check_entry_point(name, params, body, *epan, attributes, /* is_render_block */ true);
+                        }
+                    }
+                    let _ = span;
                 }
                 _ => {}
             }
@@ -1237,6 +1292,34 @@ impl SemanticAnalyzer {
             .iter()
             .map(|name| (name.clone(), fresh_var_id(&mut self.engine)))
             .collect()
+    }
+
+    /// Type-check an entry point.
+    /// When `is_render_block` is false (module scope) and the entry carries
+    /// `@vertex` or `@fragment`, an error is emitted — render blocks are
+    /// required for vertex/fragment shaders.
+    fn check_entry_point(
+        &mut self,
+        name: &str,
+        params: &[Pat],
+        body: &Expr,
+        span: Span,
+        attributes: &[Attribute],
+        is_render_block: bool,
+    ) {
+        if !is_render_block {
+            let is_vertex_or_fragment =
+                attributes.iter().any(|a| a.name == "vertex" || a.name == "fragment");
+            if is_vertex_or_fragment {
+                self.engine.diagnostics.push(
+                    Diagnostic::error(
+                        "@vertex and @fragment entry points must be inside a render block",
+                    )
+                    .with_label(Label::primary(span, "consider wrapping in a `render` block")),
+                );
+            }
+        }
+        self.check_function(name, params, body, &[], span);
     }
 
     fn check_function(
@@ -4188,5 +4271,80 @@ impl Convert (Vec<3, F32>) where
         with_prelude(&mut program);
         sa.analyze(&program);
         assert!(!sa.has_errors());
+    }
+
+    #[test]
+    fn test_module_scope_vertex_entry_point_rejected() {
+        let source = r#"
+@vertex
+vsMain : Vec<4, F32> -> Vec<4, F32>
+vsMain pos = pos
+"#;
+        let mut parser = shadml_parser::parser::Parser::new(source);
+        let mut program = parser.parse_program();
+        with_prelude(&mut program);
+
+        let mut sa = SemanticAnalyzer::new();
+        sa.analyze(&program);
+        assert!(
+            sa.has_errors(),
+            "module-scope @vertex entry point should be an error"
+        );
+        let error_messages: Vec<String> = sa.diagnostics().iter()
+            .filter(|d| d.severity == shadml_diagnostics::Severity::Error)
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            error_messages.iter().any(|m| m.contains("must be inside a render block")),
+            "expected error about render block, got: {:?}", error_messages
+        );
+    }
+
+    #[test]
+    fn test_module_scope_fragment_entry_point_rejected() {
+        let source = r#"
+@fragment
+fsMain : Vec<4, F32> -> Vec<4, F32>
+fsMain color = color
+"#;
+        let mut parser = shadml_parser::parser::Parser::new(source);
+        let mut program = parser.parse_program();
+        with_prelude(&mut program);
+
+        let mut sa = SemanticAnalyzer::new();
+        sa.analyze(&program);
+        assert!(
+            sa.has_errors(),
+            "module-scope @fragment entry point should be an error"
+        );
+    }
+
+    #[test]
+    fn test_module_scope_compute_entry_point_accepted() {
+        // Module-scope @compute entry points should NOT trigger the
+        // "must be inside a render block" error. Other type errors may
+        // exist, but the specific render-block error should be absent.
+        let source = r#"
+@compute
+vsMain : Vec<4, F32> -> Vec<4, F32>
+vsMain pos = pos
+"#;
+        let mut parser = shadml_parser::parser::Parser::new(source);
+        let mut program = parser.parse_program();
+        with_prelude(&mut program);
+
+        let mut sa = SemanticAnalyzer::new();
+        sa.analyze(&program);
+        // We don't assert !sa.has_errors() because the program may have
+        // other type errors. We specifically check that there is NO error
+        // about render blocks.
+        let has_render_block_error = sa.diagnostics().iter().any(|d| {
+            d.severity == shadml_diagnostics::Severity::Error
+                && d.message.contains("must be inside a render block")
+        });
+        assert!(
+            !has_render_block_error,
+            "@compute entry points should NOT require a render block"
+        );
     }
 }

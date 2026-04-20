@@ -5,6 +5,8 @@ use crate::{MirExpr, MirProgram, MirStmt, MirType};
 pub fn validate_program(program: &MirProgram<'_>) -> Result<(), Vec<String>> {
     let function_names: HashSet<&str> = program.functions.iter().map(|f| f.name).collect();
     let constant_names: HashSet<&str> = program.constants.iter().map(|c| c.name).collect();
+    let entry_point_names: HashSet<&str> = program.entry_points.iter().map(|ep| ep.name).collect();
+    let global_names: HashSet<&str> = program.globals.iter().map(|g| g.name).collect();
     let mut errors = Vec::new();
 
     for c in &program.constants {
@@ -52,6 +54,30 @@ pub fn validate_program(program: &MirProgram<'_>) -> Result<(), Vec<String>> {
                 &mut errors,
                 &format!("entry point '{}' return", ep.name),
             );
+        }
+    }
+
+    // Validate render blocks
+    for rb in &program.render_blocks {
+        if !rb.vertex_entry.is_empty() && !entry_point_names.contains(rb.vertex_entry) {
+            errors.push(format!(
+                "render block '{}' references unknown vertex entry point '{}'",
+                rb.name, rb.vertex_entry
+            ));
+        }
+        if !rb.fragment_entry.is_empty() && !entry_point_names.contains(rb.fragment_entry) {
+            errors.push(format!(
+                "render block '{}' references unknown fragment entry point '{}'",
+                rb.name, rb.fragment_entry
+            ));
+        }
+        for binding_name in &rb.binding_names {
+            if !global_names.contains(binding_name) {
+                errors.push(format!(
+                    "render block '{}' references unknown binding '{}'",
+                    rb.name, binding_name
+                ));
+            }
         }
     }
 
@@ -292,8 +318,8 @@ mod tests {
     use shadml_allocator::Allocator;
 
     use crate::{
-        MirConst, MirEntryPoint, MirExpr, MirFunction, MirLit, MirProgram, MirStmt, MirType,
-        ShaderStage,
+        AddressSpace, MirConst, MirEntryPoint, MirExpr, MirFunction, MirGlobal, MirLit,
+        MirProgram, MirRenderBlock, MirStmt, MirType, ShaderStage,
     };
 
     use super::validate_program;
@@ -324,6 +350,7 @@ mod tests {
                 return_expr: None,
                 comments: vec![],
             }],
+            render_blocks: vec![],
         };
 
         let errors = validate_program(&program).expect_err("validator should reject const calls");
@@ -361,11 +388,167 @@ mod tests {
                 return_expr: None,
                 comments: vec![],
             }],
+            render_blocks: vec![],
         };
 
         let errors = validate_program(&program).expect_err("validator should reject missing calls");
         assert!(errors
             .iter()
             .any(|e| e.contains("unresolved call target 'missing'")));
+    }
+
+    #[test]
+    fn rejects_render_block_with_unknown_vertex_entry() {
+        let program = MirProgram {
+            structs: vec![],
+            globals: vec![],
+            functions: vec![],
+            constants: vec![],
+            entry_points: vec![],
+            render_blocks: vec![MirRenderBlock {
+                name: "test",
+                binding_names: vec![],
+                vertex_entry: "missing_vertex",
+                fragment_entry: "",
+            }],
+        };
+
+        let errors = validate_program(&program).expect_err("validator should reject unknown vertex entry");
+        assert!(errors.iter().any(|e| e.contains("unknown vertex entry point 'missing_vertex'")));
+    }
+
+    #[test]
+    fn rejects_render_block_with_unknown_binding() {
+        let program = MirProgram {
+            structs: vec![],
+            globals: vec![MirGlobal {
+
+                name: "real_binding",
+                address_space: AddressSpace::Uniform,
+                ty: MirType::F32,
+                group: 0,
+                binding: 0,
+                origin_module: None,
+
+            }],
+            functions: vec![],
+            constants: vec![],
+            entry_points: vec![],
+            render_blocks: vec![MirRenderBlock {
+                name: "test",
+                binding_names: vec!["missing_binding"],
+                vertex_entry: "",
+                fragment_entry: "",
+            }],
+        };
+
+        let errors = validate_program(&program).expect_err("validator should reject unknown binding");
+        assert!(errors.iter().any(|e| e.contains("unknown binding 'missing_binding'")));
+    }
+
+    #[test]
+    fn accepts_valid_render_block() {
+        let program = MirProgram {
+            structs: vec![],
+            globals: vec![MirGlobal {
+
+                name: "my_binding",
+                address_space: AddressSpace::Uniform,
+                ty: MirType::F32,
+                group: 0,
+                binding: 0,
+                origin_module: None,
+
+            }],
+            functions: vec![],
+            constants: vec![],
+            entry_points: vec![MirEntryPoint {
+                name: "vertex_main",
+                stage: ShaderStage::Vertex,
+                workgroup_size: None,
+                params: vec![],
+                return_ty: MirType::Unit,
+                body: vec![],
+                return_expr: None,
+                comments: vec![],
+            }],
+            render_blocks: vec![MirRenderBlock {
+                name: "test",
+                binding_names: vec!["my_binding"],
+                vertex_entry: "vertex_main",
+                fragment_entry: "",
+            }],
+        };
+
+        validate_program(&program).expect("valid render block should pass validation");
+    }
+
+    #[test]
+    fn accepts_render_block_with_vertex_and_fragment() {
+        let program = MirProgram {
+            structs: vec![],
+            globals: vec![MirGlobal {
+
+                name: "my_uniform",
+                address_space: AddressSpace::Uniform,
+                ty: MirType::F32,
+                group: 0,
+                binding: 0,
+                origin_module: None,
+
+            }],
+            functions: vec![],
+            constants: vec![],
+            entry_points: vec![
+                MirEntryPoint {
+                    name: "vs_main",
+                    stage: ShaderStage::Vertex,
+                    workgroup_size: None,
+                    params: vec![],
+                    return_ty: MirType::Unit,
+                    body: vec![],
+                    return_expr: None,
+                    comments: vec![],
+                },
+                MirEntryPoint {
+                    name: "fs_main",
+                    stage: ShaderStage::Fragment,
+                    workgroup_size: None,
+                    params: vec![],
+                    return_ty: MirType::Unit,
+                    body: vec![],
+                    return_expr: None,
+                    comments: vec![],
+                },
+            ],
+            render_blocks: vec![MirRenderBlock {
+                name: "pipeline",
+                binding_names: vec!["my_uniform"],
+                vertex_entry: "vs_main",
+                fragment_entry: "fs_main",
+            }],
+        };
+
+        validate_program(&program).expect("render block with vertex + fragment should pass validation");
+    }
+
+    #[test]
+    fn rejects_render_block_with_unknown_fragment_entry() {
+        let program = MirProgram {
+            structs: vec![],
+            globals: vec![],
+            functions: vec![],
+            constants: vec![],
+            entry_points: vec![],
+            render_blocks: vec![MirRenderBlock {
+                name: "test",
+                binding_names: vec![],
+                vertex_entry: "",
+                fragment_entry: "missing_fragment",
+            }],
+        };
+
+        let errors = validate_program(&program).expect_err("validator should reject unknown fragment entry");
+        assert!(errors.iter().any(|e| e.contains("unknown fragment entry point 'missing_fragment'")));
     }
 }

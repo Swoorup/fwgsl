@@ -1662,21 +1662,106 @@ Compiles to: `(base & ~combined_mask) | ((new_val & field_mask) << offset)`.
 
 ### 13.1 Shader Stages
 
+Compute shaders are declared at module scope with `@compute`:
+
 ```
 main : ComputeInput -> ()
 @compute @workgroup_size(64, 1, 1)
 main input = ...
-
-vsMain : VertexInput -> VertexOutput
-@vertex
-vsMain input = ...
-
-fsMain : VertexOutput -> Vec<4, F32>
-@fragment
-fsMain input = ...
 ```
 
-### 13.2 Struct-Based I/O
+Vertex and fragment shaders must be declared inside a `render` block (see 13.2). Module-scope `@vertex` and `@fragment` entry points are rejected with a compile-time error.
+
+```
+render gradient
+  vsMain : VertexInput -> VertexOutput
+  @vertex
+  vsMain input = ...
+
+  fsMain : VertexOutput -> Vec<4, F32>
+  @fragment
+  fsMain input = ...
+```
+
+### 13.2 Render Blocks
+
+A `render` block groups a vertex/fragment pipeline pair together with the bindings they share. Bindings declared inside a render block are scoped to that pipeline and receive `VERTEX | FRAGMENT` visibility in the generated pipeline layout.
+
+**Syntax:**
+
+```
+render name
+  @group(G)
+    @binding(B) address_space name : Type
+
+  @vertex
+  vsMain : VertexInput -> VertexOutput
+  vsMain input = ...
+
+  @fragment
+  fsMain : VertexOutput -> Vec<4, F32>
+  fsMain input = ...
+```
+
+- `render` is a layout-triggering keyword (like `let` and `where`). The body is indentation-scoped; no braces are required.
+- `name` identifies the render block for generated pipeline layout helpers.
+- The block may contain:
+  - **Binding declarations** (`@group`/`@binding` globals, `immediate` globals) — scoped to this pipeline
+  - **Entry points** — one `@vertex` and one `@fragment` function
+  - **Type signatures** preceding entry points
+  - **Data declarations** (`data`, `enum`, `bitfield`) needed by the entry points
+- A module may contain any number of render blocks. This is useful for multi-pass rendering (e.g. one render block that draws into an MSAA texture, and a second that resolves it to the screen).
+- Compute entry points (`@compute`) may not appear inside a render block.
+
+**Example — multi-pass rendering:**
+
+```
+render shape
+  @vertex
+  vsShape : ShapeInput -> ShapeOutput
+  vsShape input = ...
+
+  @fragment
+  fsShape : ShapeOutput -> Vec<4, F32>
+  fsShape input = ...
+
+render resolve
+  @group(1)
+    @binding(0) msTexture : Texture2dMultisampled F32
+
+  @vertex
+  vsResolve : FullscreenInput -> FullscreenOutput
+  vsResolve input = ...
+
+  @fragment
+  fsResolve : FullscreenOutput -> Vec<4, F32>
+  fsResolve input = ...
+```
+
+**Interaction with imports:**
+
+Bindings imported from other modules (via `import`) are available inside render blocks by referencing them normally. The render block only needs to declare bindings that are specific to that pipeline; shared bindings can live in a dedicated module and be imported at module scope.
+
+```
+import GlobalBindings
+
+render effects
+  @group(1)
+    @binding(0) mainTexture : Texture2d F32
+    @binding(1) mainSampler : Sampler
+
+  @vertex
+  vsMain : VertexInput -> VertexOutput
+  vsMain input = ...
+
+  @fragment
+  fsMain : VertexOutput -> Vec<4, F32>
+  fsMain input =
+    let color = textureSample mainTexture mainSampler input.uv
+    in color
+```
+
+### 13.3 Struct-Based I/O
 
 Entry points use struct-based I/O. Input and output structs carry `@builtin` and `@location` attributes on their fields:
 
@@ -1691,7 +1776,7 @@ data VertexOutput = VertexOutput {
 }
 ```
 
-### 13.3 Return Type Annotations
+### 13.4 Return Type Annotations
 
 For vertex/fragment entry points returning non-struct types (e.g., `Vec<4, F32>`), the codegen automatically emits `@location(0)` on the return type:
 
@@ -1700,7 +1785,7 @@ For vertex/fragment entry points returning non-struct types (e.g., `Vec<4, F32>`
 fn fsMain(input: VertexOutput) -> @location(0) vec4<f32> { ... }
 ```
 
-### 13.4 Resource Bindings
+### 13.5 Resource Bindings
 
 ```
 @group(G) @binding(B) uniform             name : T
@@ -1722,7 +1807,7 @@ Compiles to WGSL:
 @group(G) @binding(B) var name: sampler;
 ```
 
-### 13.5 Push Constants (Immediates)
+### 13.6 Push Constants (Immediates)
 
 The `immediate` address space maps to WGSL `var<immediate>`, providing small read-only data passed per-draw or per-dispatch call. This is shadml's equivalent of WebGPU push constants:
 
@@ -1754,7 +1839,7 @@ var<immediate> imm : PushConstants;
 
 Push constant size limits and alignment follow the WebGPU/WGSL specification for the `immediate` address space.
 
-### 13.6 Texture and Sampler Bindings
+### 13.7 Texture and Sampler Bindings
 
 Textures and samplers use the opaque binding address space (no keyword before the name):
 
@@ -2359,7 +2444,7 @@ The `shadml_bindgen` crate generates Rust source code from compiled shadml shade
 
 - **Binding reflection**: `BindingReflection`, `BindGroupReflection`, `EntryReflection` structs with group/index, address space, type, and push-constant sizes
 - **GPU structs**: `#[repr(C)]` structs with `bytemuck` derives, matching WGSL struct layouts (size, alignment, field offsets)
-- **Pipeline helpers**: `create_render_pipeline()` and `create_compute_pipeline()` methods that build wgpu pipeline layouts
+- **Pipeline helpers**: `create_render_pipeline()` and `create_compute_pipeline()` methods that build wgpu pipeline layouts; per-render-block helpers like `create_{name}_render_pipeline_layout()` and `create_{name}_render_bind_group_layout_N()`
 - **Embedded WGSL**: Shader source embedded as string constants (debug or minified)
 - **Push constant helpers**: `ImmediatesGpu` type aliases, `PUSH_CONSTANT_SIZE` constants, and `set_immediates()` / `set_immediates_compute()` methods
 - **ABI hashing**: `abi_hash` and `interface_hash` fields for detecting incompatible shader changes
@@ -2478,6 +2563,7 @@ main input =
 | Matrix column access via swizzle | Implemented |
 | Tuple desugaring | Implemented |
 | Struct-based entry point I/O | Implemented |
+| Render blocks (scoped vertex+fragment pipelines) | Implemented |
 | Compute / vertex / fragment stages | Implemented |
 | Texture and sampler bindings | Implemented |
 | Binding arrays | Implemented |

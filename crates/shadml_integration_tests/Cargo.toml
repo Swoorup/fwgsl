@@ -17,6 +17,7 @@ shadml_span = { workspace = true }
 shadml_syntax = { workspace = true }
 shadml_allocator = { workspace = true }
 shadml_bundler = { workspace = true }
+shadml_bindgen = { workspace = true }
 naga = { workspace = true }
 
 [dev-dependencies]

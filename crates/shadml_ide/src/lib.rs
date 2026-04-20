@@ -568,6 +568,19 @@ impl<'a> IndexBuilder<'a> {
                 Decl::ModuleDecl { .. } | Decl::ImportDecl { .. } => {
                     // Module/import declarations don't define symbols.
                 }
+                Decl::RenderBlock { name, span, .. } => {
+                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                    self.index.push_symbol(NewSymbol {
+                        name: name.clone(),
+                        namespace: Namespace::Value,
+                        kind: SymbolKind::Function,
+                        span: name_span,
+                        scope_span: *span,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: Some(name.clone()),
+                    });
+                }
                 Decl::CfgDecl { .. } => {
                     // CfgDecl nodes are flattened above — unreachable here.
                 }
@@ -779,6 +792,12 @@ impl<'a> IndexBuilder<'a> {
                 self.walk_type(ty, frames);
             }
             Decl::ModuleDecl { .. } | Decl::ImportDecl { .. } => {}
+            Decl::RenderBlock { bindings, entries, span, .. } => {
+                for rb_decl in bindings.iter().chain(entries.iter()) {
+                    self.walk_decl(rb_decl, frames);
+                }
+                let _ = span;
+            }
             Decl::CfgDecl { .. } => {
                 // CfgDecl nodes are flattened by walk_program — unreachable here.
             }
@@ -1711,6 +1730,7 @@ fn extract_doc_comments(program: &Program) -> HashMap<String, String> {
                 Decl::ImplDecl { trait_name, .. } => trait_name.clone().unwrap_or_default(),
                 Decl::BuiltinImplDecl { trait_name, .. } => trait_name.clone(),
                 Decl::ImportDecl { module_path, .. } => module_path.clone(),
+                Decl::RenderBlock { name, .. } => name.clone(),
                 Decl::CfgDecl { .. } => continue,
             };
             if !name.is_empty() {

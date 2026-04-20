@@ -40,7 +40,8 @@ impl Decl {
             | Decl::BuiltinImplDecl { comments, .. }
             | Decl::ExternDecl { comments, .. }
             | Decl::ModuleDecl { comments, .. }
-            | Decl::ImportDecl { comments, .. } => comments,
+            | Decl::ImportDecl { comments, .. }
+            | Decl::RenderBlock { comments, .. } => comments,
             Decl::CfgDecl { .. } => &[],
         }
     }
@@ -63,7 +64,8 @@ impl Decl {
             | Decl::BuiltinImplDecl { comments, .. }
             | Decl::ExternDecl { comments, .. }
             | Decl::ModuleDecl { comments, .. }
-            | Decl::ImportDecl { comments, .. } => comments,
+            | Decl::ImportDecl { comments, .. }
+            | Decl::RenderBlock { comments, .. } => comments,
             Decl::CfgDecl { .. } => {
                 // CfgDecl has no comments field; this should not be called on it.
                 // Return a static empty vec to satisfy the borrow checker.
@@ -114,7 +116,8 @@ impl Decl {
             | Decl::ExternDecl { span, .. }
             | Decl::ModuleDecl { span, .. }
             | Decl::ImportDecl { span, .. }
-            | Decl::CfgDecl { span, .. } => *span,
+            | Decl::CfgDecl { span, .. }
+            | Decl::RenderBlock { span, .. } => *span,
         }
     }
 }
@@ -271,6 +274,17 @@ pub enum Decl {
         then_decls: Vec<Decl>,
         else_decls: Vec<Decl>,
         span: Span,
+    },
+    /// Render block: `render name { bindings; entry_points }`
+    /// Explicitly scopes bindings to a vertex+fragment pipeline pair.
+    RenderBlock {
+        name: String,
+        /// Binding declarations inside the render block.
+        bindings: Vec<Decl>,
+        /// Entry point declarations inside the render block (with @vertex/@fragment).
+        entries: Vec<Decl>,
+        span: Span,
+        comments: Vec<String>,
     },
 }
 
@@ -603,6 +617,15 @@ pub struct Parser {
 }
 
 const MAX_FUEL: u32 = 10_000;
+
+/// Context in which a declaration is being parsed.
+enum DeclContext {
+    /// Top-level module scope — all declaration kinds are allowed.
+    ModuleScope,
+    /// Inside a `render` block — module-scoped constructs (imports,
+    /// nested render blocks, traits, etc.) are disallowed.
+    RenderBlock,
+}
 
 impl Parser {
     /// Create a new parser from source text. Lexes and resolves layout.
@@ -1081,7 +1104,13 @@ impl Parser {
         if !self.pending_decls.is_empty() {
             return Some(self.pending_decls.remove(0));
         }
+        self.parse_decl_core(DeclContext::ModuleScope)
+    }
 
+    /// Shared declaration parser used by both module-scope and render-block
+    /// contexts.  Does **not** drain `pending_decls` — callers must do that
+    /// themselves (as `parse_decl` and `parse_render_block` already do).
+    fn parse_decl_core(&mut self, ctx: DeclContext) -> Option<Decl> {
         self.skip_trivia();
         match self.peek_non_trivia() {
             SyntaxKind::At => {
@@ -1176,12 +1205,43 @@ impl Parser {
                     }
                 }
             }
-            SyntaxKind::KwModule => Some(self.parse_module_decl()),
-            SyntaxKind::KwImport => Some(self.parse_import_decl()),
+            SyntaxKind::KwModule => {
+                if matches!(ctx, DeclContext::ModuleScope) {
+                    Some(self.parse_module_decl())
+                } else {
+                    None
+                }
+            }
+            SyntaxKind::KwRender => {
+                if matches!(ctx, DeclContext::ModuleScope) {
+                    Some(self.parse_render_block())
+                } else {
+                    None
+                }
+            }
+            SyntaxKind::KwImport => {
+                if matches!(ctx, DeclContext::ModuleScope) {
+                    Some(self.parse_import_decl())
+                } else {
+                    None
+                }
+            }
             SyntaxKind::KwData => Some(self.parse_data_decl()),
             SyntaxKind::KwAlias => Some(self.parse_alias_decl()),
-            SyntaxKind::KwBuiltin => Some(self.parse_builtin_decl()),
-            SyntaxKind::KwExtern => Some(self.parse_extern_decl()),
+            SyntaxKind::KwBuiltin => {
+                if matches!(ctx, DeclContext::ModuleScope) {
+                    Some(self.parse_builtin_decl())
+                } else {
+                    None
+                }
+            }
+            SyntaxKind::KwExtern => {
+                if matches!(ctx, DeclContext::ModuleScope) {
+                    Some(self.parse_extern_decl())
+                } else {
+                    None
+                }
+            }
             SyntaxKind::KwUniform | SyntaxKind::KwStorage => {
                 // Bare `uniform`/`storage` without `@group(...)` — parse as binding
                 // with default group(0) binding(0). This supports shorthand usage.
@@ -1193,11 +1253,35 @@ impl Parser {
                 let start = self.current_span().start;
                 Some(self.parse_binding_body(start, 0, 0))
             }
-            SyntaxKind::KwBitfield => Some(self.parse_bitfield_decl()),
+            SyntaxKind::KwBitfield => {
+                if matches!(ctx, DeclContext::ModuleScope) {
+                    Some(self.parse_bitfield_decl())
+                } else {
+                    None
+                }
+            }
             SyntaxKind::KwConst => Some(self.parse_const_decl()),
-            SyntaxKind::KwTrait => Some(self.parse_trait_decl()),
-            SyntaxKind::KwImpl => Some(self.parse_impl_decl()),
-            SyntaxKind::KwWhen => Some(self.parse_when_decl()),
+            SyntaxKind::KwTrait => {
+                if matches!(ctx, DeclContext::ModuleScope) {
+                    Some(self.parse_trait_decl())
+                } else {
+                    None
+                }
+            }
+            SyntaxKind::KwImpl => {
+                if matches!(ctx, DeclContext::ModuleScope) {
+                    Some(self.parse_impl_decl())
+                } else {
+                    None
+                }
+            }
+            SyntaxKind::KwWhen => {
+                if matches!(ctx, DeclContext::ModuleScope) {
+                    Some(self.parse_when_decl())
+                } else {
+                    None
+                }
+            }
             SyntaxKind::Ident => {
                 // Could be a type signature or function declaration.
                 // Look ahead: name then `:` means type sig; otherwise fun decl.
@@ -1445,6 +1529,84 @@ impl Parser {
         let span = self.span_from(start);
         Decl::ModuleDecl {
             name,
+            span,
+            comments: vec![],
+        }
+    }
+
+    /// Parse a render block:
+    ///   `render name { bindings; entry_points }`
+    ///
+    /// The block uses layout-based syntax — the layout resolver inserts
+    /// `LayoutBraceOpen`, `LayoutSemicolon`, and `LayoutBraceClose` tokens
+    /// around the indented body.
+    fn parse_render_block(&mut self) -> Decl {
+        let start = self.current_span().start;
+        self.expect(SyntaxKind::KwRender);
+        self.skip_trivia();
+
+        let name_tok = self.expect(SyntaxKind::Ident);
+        let name = self.text_of(&name_tok).to_owned();
+        self.skip_trivia();
+
+        // Consume layout brace open (inserted by layout resolver for the block body)
+        self.eat(SyntaxKind::LayoutBraceOpen);
+
+        let mut bindings = Vec::new();
+        let mut entries = Vec::new();
+
+        loop {
+            // Drain any pending decls first (e.g. an EntryPoint buffered after
+            // its preceding TypeSig), before consuming layout tokens or checking
+            // for EOF.  This mirrors the top-level `parse_program` loop.
+            if !self.pending_decls.is_empty() {
+                let decl = self.pending_decls.remove(0);
+                match decl {
+                    d @ Decl::BindingDecl { .. } => bindings.push(d),
+                    d @ Decl::EntryPoint { .. } => entries.push(d),
+                    d @ Decl::TypeSig { .. } => entries.push(d),
+                    other => entries.push(other),
+                }
+                continue;
+            }
+
+            self.skip_trivia();
+            self.eat_layout_semi();
+            self.skip_trivia();
+
+            // Check for end of block
+            if self.at_layout_end() || self.at_end() {
+                break;
+            }
+
+            // Delegate to parse_decl_core for everything else.
+            if let Some(decl) = self.parse_decl_core(DeclContext::RenderBlock) {
+                match decl {
+                    d @ Decl::BindingDecl { .. } => bindings.push(d),
+                    d @ Decl::EntryPoint { .. } => entries.push(d),
+                    // TypeSig declarations preceding an entry point — keep
+                    // them in entries so the type environment is populated.
+                    d @ Decl::TypeSig { .. } => entries.push(d),
+                    other => {
+                        // Other decls inside a render block (data, fun, etc.)
+                        // are valid — treat them as module-scope items but also
+                        // record them so the bundler can see them.
+                        entries.push(other);
+                    }
+                }
+            } else {
+                // Error recovery: skip one token
+                self.bump();
+            }
+        }
+
+        self.eat_layout_close();
+
+        let span = self.span_from(start);
+        Decl::RenderBlock {
+            name,
+            bindings,
+            entries,
             span,
             comments: vec![],
         }
@@ -4654,6 +4816,76 @@ main x =
                 other => panic!("expected match expression, got {:?}", other),
             },
             other => panic!("expected FunDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_render_block_with_bindings_and_entries() {
+        let source = r#"render test
+  @group(0)
+    @binding(0) uniform globals : Globals
+
+  @vertex
+  vsMain : VertexInput -> VertexOutput
+  vsMain input =
+    let pos = vec4 0.0 0.0 0.0 1.0
+    in VertexOutput { position = pos }
+
+  @fragment
+  fsMain : VertexOutput -> Vec<4, F32>
+  fsMain input = vec4 1.0 0.0 0.0 1.0
+"#;
+        let prog = parse(source);
+        assert_eq!(prog.decls.len(), 1, "expected exactly one render block decl");
+        match &prog.decls[0] {
+            Decl::RenderBlock {
+                name,
+                bindings,
+                entries,
+                ..
+            } => {
+                assert_eq!(name, "test");
+                assert_eq!(bindings.len(), 1, "expected one binding decl");
+                match &bindings[0] {
+                    Decl::BindingDecl { name, .. } => {
+                        assert_eq!(name, "globals");
+                    }
+                    other => panic!("expected BindingDecl, got {:?}", other),
+                }
+                assert_eq!(entries.len(), 4, "expected 4 entries: 2 type sigs + 2 entry points");
+                assert!(
+                    matches!(&entries[0],
+                        Decl::TypeSig { name, .. } if name == "vsMain"
+                    ),
+                    "expected TypeSig vsMain, got {:?}",
+                    entries[0]
+                );
+                assert!(
+                    matches!(
+                        &entries[1],
+                        Decl::EntryPoint { name, .. } if name == "vsMain"
+                    ),
+                    "expected EntryPoint vsMain, got {:?}",
+                    entries[1]
+                );
+                assert!(
+                    matches!(
+                        &entries[2],
+                        Decl::TypeSig { name, .. } if name == "fsMain"
+                    ),
+                    "expected TypeSig fsMain, got {:?}",
+                    entries[2]
+                );
+                assert!(
+                    matches!(
+                        &entries[3],
+                        Decl::EntryPoint { name, .. } if name == "fsMain"
+                    ),
+                    "expected EntryPoint fsMain, got {:?}",
+                    entries[3]
+                );
+            }
+            other => panic!("expected RenderBlock, got {:?}", other),
         }
     }
 }

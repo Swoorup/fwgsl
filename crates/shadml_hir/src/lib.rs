@@ -16,6 +16,7 @@ pub struct HirProgram {
     pub bindings: Vec<HirBinding>,
     pub bitfields: Vec<HirBitfield>,
     pub constants: Vec<HirConst>,
+    pub render_blocks: Vec<HirRenderBlock>,
 }
 
 /// A module-level constant declaration.
@@ -46,14 +47,38 @@ pub struct HirBitfieldField {
     pub field_type: Option<String>,
 }
 
+/// Address space for a GPU binding declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingAddressSpace {
+    Uniform,
+    StorageRead,
+    StorageReadWrite,
+    Immediate,
+    Opaque,
+}
+
 /// A GPU binding declaration (uniform / storage).
 #[derive(Debug, Clone)]
 pub struct HirBinding {
     pub name: String,
     pub ty: Ty,
-    pub address_space: String,
+    pub address_space: BindingAddressSpace,
     pub group: u32,
     pub binding: u32,
+}
+
+/// A render block: `render name { bindings; entry_points }`
+/// Explicitly scopes bindings to a vertex+fragment pipeline pair.
+#[derive(Debug, Clone)]
+pub struct HirRenderBlock {
+    pub name: String,
+    /// Binding declarations inside the render block.
+    pub bindings: Vec<HirBinding>,
+    /// Name of the vertex entry point (empty string if none).
+    pub vertex_entry: String,
+    /// Name of the fragment entry point (empty string if none).
+    pub fragment_entry: String,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +363,7 @@ mod tests {
             data_types: vec![],
             entry_points: vec![],
             bindings: vec![],
+            render_blocks: vec![],
         };
         assert_eq!(program.functions.len(), 1);
         assert_eq!(program.functions[0].name, "add");

@@ -126,6 +126,7 @@ pub fn filter_reachable<'a>(program: &MirProgram<'a>, reachable: &ReachableSet) 
             .filter(|c| reachable.constants.contains(c.name))
             .cloned()
             .collect(),
+        render_blocks: program.render_blocks.clone(),
     }
 }
 
@@ -206,6 +207,7 @@ pub fn filter_reachable_library<'a>(
         functions: program.functions.clone(), // keep all functions in library mode
         entry_points: program.entry_points.clone(),
         constants: program.constants.clone(), // keep all constants in library mode
+        render_blocks: program.render_blocks.clone(),
     }
 }
 
@@ -429,6 +431,7 @@ mod tests {
             ],
             entry_points: vec![make_entry_point(&arena, "main", &["used"])],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let result = eliminate_dead_code(&program);
@@ -449,6 +452,7 @@ mod tests {
             ],
             entry_points: vec![make_entry_point(&arena, "main", &["a"])],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let result = eliminate_dead_code(&program);
@@ -470,6 +474,7 @@ mod tests {
                         ty: MirType::F32,
                         attributes: vec![],
                     }],
+                origin_module: None,
                 },
                 MirStruct {
                     name: arena.alloc_str("Unused"),
@@ -478,6 +483,7 @@ mod tests {
                         ty: MirType::I32,
                         attributes: vec![],
                     }],
+                origin_module: None,
                 },
             ],
             globals: vec![],
@@ -500,6 +506,7 @@ mod tests {
                 comments: vec![],
             }],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let result = eliminate_dead_code(&program);
@@ -514,18 +521,24 @@ mod tests {
             structs: vec![],
             globals: vec![
                 MirGlobal {
+
                     name: arena.alloc_str("used_buf"),
                     address_space: AddressSpace::StorageReadWrite,
                     ty: MirType::Array(arena.alloc(MirType::F32), 64),
                     group: 0,
                     binding: 0,
+                    origin_module: None,
+
                 },
                 MirGlobal {
+
                     name: arena.alloc_str("unused_buf"),
                     address_space: AddressSpace::Uniform,
                     ty: MirType::F32,
                     group: 0,
                     binding: 1,
+                    origin_module: None,
+
                 },
             ],
             functions: vec![],
@@ -547,6 +560,7 @@ mod tests {
                 comments: vec![],
             }],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let result = eliminate_dead_code(&program);
@@ -565,8 +579,10 @@ mod tests {
                     ty: MirType::Vec(3, arena.alloc(MirType::F32)),
                     attributes: vec![],
                 }],
+            origin_module: None,
             }],
             globals: vec![MirGlobal {
+
                 name: arena.alloc_str("particles"),
                 address_space: AddressSpace::StorageReadWrite,
                 ty: MirType::Array(
@@ -575,6 +591,8 @@ mod tests {
                 ),
                 group: 0,
                 binding: 0,
+                origin_module: None,
+
             }],
             functions: vec![],
             entry_points: vec![MirEntryPoint {
@@ -602,6 +620,7 @@ mod tests {
                 comments: vec![],
             }],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let result = eliminate_dead_code(&program);
@@ -615,13 +634,17 @@ mod tests {
         let arena = Allocator::new();
         let program = MirProgram {
             structs: vec![MirStruct {
+
                 name: arena.alloc_str("Foo"),
                 fields: vec![],
+                origin_module: None,
+
             }],
             globals: vec![],
             functions: vec![make_simple_fn(&arena, "helper", &[])],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let result = eliminate_dead_code(&program);
@@ -642,10 +665,14 @@ mod tests {
                         ty: MirType::F32,
                         attributes: vec![],
                     }],
+                origin_module: None,
                 },
                 MirStruct {
+
                     name: arena.alloc_str("Unused"),
                     fields: vec![],
+                    origin_module: None,
+
                 },
             ],
             globals: vec![],
@@ -665,6 +692,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let result = eliminate_dead_code(&program);
@@ -685,6 +713,7 @@ mod tests {
                         ty: MirType::F32,
                         attributes: vec![],
                     }],
+                origin_module: None,
                 },
                 MirStruct {
                     name: arena.alloc_str("Outer"),
@@ -693,10 +722,14 @@ mod tests {
                         ty: MirType::Struct(arena.alloc_str("Inner")),
                         attributes: vec![],
                     }],
+                origin_module: None,
                 },
                 MirStruct {
+
                     name: arena.alloc_str("Unrelated"),
                     fields: vec![],
+                    origin_module: None,
+
                 },
             ],
             globals: vec![],
@@ -715,6 +748,7 @@ mod tests {
                 comments: vec![],
             }],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let result = eliminate_dead_code(&program);

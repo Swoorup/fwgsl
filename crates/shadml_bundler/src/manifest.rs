@@ -124,6 +124,9 @@ pub struct CompiledEntry {
     pub workgroup_size: Option<[u32; 3]>,
     pub source_files: Vec<PathBuf>,
     pub exported_type_names: Vec<String>,
+    /// Name of the render block this entry belongs to, if any.
+    /// Entries in the same render block share a pipeline layout.
+    pub render_block: Option<String>,
 }
 
 /// Bind group metadata for one entry.
@@ -140,6 +143,8 @@ pub struct BindingInfo {
     pub binding: u32,
     pub address_space: BindingAddressSpace,
     pub ty: ManifestType,
+    /// Rust module path of the module that originally defined this binding.
+    pub origin_module: Vec<String>,
 }
 
 /// Bind group address space exposed to bindgen.
@@ -202,7 +207,16 @@ fn mir_type_size<'a>(ty: &MirType<'a>, structs: &HashMap<&str, &MirStruct<'a>>) 
 #[derive(Debug, Clone)]
 pub struct ExportedType {
     pub name: String,
+    /// Rust module path where this type is defined.
+    pub rust_mod_path: Vec<String>,
     pub fields: Vec<ExportedField>,
+}
+
+/// An attribute annotation on an exported field.
+#[derive(Debug, Clone)]
+pub struct ExportedFieldAttribute {
+    pub name: String,
+    pub args: Vec<String>,
 }
 
 /// A field in a generated type.
@@ -210,6 +224,7 @@ pub struct ExportedType {
 pub struct ExportedField {
     pub name: String,
     pub ty: ManifestType,
+    pub attributes: Vec<ExportedFieldAttribute>,
 }
 
 /// Lifetime-free type information suitable for downstream code generation.
@@ -233,7 +248,10 @@ pub enum ManifestType {
     Unit,
 }
 
-pub(crate) fn bind_groups_from_globals(globals: &[MirGlobal<'_>]) -> Vec<BindGroupInfo> {
+pub(crate) fn bind_groups_from_globals(
+    globals: &[MirGlobal<'_>],
+    module_path_map: &std::collections::HashMap<String, Vec<String>>,
+) -> Vec<BindGroupInfo> {
     let mut groups: BTreeMap<u32, Vec<BindingInfo>> = BTreeMap::new();
 
     for global in globals {
@@ -241,11 +259,16 @@ pub(crate) fn bind_groups_from_globals(globals: &[MirGlobal<'_>]) -> Vec<BindGro
         if global.address_space == AddressSpace::Immediate {
             continue;
         }
+        let origin_module = global
+            .origin_module
+            .and_then(|m| module_path_map.get(m).cloned())
+            .unwrap_or_default();
         groups.entry(global.group).or_default().push(BindingInfo {
             name: global.name.to_string(),
             binding: global.binding,
             address_space: convert_address_space(global.address_space),
             ty: manifest_type_from_mir(&global.ty),
+            origin_module,
         });
     }
 
@@ -258,16 +281,27 @@ pub(crate) fn bind_groups_from_globals(globals: &[MirGlobal<'_>]) -> Vec<BindGro
         .collect()
 }
 
-pub(crate) fn exported_types_from_structs(structs: &[MirStruct<'_>]) -> Vec<ExportedType> {
+pub(crate) fn exported_types_from_structs(
+    structs: &[MirStruct<'_>],
+    default_mod_path: &[String],
+    module_path_map: &std::collections::HashMap<String, Vec<String>>,
+) -> Vec<ExportedType> {
     let mut exported = structs
         .iter()
-        .map(|structure| ExportedType {
-            name: structure.name.to_string(),
-            fields: structure
-                .fields
-                .iter()
-                .map(exported_field_from_mir)
-                .collect(),
+        .map(|structure| {
+            let rust_mod_path = structure
+                .origin_module
+                .and_then(|m| module_path_map.get(m).cloned())
+                .unwrap_or_else(|| default_mod_path.to_vec());
+            ExportedType {
+                name: structure.name.to_string(),
+                rust_mod_path,
+                fields: structure
+                    .fields
+                    .iter()
+                    .map(exported_field_from_mir)
+                    .collect(),
+            }
         })
         .collect::<Vec<_>>();
     exported.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
@@ -282,6 +316,14 @@ fn exported_field_from_mir(field: &MirField<'_>) -> ExportedField {
     ExportedField {
         name: field.name.to_string(),
         ty: manifest_type_from_mir(&field.ty),
+        attributes: field
+            .attributes
+            .iter()
+            .map(|attr| ExportedFieldAttribute {
+                name: attr.name.to_string(),
+                args: attr.args.iter().map(|arg| arg.to_string()).collect(),
+            })
+            .collect(),
     }
 }
 
@@ -412,11 +454,14 @@ mod tests {
         // offset at 0 (size 4, align 4), dir at 16 (size 12, align 16)
         // total = round_up(16 + 12, 16) = 32
         let s = MirStruct {
+
             name: "S",
             fields: vec![
                 MirField { name: "offset", ty: MirType::F32, attributes: vec![] },
                 MirField { name: "dir", ty: MirType::Vec(3, &MirType::F32), attributes: vec![] },
             ],
+            origin_module: None,
+
         };
         let arr = [s];
         let structs = make_structs(&arr);
@@ -431,10 +476,13 @@ mod tests {
         // transform at 0 (size 48, align 16)
         // total = round_up(48, 16) = 48
         let s = MirStruct {
+
             name: "M",
             fields: vec![
                 MirField { name: "transform", ty: MirType::Mat(3, 3, &MirType::F32), attributes: vec![] },
             ],
+            origin_module: None,
+
         };
         let arr = [s];
         let structs = make_structs(&arr);
@@ -472,18 +520,24 @@ mod tests {
     #[test]
     fn push_constants_from_globals_with_struct() {
         let s = MirStruct {
+
             name: "Params",
             fields: vec![
                 MirField { name: "offset", ty: MirType::F32, attributes: vec![] },
                 MirField { name: "dir", ty: MirType::Vec(3, &MirType::F32), attributes: vec![] },
             ],
+            origin_module: None,
+
         };
         let globals = vec![MirGlobal {
+
             name: "imm",
             address_space: AddressSpace::Immediate,
             ty: MirType::Struct("Params"),
             group: 0,
             binding: 0,
+            origin_module: None,
+
         }];
         let result = push_constants_from_globals(&globals, &[s]);
         assert!(result.is_some());
@@ -495,11 +549,14 @@ mod tests {
     #[test]
     fn push_constants_no_immediate() {
         let globals: Vec<MirGlobal> = vec![MirGlobal {
+
             name: "buf",
             address_space: AddressSpace::Uniform,
             ty: MirType::F32,
             group: 0,
             binding: 0,
+            origin_module: None,
+
         }];
         let result = push_constants_from_globals(&globals, &[]);
         assert!(result.is_none());

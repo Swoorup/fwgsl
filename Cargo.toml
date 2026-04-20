@@ -71,6 +71,7 @@ shadml_formatter = { path = "crates/shadml_formatter" }
 shadml_language_server = { path = "crates/shadml_language_server" }
 
 bumpalo = { version = "3", features = ["collections"] }
+heck = "0.5"
 compact_str = "0.8"
 miette = { version = "7", features = ["fancy"] }
 thiserror = "2"

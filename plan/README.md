@@ -9,6 +9,8 @@
 - [decide-shadml-extension](decide-shadml-extension.md) — Decide on file extension
 - [fix-tree-sitter-issues](fix-tree-sitter-issues.md) — Outstanding tree-sitter issues
 - [agent-quality](agent-quality.md) — Improve agent.md solution quality
+- [render-blocks/cleanup-and-hardening](render-blocks/cleanup-and-hardening.md) — Clean up render-blocks duplication, DCE hack, missing validation, and silent failures
+- [bindgen-deduplicate-types](bindgen-deduplicate-types.md) — Deduplicate shared types (e.g., GlobalUniformsGpu) across shader modules in generated output
 
 ## Completed
 - [associated-types/self-output-and-resolution-fix](associated-types/self-output-and-resolution-fix.md) — Add `Self.Output` syntax, fix bare-name shadowing

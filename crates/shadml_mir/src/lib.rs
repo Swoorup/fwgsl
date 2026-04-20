@@ -27,6 +27,7 @@ pub struct MirProgram<'a> {
     pub functions: Vec<MirFunction<'a>>,
     pub entry_points: Vec<MirEntryPoint<'a>>,
     pub constants: Vec<MirConst<'a>>,
+    pub render_blocks: Vec<MirRenderBlock<'a>>,
 }
 
 /// A module-level constant declaration.
@@ -45,6 +46,8 @@ pub struct MirGlobal<'a> {
     pub ty: MirType<'a>,
     pub group: u32,
     pub binding: u32,
+    /// The module name where this global was originally defined.
+    pub origin_module: Option<&'a str>,
 }
 
 /// WGSL address space for global bindings.
@@ -59,6 +62,19 @@ pub enum AddressSpace {
     Opaque,
 }
 
+/// A render block: `render name { bindings; entry_points }`
+/// Explicitly scopes bindings to a vertex+fragment pipeline pair.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MirRenderBlock<'a> {
+    pub name: &'a str,
+    /// Names of globals that belong to this render block.
+    pub binding_names: Vec<&'a str>,
+    /// Name of the vertex entry point.
+    pub vertex_entry: &'a str,
+    /// Name of the fragment entry point.
+    pub fragment_entry: &'a str,
+}
+
 // ---------------------------------------------------------------------------
 // Struct definitions
 // ---------------------------------------------------------------------------
@@ -68,6 +84,8 @@ pub enum AddressSpace {
 pub struct MirStruct<'a> {
     pub name: &'a str,
     pub fields: Vec<MirField<'a>>,
+    /// The module name where this struct was originally defined.
+    pub origin_module: Option<&'a str>,
 }
 
 /// A single field in a struct.

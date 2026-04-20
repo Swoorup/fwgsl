@@ -806,6 +806,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -829,6 +830,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -859,11 +861,13 @@ mod tests {
                         attributes: vec![],
                     },
                 ],
+            origin_module: None,
             }],
             globals: vec![],
             functions: vec![],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -887,6 +891,7 @@ mod tests {
                         args: vec![arena.alloc_str("global_invocation_id")],
                     }],
                 }],
+            origin_module: None,
             }],
             globals: vec![],
             functions: vec![],
@@ -919,6 +924,7 @@ mod tests {
                 comments: vec![],
             }],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -954,6 +960,7 @@ mod tests {
                 comments: vec![],
             }],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -990,6 +997,7 @@ mod tests {
                 comments: vec![],
             }],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1033,6 +1041,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1085,6 +1094,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1120,6 +1130,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1164,6 +1175,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1196,6 +1208,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1220,6 +1233,7 @@ mod tests {
                         attributes: vec![],
                     },
                 ],
+            origin_module: None,
             }],
             globals: vec![],
             functions: vec![MirFunction {
@@ -1238,6 +1252,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1270,6 +1285,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1302,6 +1318,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1330,6 +1347,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1356,6 +1374,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1382,6 +1401,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1399,11 +1419,13 @@ mod tests {
                     ty: MirType::Array(arena.alloc(MirType::F32), 16),
                     attributes: vec![],
                 }],
+            origin_module: None,
             }],
             globals: vec![],
             functions: vec![],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1428,6 +1450,7 @@ mod tests {
                 comments: vec![],
             }],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1453,6 +1476,7 @@ mod tests {
                         attributes: vec![],
                     },
                 ],
+            origin_module: None,
             }],
             globals: vec![],
             functions: vec![MirFunction {
@@ -1538,6 +1562,7 @@ mod tests {
                 comments: vec![],
             }],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1595,11 +1620,13 @@ mod tests {
                         ],
                     },
                 ],
+            origin_module: None,
             }],
             globals: vec![],
             functions: vec![],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);
@@ -1677,6 +1704,7 @@ mod tests {
             }],
             entry_points: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let wgsl = emit_wgsl(&program);

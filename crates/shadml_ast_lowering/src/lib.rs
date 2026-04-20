@@ -67,6 +67,30 @@ impl TupleValue {
     }
 }
 
+/// Convert a parser-level address space to the HIR enum.
+/// Eliminates the string indirection that used to exist in HIR bindings.
+fn lower_address_space(
+    aspace: shadml_parser::parser::BindingAddressSpace,
+) -> shadml_hir::BindingAddressSpace {
+    match aspace {
+        shadml_parser::parser::BindingAddressSpace::Uniform => {
+            shadml_hir::BindingAddressSpace::Uniform
+        }
+        shadml_parser::parser::BindingAddressSpace::StorageRead => {
+            shadml_hir::BindingAddressSpace::StorageRead
+        }
+        shadml_parser::parser::BindingAddressSpace::StorageReadWrite => {
+            shadml_hir::BindingAddressSpace::StorageReadWrite
+        }
+        shadml_parser::parser::BindingAddressSpace::Immediate => {
+            shadml_hir::BindingAddressSpace::Immediate
+        }
+        shadml_parser::parser::BindingAddressSpace::Opaque => {
+            shadml_hir::BindingAddressSpace::Opaque
+        }
+    }
+}
+
 impl AstLowering {
     /// Create a new lowering context from a completed semantic analyzer.
     pub fn new(sa: &shadml_semantic::SemanticAnalyzer) -> Self {
@@ -186,6 +210,7 @@ impl AstLowering {
         let mut bindings = Vec::new();
         let mut bitfields = Vec::new();
         let mut constants = Vec::new();
+        let mut render_blocks = Vec::new();
 
         for decl in &all_decls {
             match decl {
@@ -249,23 +274,7 @@ impl AstLowering {
                     bindings.push(shadml_hir::HirBinding {
                         name: name.clone(),
                         ty: scheme.ty,
-                        address_space: match address_space {
-                            shadml_parser::parser::BindingAddressSpace::Uniform => {
-                                "Uniform".to_string()
-                            }
-                            shadml_parser::parser::BindingAddressSpace::StorageRead => {
-                                "StorageRead".to_string()
-                            }
-                            shadml_parser::parser::BindingAddressSpace::StorageReadWrite => {
-                                "Storage".to_string()
-                            }
-                            shadml_parser::parser::BindingAddressSpace::Immediate => {
-                                "Immediate".to_string()
-                            }
-                            shadml_parser::parser::BindingAddressSpace::Opaque => {
-                                "Opaque".to_string()
-                            }
-                        },
+                        address_space: lower_address_space(*address_space),
                         group: *group,
                         binding: *binding,
                     });
@@ -395,6 +404,102 @@ impl AstLowering {
                 }
                 Decl::CfgDecl { .. } => {
                     // CfgDecl nodes are flattened by flatten_cfg_decls above — unreachable here.
+                }
+                Decl::RenderBlock {
+                    name,
+                    bindings: rb_bindings,
+                    entries: rb_entries,
+                    span: rspan,
+                    comments: _,
+                } => {
+                    // Collect binding info for the render block metadata
+                    let rb_hir_bindings: Vec<HirBinding> = rb_bindings.iter().map(|b| {
+                        if let Decl::BindingDecl { name: bname, ty: bty, address_space, group, binding, .. } = b {
+                            let scheme = self.convert_syntax_type_scheme(bty);
+                            HirBinding {
+                                name: bname.clone(),
+                                ty: scheme.ty,
+                                address_space: lower_address_space(*address_space),
+                                group: *group,
+                                binding: *binding,
+                            }
+                        } else {
+                            panic!("Expected BindingDecl in render block bindings")
+                        }
+                    }).collect();
+
+                    // Find vertex and fragment entry names
+                    let vertex_entry = rb_entries.iter().find_map(|e| {
+                        if let Decl::EntryPoint { attributes, name, .. } = e {
+                            if attributes.iter().any(|a| a.name == "vertex") {
+                                return Some(name.clone());
+                            }
+                        }
+                        None
+                    }).unwrap_or_default();
+                    let fragment_entry = rb_entries.iter().find_map(|e| {
+                        if let Decl::EntryPoint { attributes, name, .. } = e {
+                            if attributes.iter().any(|a| a.name == "fragment") {
+                                return Some(name.clone());
+                            }
+                        }
+                        None
+                    }).unwrap_or_default();
+
+                    render_blocks.push(HirRenderBlock {
+                        name: name.clone(),
+                        bindings: rb_hir_bindings,
+                        vertex_entry,
+                        fragment_entry,
+                        span: *rspan,
+                    });
+
+                    // Also process bindings and entries from the render block
+                    // into the main program (they need to be type-checked and lowered)
+                    for rb_decl in rb_bindings.iter().chain(rb_entries.iter()) {
+                        match rb_decl {
+                            Decl::BindingDecl {
+                                name: bname,
+                                ty: bty,
+                                address_space,
+                                group,
+                                binding,
+                                ..
+                            } => {
+                                let scheme = self.convert_syntax_type_scheme(bty);
+                                bindings.push(HirBinding {
+                                    name: bname.clone(),
+                                    ty: scheme.ty,
+                                    address_space: lower_address_space(*address_space),
+                                    group: *group,
+                                    binding: *binding,
+                                });
+                            }
+                            Decl::EntryPoint {
+                                attributes,
+                                name: ename,
+                                params,
+                                body,
+                                span: espan,
+                                comments: ecomments,
+                            } => {
+                                if let Some(ep) = self.lower_entry_point(
+                                    attributes,
+                                    ename,
+                                    params,
+                                    body,
+                                    *espan,
+                                    ecomments.clone(),
+                                ) {
+                                    entry_points.push(ep);
+                                }
+                            }
+                            _ => {
+                                // TypeSig and other declarations inside render blocks
+                                // are already handled at module scope by the semantic analyzer.
+                            }
+                        }
+                    }
                 }
                 Decl::TraitDecl { .. } => {
                     // Trait declarations are type-level only — no HIR output.
@@ -533,6 +638,7 @@ impl AstLowering {
             bindings,
             bitfields,
             constants,
+            render_blocks,
         });
         self.eliminate_tuple_abi(program)
     }

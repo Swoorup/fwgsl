@@ -526,6 +526,7 @@ fn lower_data_type_to_struct<'a>(
         Ok(Some(MirStruct {
             name: ctx.arena.alloc_str(name),
             fields,
+            origin_module: None,
         }))
     } else if constructors.len() == 1 {
         let con = &constructors[0];
@@ -556,6 +557,7 @@ fn lower_data_type_to_struct<'a>(
             Ok(Some(MirStruct {
                 name: ctx.arena.alloc_str(name),
                 fields,
+                origin_module: None,
             }))
         } else {
             Ok(None)
@@ -717,6 +719,22 @@ pub fn lower_hir_to_mir<'a>(
     }
     let functions = remaining_functions;
 
+    // Lower render blocks
+    let render_blocks: Vec<MirRenderBlock> = hir
+        .render_blocks
+        .iter()
+        .map(|rb| MirRenderBlock {
+            name: arena.alloc_str(&rb.name),
+            binding_names: rb
+                .bindings
+                .iter()
+                .map(|b| arena.alloc_str(&b.name) as &str)
+                .collect(),
+            vertex_entry: arena.alloc_str(&rb.vertex_entry),
+            fragment_entry: arena.alloc_str(&rb.fragment_entry),
+        })
+        .collect();
+
     if errors.is_empty() {
         let mut program = MirProgram {
             structs,
@@ -724,6 +742,7 @@ pub fn lower_hir_to_mir<'a>(
             functions,
             entry_points,
             constants,
+            render_blocks,
         };
         rewrite_promoted_const_refs_in_program(&mut program, &promoted_const_names, arena);
         Ok(program)
@@ -2218,21 +2237,22 @@ fn lower_hir_lit(lit: &HirLit, ty: &Ty) -> MirLit {
 /// The address space is determined from the `address_space` hint string.
 fn lower_hir_binding<'a>(res: &HirBinding, ctx: &LowerCtx<'a>) -> Option<MirGlobal<'a>> {
     let mir_ty = ty_to_mir_type_with_ctx(&res.ty, Some(ctx)).ok()?;
-    let address_space = match res.address_space.as_str() {
-        "Uniform" => AddressSpace::Uniform,
-        "StorageRead" => AddressSpace::StorageRead,
-        "StorageReadWrite" => AddressSpace::StorageReadWrite,
-        "Immediate" => AddressSpace::Immediate,
-        "Opaque" => AddressSpace::Opaque,
-        s if s.contains("Storage") => AddressSpace::StorageReadWrite,
-        _ => AddressSpace::Uniform,
+    let address_space = match res.address_space {
+        shadml_hir::BindingAddressSpace::Uniform => AddressSpace::Uniform,
+        shadml_hir::BindingAddressSpace::StorageRead => AddressSpace::StorageRead,
+        shadml_hir::BindingAddressSpace::StorageReadWrite => AddressSpace::StorageReadWrite,
+        shadml_hir::BindingAddressSpace::Immediate => AddressSpace::Immediate,
+        shadml_hir::BindingAddressSpace::Opaque => AddressSpace::Opaque,
     };
     Some(MirGlobal {
+
         name: ctx.arena.alloc_str(&res.name),
         address_space,
         ty: mir_ty,
         group: res.group,
         binding: res.binding,
+        origin_module: None,
+
     })
 }
 
@@ -2489,6 +2509,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
@@ -2529,6 +2550,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
@@ -2616,6 +2638,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
@@ -2643,6 +2666,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
@@ -2681,6 +2705,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
@@ -2726,6 +2751,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
@@ -2775,6 +2801,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
@@ -2804,6 +2831,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
@@ -2837,6 +2865,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
@@ -2882,6 +2911,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");
@@ -2919,6 +2949,7 @@ mod tests {
             bindings: vec![],
             bitfields: vec![],
             constants: vec![],
+            render_blocks: vec![],
         };
 
         let mir = lower_hir_to_mir(&arena, &hir).expect("lowering should succeed");

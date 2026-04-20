@@ -22,7 +22,7 @@
 pub mod config;
 mod manifest;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use shadml_parser::module_resolver::ModuleGraph;
@@ -275,7 +275,7 @@ pub fn bundle_manifest(
     let features = shadml_parser::FeatureSet::from_flags(&config.features);
     let mut profile_entries = Vec::new();
     let mut profile_modules: HashMap<String, CompiledModule> = HashMap::new();
-    let mut profile_types: HashMap<String, ExportedType> = HashMap::new();
+    let mut profile_types: HashMap<(String, String), ExportedType> = HashMap::new();
     let mut profile_source_files = Vec::new();
 
     for entry_file in &config.entries {
@@ -299,9 +299,8 @@ pub fn bundle_manifest(
         }
 
         for exported in result.exported_types {
-            profile_types
-                .entry(exported.name.clone())
-                .or_insert(exported);
+            let key = (exported.rust_mod_path.join("."), exported.name.clone());
+            profile_types.entry(key).or_insert(exported);
         }
 
         for path in result.source_files {
@@ -317,7 +316,12 @@ pub fn bundle_manifest(
     modules.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
 
     let mut exported_types = profile_types.into_values().collect::<Vec<_>>();
-    exported_types.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+    exported_types.sort_by(|lhs, rhs| {
+        lhs.rust_mod_path
+            .join(".")
+            .cmp(&rhs.rust_mod_path.join("."))
+            .then_with(|| lhs.name.cmp(&rhs.name))
+    });
 
     profile_source_files.sort();
 
@@ -435,7 +439,14 @@ fn bundle_single_entry(
     shadml_parser::evaluate_features(&mut root_program, features);
 
     // 3. Resolve module graph
-    let (merged, source_files, modules, root_module_path) = if has_imports(&root_program) {
+    let (
+        merged,
+        source_files,
+        modules,
+        root_module_path,
+        origin_map,
+        module_path_map,
+    ) = if has_imports(&root_program) {
         let source_root = if source_roots.is_empty() {
             vec![entry_file
                 .parent()
@@ -476,10 +487,26 @@ fn bundle_single_entry(
             .last()
             .map(|module| split_module_path(&module.name))
             .unwrap_or_else(|| logical_module_path(entry_file, source_roots, None));
+
+        let origin_map = build_origin_map(&graph);
+        let module_path_map: HashMap<String, Vec<String>> = graph
+            .modules
+            .iter()
+            .map(|m| (m.name.clone(), split_module_path(&m.name)))
+            .collect();
+
         let merged = shadml_parser::merge_modules(&graph);
-        (merged, files, modules, root_module_path)
+        (merged, files, modules, root_module_path, origin_map, module_path_map)
     } else {
         let module_name = logical_module_name(entry_file, source_roots, Some(&root_program));
+        let mut origin_map = HashMap::new();
+        for decl in &root_program.decls {
+            if let Some(name) = decl_name(decl) {
+                origin_map.insert(name, module_name.clone());
+            }
+        }
+        let module_path_map: HashMap<String, Vec<String>> =
+            std::iter::once((module_name.clone(), split_module_path(&module_name))).collect();
         (
             root_program,
             vec![entry_file.to_path_buf()],
@@ -489,6 +516,8 @@ fn bundle_single_entry(
                 dependencies: Vec::new(),
             }],
             split_module_path(&module_name),
+            origin_map,
+            module_path_map,
         )
     };
 
@@ -546,7 +575,7 @@ fn bundle_single_entry(
 
     // 8. HIR → MIR lowering
     let arena = shadml_allocator::Allocator::new();
-    let mir = shadml_mir::lower::lower_hir_to_mir(&arena, &hir).map_err(|errors| {
+    let mut mir = shadml_mir::lower::lower_hir_to_mir(&arena, &hir).map_err(|errors| {
         BundleError::Compilation(
             errors
                 .iter()
@@ -560,8 +589,26 @@ fn bundle_single_entry(
         )
     })?;
 
-    // 9. Generate outputs
-    let exported_types = exported_types_from_structs(&mir.structs);
+    // Annotate structs and globals with their origin module.
+    for s in &mut mir.structs {
+        if let Some(origin) = origin_map.get(s.name) {
+            s.origin_module = Some(arena.alloc_str(origin));
+        }
+    }
+    for g in &mut mir.globals {
+        if let Some(origin) = origin_map.get(g.name) {
+            g.origin_module = Some(arena.alloc_str(origin));
+        }
+    }
+
+    // 9. Validate the full MIR before splitting or DCE.
+    // Render blocks reference multiple entry points; validating on a
+    // single-entry-point split would produce false positives.
+    validate_mir_for_bundle(&mir, entry_file)?;
+
+    // 10. Generate outputs
+    let exported_types =
+        exported_types_from_structs(&mir.structs, &root_module_path, &module_path_map);
     let exported_type_names = exported_type_names(&exported_types);
 
     let (entries, compiled_entries) = if split_entry_points && mir.entry_points.len() > 1 {
@@ -574,6 +621,7 @@ fn bundle_single_entry(
             &root_module_path,
             &source_files,
             preserve_comments,
+            &module_path_map,
         )?
     } else {
         // Single output with all entry points, standard DCE.
@@ -606,17 +654,29 @@ fn bundle_single_entry(
         let compiled_entries = mir
             .entry_points
             .iter()
-            .map(|ep| CompiledEntry {
-                rust_mod_path: root_module_path.clone(),
-                shader_name: name.clone(),
-                stage: ep.stage,
-                entry_point: ep.name.to_string(),
-                wgsl_source: wgsl.clone(),
-                bind_groups: bind_groups_from_globals(&mir.globals),
-                push_constants: push_constants_from_globals(&mir.globals, &mir.structs),
-                workgroup_size: ep.workgroup_size,
-                source_files: source_files.clone(),
-                exported_type_names: exported_type_names.clone(),
+            .map(|ep| {
+                let render_block = mir.render_blocks.iter().find(|rb| {
+                    rb.vertex_entry == ep.name || rb.fragment_entry == ep.name
+                });
+                let (bind_groups, push_constants) = if let Some(rb) = render_block {
+                    let rb_globals = render_block_globals(&mir, rb);
+                    (bind_groups_from_globals(&rb_globals, &module_path_map), push_constants_from_globals(&rb_globals, &mir.structs))
+                } else {
+                    (bind_groups_from_globals(&mir.globals, &module_path_map), push_constants_from_globals(&mir.globals, &mir.structs))
+                };
+                CompiledEntry {
+                    rust_mod_path: root_module_path.clone(),
+                    shader_name: name.clone(),
+                    stage: ep.stage,
+                    entry_point: ep.name.to_string(),
+                    wgsl_source: wgsl.clone(),
+                    bind_groups,
+                    push_constants,
+                    workgroup_size: ep.workgroup_size,
+                    source_files: source_files.clone(),
+                    exported_type_names: exported_type_names.clone(),
+                    render_block: render_block.map(|rb| rb.name.to_string()),
+                }
             })
             .collect::<Vec<_>>();
 
@@ -633,6 +693,60 @@ fn bundle_single_entry(
     })
 }
 
+/// Compute DCE-trimmed globals for a render block by combining reachability
+/// from both its vertex and fragment entry points.
+///
+/// Creates a temporary MIR program containing all entry points referenced by
+/// the render block, runs dead-code elimination once, and returns the union
+/// of reachable globals. Render-block explicitly-declared bindings are also
+/// included even if not directly referenced by shader code.
+fn render_block_globals<'a>(
+    mir: &shadml_mir::MirProgram<'a>,
+    rb: &shadml_mir::MirRenderBlock,
+) -> Vec<shadml_mir::MirGlobal<'a>> {
+    let rb_entry_points: Vec<shadml_mir::MirEntryPoint<'a>> = [rb.vertex_entry, rb.fragment_entry]
+        .iter()
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| mir.entry_points.iter().find(|e| e.name == *name))
+        .cloned()
+        .collect();
+
+    if rb_entry_points.is_empty() {
+        // No entry points: include only explicitly-declared bindings
+        let declared: HashSet<&str> = rb.binding_names.iter().map(|s| *s).collect();
+        return mir
+            .globals
+            .iter()
+            .filter(|g| declared.contains(g.name))
+            .cloned()
+            .collect();
+    }
+
+    let rb_mir = shadml_mir::MirProgram {
+        structs: mir.structs.clone(),
+        globals: mir.globals.clone(),
+        functions: mir.functions.clone(),
+        entry_points: rb_entry_points,
+        constants: mir.constants.clone(),
+        render_blocks: mir.render_blocks.clone(),
+    };
+    let rb_trimmed = shadml_mir::reachability::eliminate_dead_code(&rb_mir);
+
+    // Ensure render block's own declared bindings are included
+    let mut globals = rb_trimmed.globals;
+    let mut global_names: HashSet<&str> = globals.iter().map(|g| g.name).collect();
+    for binding_name in &rb.binding_names {
+        if !global_names.contains(*binding_name) {
+            if let Some(g) = mir.globals.iter().find(|g| g.name == *binding_name) {
+                global_names.insert(g.name);
+                globals.push(g.clone());
+            }
+        }
+    }
+
+    globals
+}
+
 /// Generate split per-entry-point WGSL outputs.
 ///
 /// For each entry point in the MIR, creates a separate MIR program containing
@@ -645,6 +759,7 @@ fn generate_split_outputs<'a>(
     rust_mod_path: &[String],
     source_files: &[PathBuf],
     preserve_comments: bool,
+    module_path_map: &HashMap<String, Vec<String>>,
 ) -> Result<(Vec<BundleEntry>, Vec<CompiledEntry>), BundleError> {
     let mut entries = Vec::new();
     let mut compiled_entries = Vec::new();
@@ -657,11 +772,14 @@ fn generate_split_outputs<'a>(
             functions: mir.functions.clone(),
             entry_points: vec![ep.clone()],
             constants: mir.constants.clone(),
+            render_blocks: mir.render_blocks.clone(),
         };
 
         // Run DCE scoped to this entry point
-        let trimmed = shadml_mir::reachability::eliminate_dead_code(&single_ep_mir);
-        validate_mir_for_bundle(&trimmed, source_file)?;
+        let mut trimmed = shadml_mir::reachability::eliminate_dead_code(&single_ep_mir);
+        // Clear render blocks: they reference entry points not present in the
+        // split program and are irrelevant for per-entry-point WGSL output.
+        trimmed.render_blocks.clear();
 
         let wgsl = if preserve_comments {
             shadml_wgsl_codegen::emit_wgsl_with_comments(&trimmed)
@@ -674,8 +792,16 @@ fn generate_split_outputs<'a>(
             output_base_name(source_file, source_roots),
             ep.name
         );
-        let bind_groups = bind_groups_from_globals(&trimmed.globals);
-        let exported_types = exported_types_from_structs(&trimmed.structs);
+        let render_block = mir.render_blocks.iter().find(|rb| {
+            rb.vertex_entry == ep.name || rb.fragment_entry == ep.name
+        });
+        let (bind_groups, push_constants) = if let Some(rb) = render_block {
+            let rb_globals = render_block_globals(mir, rb);
+            (bind_groups_from_globals(&rb_globals, module_path_map), push_constants_from_globals(&rb_globals, &mir.structs))
+        } else {
+            (bind_groups_from_globals(&trimmed.globals, module_path_map), push_constants_from_globals(&trimmed.globals, &trimmed.structs))
+        };
+        let exported_types = exported_types_from_structs(&trimmed.structs, rust_mod_path, module_path_map);
 
         entries.push(BundleEntry {
             name: name.clone(),
@@ -695,10 +821,11 @@ fn generate_split_outputs<'a>(
             entry_point: ep.name.to_string(),
             wgsl_source: wgsl,
             bind_groups,
-            push_constants: push_constants_from_globals(&trimmed.globals, &trimmed.structs),
+            push_constants,
             workgroup_size: ep.workgroup_size,
             source_files: source_files.to_vec(),
             exported_type_names: exported_type_names(&exported_types),
+            render_block: render_block.map(|rb| rb.name.to_string()),
         });
     }
 
@@ -779,6 +906,7 @@ fn decl_name_and_kind(decl: &Decl) -> Option<(String, &'static str)> {
         Decl::BitfieldDecl { name, .. } => Some((name.clone(), "bitfield")),
         Decl::ModuleDecl { .. } | Decl::ImportDecl { .. } => None,
         Decl::CfgDecl { .. } => None, // cfg blocks are containers, not names
+        Decl::RenderBlock { name, .. } => Some((name.clone(), "render block")),
     }
 }
 
@@ -951,6 +1079,39 @@ fn output_base_name(path: &Path, source_roots: &[PathBuf]) -> String {
         "output".to_string()
     } else {
         name
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Origin tracking helpers
+// ---------------------------------------------------------------------------
+
+/// Build a map from declaration name to origin module name by scanning the
+/// module graph. Only tracks names relevant to bindgen: data types,
+/// type aliases, bitfields, bindings, and constants.
+fn build_origin_map(graph: &shadml_parser::module_resolver::ModuleGraph) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for module in &graph.modules {
+        for decl in &module.program.decls {
+            if let Some(name) = decl_name(decl) {
+                map.insert(name, module.name.clone());
+            }
+        }
+    }
+    map
+}
+
+/// Extract the declared name from a declaration, if it has one.
+fn decl_name(decl: &shadml_parser::parser::Decl) -> Option<String> {
+    use shadml_parser::parser::Decl;
+    match decl {
+        Decl::DataDecl { name, .. }
+        | Decl::TypeAlias { name, .. }
+        | Decl::BitfieldDecl { name, .. }
+        | Decl::BindingDecl { name, .. }
+        | Decl::ConstDecl { name, .. }
+        | Decl::TypeSig { name, .. } => Some(name.clone()),
+        _ => None,
     }
 }
 

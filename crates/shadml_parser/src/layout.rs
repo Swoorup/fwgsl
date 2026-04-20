@@ -212,6 +212,41 @@ impl LayoutResolver {
                     }
                 }
 
+                // `render` is a layout-triggering keyword, but it takes a name argument
+                // before the block body: `render <name>\n  <body>`.
+                // We emit the keyword and name, then push a layout context at the
+                // column of the first body item (the token after the name on the next line).
+                SyntaxKind::KwRender => {
+                    // Emit `render`
+                    self.output.push(self.tokens[self.pos].clone());
+                    self.pos += 1;
+
+                    // Skip trivia and the name token, emitting them normally
+                    while !self.at_end() && self.tokens[self.pos].kind.is_trivia() {
+                        self.output.push(self.tokens[self.pos].clone());
+                        self.pos += 1;
+                    }
+                    if !self.at_end() {
+                        self.output.push(self.tokens[self.pos].clone());
+                        self.pos += 1;
+                    }
+
+                    // Find next non-trivia token (first item in the block body)
+                    if let Some(next_idx) = self.next_non_trivia_index(self.pos) {
+                        let next_kind = self.tokens[next_idx].kind;
+                        if next_kind != SyntaxKind::LBrace {
+                            let col = self.line_map.column(self.tokens[next_idx].span.start);
+                            let offset = self.tokens[next_idx].span.start;
+                            self.indent_stack.push(col);
+                            self.suppress_next_semi = true;
+                            self.output.push(Self::make_virtual_token(
+                                SyntaxKind::LayoutBraceOpen,
+                                offset,
+                            ));
+                        }
+                    }
+                }
+
                 SyntaxKind::Eof => {
                     // Close all open layout contexts before Eof
                     let offset = self.tokens[self.pos].span.start;
