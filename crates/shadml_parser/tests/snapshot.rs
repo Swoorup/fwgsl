@@ -1,8 +1,8 @@
 //! Snapshot tests for the shadml lexer, layout resolver, and parser.
 
-use shadml_parser::layout::resolve_layout;
-use shadml_parser::lexer::lex;
-use shadml_parser::parser::Parser;
+use shadml_parser::resolve_layout;
+use shadml_parser::lex;
+use shadml_parser::Parser;
 
 const EXAMPLE_PROGRAM: &str = "\
 data Color = Red | Green | Blue

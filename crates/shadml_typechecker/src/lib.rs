@@ -983,6 +983,40 @@ pub fn ty_to_wgsl(ty: &Ty) -> Result<WgslType, String> {
     }
 }
 
+/// Extract matrix type dimensions and scalar type.
+///
+/// Given `Mat<rows, cols, scalar>`, returns `Some((rows, cols, scalar))`.
+/// Returns `None` if the type is not a matrix.
+pub fn extract_mat_type(ty: &Ty) -> Option<(u8, u8, Ty)> {
+    if let Ty::App(f, scalar) = &ty {
+        if let Ty::App(g, cols) = f.as_ref() {
+            if let Ty::App(con, rows) = g.as_ref() {
+                if let (Ty::Con(name), Ty::Nat(r), Ty::Nat(c)) =
+                    (con.as_ref(), rows.as_ref(), cols.as_ref())
+                {
+                    if name == ty_name::MAT {
+                        return Some((*r as u8, *c as u8, scalar.as_ref().clone()));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Map a single swizzle character to its component index.
+///
+/// Returns `None` for non-swizzle characters.
+pub fn swizzle_char_index(c: char) -> Option<usize> {
+    match c {
+        'x' | 'r' => Some(0),
+        'y' | 'g' => Some(1),
+        'z' | 'b' => Some(2),
+        'w' | 'a' => Some(3),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

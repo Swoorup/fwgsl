@@ -16,6 +16,31 @@ pub mod validate;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// An error that can occur during HIR → MIR lowering.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MirLowerError {
+    /// A type cannot be represented in MIR / WGSL.
+    UnsupportedType(String),
+    /// An expression construct is not supported in MIR lowering.
+    UnsupportedExpr(String),
+    /// An expression appears in an invalid context (e.g. `if` in pure position).
+    InvalidContext(String),
+}
+
+impl fmt::Display for MirLowerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MirLowerError::UnsupportedType(ty) => write!(f, "cannot convert to MIR type: {ty}"),
+            MirLowerError::UnsupportedExpr(msg) => write!(f, "{msg}"),
+            MirLowerError::InvalidContext(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level program
 // ---------------------------------------------------------------------------
 

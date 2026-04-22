@@ -1068,7 +1068,7 @@ fn find_builtin_operator_definition(source: &str, pos: Position) -> Option<Locat
     let mut prelude_analyzer = SemanticAnalyzer::new();
     prelude_analyzer.analyze(prelude);
     let prelude_source = shadml_parser::prelude_source();
-    let prelude_uri = Url::from_file_path(shadml_parser::prelude::prelude_path()).ok()?;
+    let prelude_uri = Url::from_file_path(shadml_parser::prelude_path()).ok()?;
 
     let mut matches = Vec::new();
     if let Some((lhs_span, rhs_span, expr_span)) = find_operator_context(&user_program, offset, &operator)

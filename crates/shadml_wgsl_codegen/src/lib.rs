@@ -11,6 +11,8 @@ use shadml_mir::*;
 /// shadml uses distinct names for each overload (e.g. `textureLoadMsaa`)
 /// because the type environment cannot store multiple schemes per name.
 /// WGSL uses the same name for all overloads, resolved by argument types.
+const BUILTIN_ARRAY_LENGTH: &str = "arrayLength";
+
 fn wgsl_builtin_name(name: &str) -> &str {
     match name {
         "textureSampleArray" => "textureSample",
@@ -638,7 +640,7 @@ impl WgslEmitter {
                 }
                 self.write("(");
                 // arrayLength in WGSL takes a pointer argument: arrayLength(&buf)
-                let needs_addr_of = *name == "arrayLength";
+                let needs_addr_of = *name == BUILTIN_ARRAY_LENGTH;
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         self.write(", ");

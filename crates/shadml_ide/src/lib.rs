@@ -1545,7 +1545,7 @@ pub fn build_goto_definition_with_prelude_flag(
     let prelude_uri = {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Url::from_file_path(shadml_parser::prelude::prelude_path()).ok()?
+            Url::from_file_path(shadml_parser::prelude_path()).ok()?
         }
         #[cfg(target_arch = "wasm32")]
         {

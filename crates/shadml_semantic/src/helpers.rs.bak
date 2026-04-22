@@ -1,0 +1,51 @@
+//! Shared helpers used by both semantic analysis and AST lowering.
+
+use std::collections::HashMap;
+
+use shadml_parser::parser::*;
+use shadml_span::Span;
+use shadml_typechecker::*;
+
+/// Wrap a body expression with `let` bindings from a `where` clause.
+///
+/// If there are no where-bindings, returns the body unchanged.
+/// Otherwise produces `let <bindings> in <body>`.
+pub fn desugar_where(body: &Expr, where_binds: &[LocalBind], span: Span) -> Expr {
+    if where_binds.is_empty() {
+        body.clone()
+    } else {
+        Expr::Let(where_binds.to_vec(), Box::new(body.clone()), span)
+    }
+}
+
+/// Allocate a fresh type variable in the inference engine.
+pub fn fresh_var_id(engine: &mut InferEngine) -> TyVarId {
+    match engine.fresh_var() {
+        Ty::Var(id) => id,
+        _ => unreachable!(),
+    }
+}
+
+/// Collect all type-variable IDs present in a scope, sorted and deduplicated.
+pub fn scope_vars(scope: &HashMap<String, TyVarId>) -> Vec<TyVarId> {
+    let mut vars: Vec<_> = scope.values().copied().collect();
+    vars.sort_unstable();
+    vars.dedup();
+    vars
+}
+
+/// Apply a list of type parameters to a base type constructor.
+///
+/// Looks up each parameter name in `scope` and builds a curried application:
+/// `Con(name) param1 param2 ...`.
+pub fn apply_type_params(name: &str, type_params: &[String], scope: &HashMap<String, TyVarId>) -> Ty {
+    type_params
+        .iter()
+        .fold(Ty::Con(name.to_string()), |ty, param| {
+            let var = scope
+                .get(param)
+                .copied()
+                .expect("type parameter should exist in scope");
+            Ty::app(ty, Ty::Var(var))
+        })
+}

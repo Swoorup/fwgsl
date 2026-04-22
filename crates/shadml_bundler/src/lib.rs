@@ -582,7 +582,7 @@ fn bundle_single_entry(
                 .map(|e| BundleDiagnostic {
                     file: Some(entry_file.to_path_buf()),
                     severity: BundleSeverity::Error,
-                    message: e.clone(),
+                    message: e.to_string(),
                     help: None,
                 })
                 .collect(),

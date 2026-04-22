@@ -13,38 +13,13 @@ use std::collections::{HashMap, HashSet};
 
 use shadml_allocator::Allocator;
 use shadml_hir::*;
-use shadml_typechecker::{ty_name, Ty};
+use shadml_typechecker::{extract_mat_type, swizzle_char_index as swizzle_to_index, ty_name, Ty};
 
-/// Map a single swizzle character to its column index (x→0, y→1, z→2, w→3).
-fn swizzle_to_index(c: char) -> Option<usize> {
-    match c {
-        'x' | 'r' => Some(0),
-        'y' | 'g' => Some(1),
-        'z' | 'b' => Some(2),
-        'w' | 'a' => Some(3),
-        _ => None,
-    }
-}
-
-/// Extract Mat type info: Mat rows cols scalar -> Some((rows, cols, scalar))
-fn extract_mat_type(ty: &Ty) -> Option<(u8, u8, Ty)> {
-    if let Ty::App(f, scalar) = &ty {
-        if let Ty::App(g, cols) = f.as_ref() {
-            if let Ty::App(con, rows) = g.as_ref() {
-                if let (Ty::Con(name), Ty::Nat(r), Ty::Nat(c)) =
-                    (con.as_ref(), rows.as_ref(), cols.as_ref())
-                {
-                    if name == ty_name::MAT {
-                        return Some((*r as u8, *c as u8, scalar.as_ref().clone()));
-                    }
-                }
-            }
-        }
-    }
-    None
-}
+// `swizzle_to_index` and `extract_mat_type` are imported from `shadml_typechecker`.
 
 use crate::*;
+
+const BUILTIN_WRITE_AT: &str = "writeAt";
 
 /// Bitfield field metadata used during lowering.
 #[derive(Clone, Debug)]
@@ -495,7 +470,7 @@ fn lower_data_type_to_struct<'a>(
     name: &str,
     constructors: &[HirConstructor],
     ctx: &LowerCtx<'a>,
-) -> Result<Option<MirStruct<'a>>, String> {
+) -> Result<Option<MirStruct<'a>>, MirLowerError> {
     if constructors.len() > 1 && constructors.iter().any(|c| !c.fields.is_empty()) {
         // Sum type with fields: emit one struct with tag + union of fields
         let mut fields = vec![MirField {
@@ -553,7 +528,7 @@ fn lower_data_type_to_struct<'a>(
                             .collect(),
                     })
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Result<Vec<_>, MirLowerError>>()?;
             Ok(Some(MirStruct {
                 name: ctx.arena.alloc_str(name),
                 fields,
@@ -572,7 +547,7 @@ fn lower_data_type_to_struct<'a>(
 pub fn lower_hir_to_mir<'a>(
     arena: &'a Allocator,
     hir: &HirProgram,
-) -> Result<MirProgram<'a>, Vec<String>> {
+) -> Result<MirProgram<'a>, Vec<MirLowerError>> {
     let ctx = LowerCtx::new(arena, hir);
     let mut errors = Vec::new();
     let mut structs = Vec::new();
@@ -752,12 +727,12 @@ pub fn lower_hir_to_mir<'a>(
 }
 
 /// Convert a Ty to MirType (without ADT context).
-pub fn ty_to_mir_type<'a>(arena: &'a Allocator, ty: &Ty) -> Result<MirType<'a>, String> {
+pub fn ty_to_mir_type<'a>(arena: &'a Allocator, ty: &Ty) -> Result<MirType<'a>, MirLowerError> {
     ty_to_mir_type_inner(arena, ty, None)
 }
 
 /// Convert a Ty to MirType, optionally using ADT context.
-fn ty_to_mir_type_with_ctx<'a>(ty: &Ty, ctx: Option<&LowerCtx<'a>>) -> Result<MirType<'a>, String> {
+fn ty_to_mir_type_with_ctx<'a>(ty: &Ty, ctx: Option<&LowerCtx<'a>>) -> Result<MirType<'a>, MirLowerError> {
     match ctx {
         Some(c) => ty_to_mir_type_inner(c.arena, ty, Some(c)),
         None => {
@@ -771,7 +746,7 @@ fn ty_to_mir_type_inner<'a>(
     arena: &'a Allocator,
     ty: &Ty,
     ctx: Option<&LowerCtx<'a>>,
-) -> Result<MirType<'a>, String> {
+) -> Result<MirType<'a>, MirLowerError> {
     let ty = shadml_typechecker::normalize_type_aliases(ty);
 
     match &ty {
@@ -827,10 +802,10 @@ fn ty_to_mir_type_inner<'a>(
                         if let Ty::Nat(count) = arg.as_ref() {
                             let elem = ty_to_mir_type_inner(arena, n, ctx)?;
                             let count = u32::try_from(*count)
-                                .map_err(|_| format!("BindingArray count out of range: {}", count))?;
+                                .map_err(|_| MirLowerError::UnsupportedType(format!("BindingArray count out of range: {}", count)))?;
                             Ok(MirType::BindingArray(arena.alloc(elem), count))
                         } else {
-                            Err(format!("BindingArray expects a natural number count, got: {}", arg))
+                            Err(MirLowerError::UnsupportedType(format!("BindingArray expects a natural number count, got: {}", arg)))
                         }
                     }
                     (Ty::App(fff, nn), Ty::Nat(m)) => {
@@ -840,7 +815,7 @@ fn ty_to_mir_type_inner<'a>(
                                 return Ok(MirType::Mat(*n as u8, *m as u8, arena.alloc(scalar)));
                             }
                         }
-                        Err(format!("Cannot convert to MIR type: {}", ty))
+                        Err(MirLowerError::UnsupportedType(format!("Cannot convert to MIR type: {}", ty)))
                     }
                     (Ty::Con(name), Ty::Nat(n)) if name == ty_name::VEC => {
                         let scalar = ty_to_mir_type_inner(arena, arg, ctx)?;
@@ -849,7 +824,7 @@ fn ty_to_mir_type_inner<'a>(
                     (Ty::Con(name), Ty::Nat(n)) if name == ty_name::TENSOR => {
                         let elem = ty_to_mir_type_inner(arena, arg, ctx)?;
                         let len = u32::try_from(*n)
-                            .map_err(|_| format!("Tensor length out of range for MIR: {}", n))?;
+                            .map_err(|_| MirLowerError::UnsupportedType(format!("Tensor length out of range for MIR: {}", n)))?;
                         Ok(MirType::Array(arena.alloc(elem), len))
                     }
                     // Handle surface syntax order: Tensor<T, N> (Array<T, N>)
@@ -857,22 +832,22 @@ fn ty_to_mir_type_inner<'a>(
                         if let Ty::Nat(len) = arg.as_ref() {
                             let elem = ty_to_mir_type_inner(arena, n, ctx)?;
                             let len = u32::try_from(*len).map_err(|_| {
-                                format!("Tensor length out of range for MIR: {}", len)
+                                MirLowerError::UnsupportedType(format!("Tensor length out of range for MIR: {}", len))
                             })?;
                             Ok(MirType::Array(arena.alloc(elem), len))
                         } else {
-                            Err(format!("Cannot convert to MIR type: {}", ty))
+                            Err(MirLowerError::UnsupportedType(format!("Cannot convert to MIR type: {}", ty)))
                         }
                     }
-                    _ => Err(format!("Cannot convert to MIR type: {}", ty)),
+                    _ => Err(MirLowerError::UnsupportedType(format!("Cannot convert to MIR type: {}", ty))),
                 },
-                _ => Err(format!("Cannot convert to MIR type: {}", ty)),
+                _ => Err(MirLowerError::UnsupportedType(format!("Cannot convert to MIR type: {}", ty))),
             }
         }
         Ty::Arrow(_, _) => {
             // Function types can't be represented in WGSL. This is only
             // reached for higher-order values that haven't been applied yet.
-            Err("Function types cannot be represented in WGSL".into())
+            Err(MirLowerError::UnsupportedType("Function types cannot be represented in WGSL".into()))
         }
         Ty::Var(_) => {
             // Unresolved type variables arise from unannotated polymorphic
@@ -880,12 +855,12 @@ fn ty_to_mir_type_inner<'a>(
             // so we default to I32, matching Haskell's numeric defaulting.
             Ok(MirType::I32)
         }
-        Ty::Error => Err("cannot lower error type to MIR".into()),
-        _ => Err(format!("Cannot convert to MIR type: {}", ty)),
+        Ty::Error => Err(MirLowerError::UnsupportedType("cannot lower error type to MIR".into())),
+        _ => Err(MirLowerError::UnsupportedType(format!("Cannot convert to MIR type: {}", ty))),
     }
 }
 
-fn lower_hir_function<'a>(f: &HirFunction, ctx: &LowerCtx<'a>) -> Result<MirFunction<'a>, String> {
+fn lower_hir_function<'a>(f: &HirFunction, ctx: &LowerCtx<'a>) -> Result<MirFunction<'a>, MirLowerError> {
     let resolve = |ty: &Ty| ty_to_mir_type_with_ctx(ty, Some(ctx));
     let params: Vec<MirParam<'a>> = f
         .params
@@ -896,7 +871,7 @@ fn lower_hir_function<'a>(f: &HirFunction, ctx: &LowerCtx<'a>) -> Result<MirFunc
                 ty: resolve(ty)?,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, MirLowerError>>()?;
 
     let return_ty = resolve(&f.return_ty)?;
 
@@ -919,7 +894,7 @@ fn lower_hir_function<'a>(f: &HirFunction, ctx: &LowerCtx<'a>) -> Result<MirFunc
 fn lower_hir_entry_point<'a>(
     ep: &HirEntryPoint,
     ctx: &LowerCtx<'a>,
-) -> Result<MirEntryPoint<'a>, String> {
+) -> Result<MirEntryPoint<'a>, MirLowerError> {
     // Parse stage and workgroup_size from attributes
     let mut stage = ShaderStage::Compute;
     let mut workgroup_size = None;
@@ -954,7 +929,7 @@ fn lower_hir_entry_point<'a>(
                 ty: ty_to_mir_type_with_ctx(ty, Some(ctx))?,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, MirLowerError>>()?;
 
     // Compute shaders always have void return type in WGSL
     let return_ty = if stage == ShaderStage::Compute {
@@ -997,7 +972,7 @@ fn lower_hir_entry_point<'a>(
 fn lower_hir_expr_to_stmts<'a>(
     expr: &HirExpr,
     ctx: &LowerCtx<'a>,
-) -> Result<(Vec<MirStmt<'a>>, MirExpr<'a>), String> {
+) -> Result<(Vec<MirStmt<'a>>, MirExpr<'a>), MirLowerError> {
     match expr {
         HirExpr::Let(binds, body, _ty, _span) => {
             let mut stmts = Vec::new();
@@ -1009,7 +984,7 @@ fn lower_hir_expr_to_stmts<'a>(
                 let bind_ty = bind_val
                     .result_type()
                     .or_else(|| ty_to_mir_type_with_ctx(bind_expr.ty(), Some(ctx)).ok())
-                    .ok_or_else(|| format!("cannot resolve type for let-binding '{}'", name))?;
+                    .ok_or_else(|| MirLowerError::UnsupportedExpr(format!("cannot resolve type for let-binding '{}'", name)))?;
                 stmts.push(MirStmt::Let(ctx.arena.alloc_str(name), bind_ty, bind_val));
             }
             let (mut body_stmts, body_expr) = lower_hir_expr_to_stmts(body, ctx)?;
@@ -1118,7 +1093,7 @@ fn lower_hir_expr_to_stmts<'a>(
                 pre_stmts.append(&mut arg_stmts);
                 mir_args.push(arg_expr);
             }
-            if func_name == "writeAt" && mir_args.len() == 3 {
+            if func_name == BUILTIN_WRITE_AT && mir_args.len() == 3 {
                 let stmt = MirStmt::IndexAssign(
                     mir_args[0].clone(),
                     mir_args[1].clone(),
@@ -1148,7 +1123,7 @@ fn lower_hir_expr_to_stmts<'a>(
                     .result_type()
                     .or_else(|| ty_to_mir_type_with_ctx(init_expr.ty(), Some(ctx)).ok())
                     .ok_or_else(|| {
-                        format!("cannot resolve type for loop binding '{}'", bind_name)
+                        MirLowerError::UnsupportedExpr(format!("cannot resolve type for loop binding '{}'", bind_name))
                     })?;
                 pre_stmts.append(&mut init_stmts);
                 let alloc_bind_name = ctx.arena.alloc_str(bind_name);
@@ -1189,7 +1164,7 @@ fn lower_hir_expr_to_stmts<'a>(
 }
 
 /// Lower a pure HIR expression to a MIR expression (no statements needed).
-fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>, String> {
+fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>, MirLowerError> {
     match expr {
         HirExpr::Lit(lit, ty, _span) => {
             let mir_lit = lower_hir_lit(lit, ty);
@@ -1212,7 +1187,7 @@ fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>,
         }
 
         HirExpr::Tuple(_, _, _) | HirExpr::TupleIndex(_, _, _, _) => {
-            Err("tuple expressions must be eliminated before MIR lowering".into())
+            Err(MirLowerError::UnsupportedExpr("tuple expressions must be eliminated before MIR lowering".into()))
         }
 
         HirExpr::BinOp(op, lhs, rhs, ty, _span) => {
@@ -1231,7 +1206,7 @@ fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>,
         HirExpr::App(_, _, ty, _span) => {
             // Flatten curried applications: App(App(f, a), b) -> Call(f, [a, b])
             let (func_name, args) = flatten_app(expr);
-            let mir_args: Result<Vec<MirExpr<'a>>, String> =
+            let mir_args: Result<Vec<MirExpr<'a>>, MirLowerError> =
                 args.iter().map(|a| lower_hir_expr(a, ctx)).collect();
             let mir_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
             let mir_args = mir_args?;
@@ -1272,7 +1247,7 @@ fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>,
                 } else {
                     name.clone()
                 };
-                let mir_args: Result<Vec<MirExpr<'a>>, String> =
+                let mir_args: Result<Vec<MirExpr<'a>>, MirLowerError> =
                     args.iter().map(|a| lower_hir_expr(a, ctx)).collect();
                 Ok(MirExpr::ConstructStruct(
                     ctx.arena.alloc_str(&struct_name),
@@ -1388,15 +1363,15 @@ fn lower_hir_expr<'a>(expr: &HirExpr, ctx: &LowerCtx<'a>) -> Result<MirExpr<'a>,
 
         HirExpr::If(cond, then_expr, else_expr, _ty, _span) => {
             let _ = (cond, then_expr, else_expr);
-            Err("If-expression in pure expression context; use lower_hir_expr_to_stmts".into())
+            Err(MirLowerError::InvalidContext("If-expression in pure expression context; use lower_hir_expr_to_stmts".into()))
         }
 
         HirExpr::Case(_, _, _ty, _span) => {
-            Err("Case-expression in pure expression context; use lower_hir_expr_to_stmts".into())
+            Err(MirLowerError::InvalidContext("Case-expression in pure expression context; use lower_hir_expr_to_stmts".into()))
         }
 
         HirExpr::Loop(_, _, _, _, _) => {
-            Err("Loop-expression in pure expression context; use lower_hir_expr_to_stmts".into())
+            Err(MirLowerError::InvalidContext("Loop-expression in pure expression context; use lower_hir_expr_to_stmts".into()))
         }
 
         HirExpr::BitfieldConstruct(type_name, fields, _ty, _span) => {
@@ -1414,10 +1389,10 @@ fn lower_sum_type_constructor_payload<'a>(
     ctor_fields: &[HirFieldDef],
     lowered_args: Vec<MirExpr<'a>>,
     ctx: &LowerCtx<'a>,
-) -> Result<Vec<MirExpr<'a>>, String> {
+) -> Result<Vec<MirExpr<'a>>, MirLowerError> {
     let layout = ctx
         .sum_type_payload_layout(dt_name)
-        .ok_or_else(|| format!("missing payload layout for sum type `{dt_name}`"))?;
+        .ok_or_else(|| MirLowerError::UnsupportedExpr(format!("missing payload layout for sum type `{dt_name}`")))?;
 
     let provided: HashMap<&str, MirExpr<'a>> = ctor_fields
         .iter()
@@ -1443,13 +1418,13 @@ fn lower_bitfield_construct<'a>(
     type_name: &str,
     fields: &[(String, HirExpr)],
     ctx: &LowerCtx<'a>,
-) -> Result<MirExpr<'a>, String> {
+) -> Result<MirExpr<'a>, MirLowerError> {
     let mut result = MirExpr::Lit(MirLit::U32(0));
 
     for (field_name, field_expr) in fields {
         let bf_info = ctx
             .lookup_bitfield_field(type_name, field_name)
-            .ok_or_else(|| format!("unknown bitfield field '{}' in '{}'", field_name, type_name))?;
+            .ok_or_else(|| MirLowerError::UnsupportedExpr(format!("unknown bitfield field '{}' in '{}'", field_name, type_name)))?;
 
         let mir_val = lower_hir_expr(field_expr, ctx)?;
         let mask = (1u32 << bf_info.width) - 1;
@@ -1529,7 +1504,7 @@ fn lower_bitfield_update<'a>(
     base: &HirExpr,
     fields: &[(String, HirExpr)],
     ctx: &LowerCtx<'a>,
-) -> Result<MirExpr<'a>, String> {
+) -> Result<MirExpr<'a>, MirLowerError> {
     let mir_base = lower_hir_expr(base, ctx)?;
 
     // Build the clear-mask: AND-out all fields being updated
@@ -1537,7 +1512,7 @@ fn lower_bitfield_update<'a>(
     for (field_name, _) in fields {
         let bf_info = ctx
             .lookup_bitfield_field(type_name, field_name)
-            .ok_or_else(|| format!("unknown bitfield field '{}' in '{}'", field_name, type_name))?;
+            .ok_or_else(|| MirLowerError::UnsupportedExpr(format!("unknown bitfield field '{}' in '{}'", field_name, type_name)))?;
         let field_mask = ((1u32 << bf_info.width) - 1) << bf_info.offset;
         clear_mask &= !field_mask;
     }
@@ -1554,7 +1529,7 @@ fn lower_bitfield_update<'a>(
     for (field_name, field_expr) in fields {
         let bf_info = ctx
             .lookup_bitfield_field(type_name, field_name)
-            .ok_or_else(|| format!("unknown bitfield field '{}' in '{}'", field_name, type_name))?;
+            .ok_or_else(|| MirLowerError::UnsupportedExpr(format!("unknown bitfield field '{}' in '{}'", field_name, type_name)))?;
 
         let mir_val = lower_hir_expr(field_expr, ctx)?;
         let mask = (1u32 << bf_info.width) - 1;
@@ -1643,7 +1618,7 @@ fn lower_loop_body<'a>(
     result_var: &'a str,
     result_ty: &MirType<'a>,
     ctx: &LowerCtx<'a>,
-) -> Result<Vec<MirStmt<'a>>, String> {
+) -> Result<Vec<MirStmt<'a>>, MirLowerError> {
     match body {
         // If-expression: recursively handle both branches
         HirExpr::If(cond, then_branch, else_branch, _ty, _span) => {
@@ -1680,7 +1655,7 @@ fn lower_loop_body<'a>(
                     .result_type()
                     .or_else(|| ty_to_mir_type_with_ctx(init_expr.ty(), Some(ctx)).ok())
                     .ok_or_else(|| {
-                        format!("cannot resolve type for loop let-binding '{}'", name)
+                        MirLowerError::UnsupportedExpr(format!("cannot resolve type for loop let-binding '{}'", name))
                     })?;
                 stmts.append(&mut init_stmts);
                 stmts.push(MirStmt::Let(ctx.arena.alloc_str(name), bind_ty, init_mir));
@@ -1739,7 +1714,7 @@ fn lower_app_with_args<'a>(
     mir_args: Vec<MirExpr<'a>>,
     mir_ty: MirType<'a>,
     ctx: &LowerCtx<'a>,
-) -> Result<MirExpr<'a>, String> {
+) -> Result<MirExpr<'a>, MirLowerError> {
     match (func_name, mir_args.as_slice()) {
         ("negate", [arg]) => Ok(MirExpr::UnaryOp(
             MirUnaryOp::Neg,
@@ -1890,7 +1865,7 @@ fn lower_case_arms<'a>(
     result_name: &'a str,
     is_unit: bool,
     ctx: &LowerCtx<'a>,
-) -> Result<Option<MirStmt<'a>>, String> {
+) -> Result<Option<MirStmt<'a>>, MirLowerError> {
     if arms.is_empty() {
         return Ok(None);
     }
