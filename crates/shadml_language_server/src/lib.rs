@@ -357,85 +357,43 @@ impl LanguageServer for ShadmlBackend {
             None => return Ok(None),
         };
 
-        // Extract the identifier at cursor position (needed for cross-file lookup).
-        let name = ident_at_position(&text, pos);
-
-        // Try local goto-definition first.
+        // 1. Try local goto-definition via the IDE index.
         if let Some(result) = ide_build_goto_definition_with_prelude_flag(
             uri,
             &text,
             pos,
             is_compiler_prelude_uri(uri),
         ) {
-            // Verify the result actually points to a definition of the same name
-            // in the current file. The IDE index can produce spurious results for
-            // names imported from other modules.
-            let is_valid = match &result {
-                GotoDefinitionResponse::Scalar(loc) => {
-                    if &loc.uri != uri {
-                        true
-                    } else {
-                        name.as_deref()
-                            .map_or(true, |n| location_text_matches(&text, &loc.range, n))
-                    }
-                }
-                GotoDefinitionResponse::Array(locs) => name.as_deref().map_or(true, |n| {
-                    locs.iter()
-                        .any(|loc| &loc.uri != uri || location_text_matches(&text, &loc.range, n))
-                }),
-                _ => true,
-            };
-            if is_valid {
-                return Ok(Some(result));
-            }
+            return Ok(Some(result));
         }
 
-        // If the cursor is on a record field (after `.`), search for field
-        // definitions in data declarations — in the current file first, then
-        // in imported modules.
-        if let Some(ref name) = name {
-            if is_field_access_at(&text, pos) {
-                if let Some(range) = find_record_field_in_source(&text, name) {
-                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                        uri: uri.clone(),
-                        range,
-                    })));
-                }
-                if let Some(imported) = self.module_files.get(uri) {
-                    for (path, src) in imported.iter() {
-                        if let Some(range) = find_record_field_in_source(src, name) {
-                            let module_uri = match Url::from_file_path(path) {
-                                Ok(u) => u,
-                                Err(_) => continue,
-                            };
-                            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                                uri: module_uri,
-                                range,
-                            })));
-                        }
-                    }
-                }
-            }
-        }
-
-        // If not found locally, try imported module files for top-level definitions.
-        if let Some(ref name) = name {
+        // 2. For imported names, search each imported module's IDE index.
+        if let Some(name) = ident_at_position(&text, pos) {
             if let Some(imported) = self.module_files.get(uri) {
                 for (path, src) in imported.iter() {
-                    if let Some(range) = find_definition_in_source(src, name) {
+                    let ranges = shadml_ide::find_definition_ranges(src, &name);
+                    if !ranges.is_empty() {
                         let module_uri = match Url::from_file_path(path) {
                             Ok(u) => u,
                             Err(_) => continue,
                         };
-                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: module_uri,
-                            range,
-                        })));
+                        let locations: Vec<Location> = ranges
+                            .into_iter()
+                            .map(|range| Location {
+                                uri: module_uri.clone(),
+                                range,
+                            })
+                            .collect();
+                        return Ok(Some(match locations.as_slice() {
+                            [single] => GotoDefinitionResponse::Scalar(single.clone()),
+                            _ => GotoDefinitionResponse::Array(locations),
+                        }));
                     }
                 }
             }
         }
 
+        // 3. Builtin operator resolution (type-directed).
         if let Some(location) = find_builtin_operator_definition(&text, pos) {
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));
         }
@@ -849,97 +807,8 @@ fn spec_hover(spec: &CompletionSpec, range: Range) -> Hover {
 }
 
 // ============================================================================
-// Go-to-definition
+// Go-to-definition helpers
 // ============================================================================
-
-/// Build a go-to-definition response for local bindings.
-pub fn build_goto_definition(
-    uri: &Url,
-    source: &str,
-    pos: Position,
-) -> Option<GotoDefinitionResponse> {
-    let offset = position_to_offset(source, pos)? as u32;
-    let tokens = lex(source);
-
-    // Find the identifier token under the cursor.
-    let tok = tokens.iter().find(|t| {
-        (t.kind == SyntaxKind::Ident || t.kind == SyntaxKind::UpperIdent)
-            && t.span.start <= offset
-            && offset < t.span.end
-    })?;
-
-    let name = tok.text(source);
-
-    // Scan tokens for a definition site: look for `name =` or `name ::`
-    // patterns that represent function definitions or type signatures.
-    let definition_span = find_definition_span(&tokens, source, name)?;
-    let range = span_to_range(source, definition_span);
-
-    Some(GotoDefinitionResponse::Scalar(Location {
-        uri: uri.clone(),
-        range,
-    }))
-}
-
-/// Scan the token stream for a definition site of the given name.
-/// Looks for patterns like `<name> ::` (type signature) or `<name> <params...> =` (function def).
-fn find_definition_span(tokens: &[Token], source: &str, name: &str) -> Option<Span> {
-    let non_trivia: Vec<&Token> = tokens
-        .iter()
-        .filter(|t| {
-            !t.kind.is_trivia()
-                && t.kind != SyntaxKind::LayoutBraceOpen
-                && t.kind != SyntaxKind::LayoutSemicolon
-                && t.kind != SyntaxKind::LayoutBraceClose
-        })
-        .collect();
-
-    for (i, tok) in non_trivia.iter().enumerate() {
-        if (tok.kind == SyntaxKind::Ident || tok.kind == SyntaxKind::UpperIdent)
-            && tok.text(source) == name
-        {
-            // Check if preceded by `data`, `alias`, `const`, or `extern` keyword
-            if i > 0 {
-                let prev = non_trivia[i - 1].kind;
-                if prev == SyntaxKind::KwData
-                    || prev == SyntaxKind::KwAlias
-                    || prev == SyntaxKind::KwConst
-                    || prev == SyntaxKind::KwExtern
-                {
-                    return Some(tok.span);
-                }
-            }
-            // Check if next non-trivia token is `::` (type signature)
-            if i + 1 < non_trivia.len() && non_trivia[i + 1].kind == SyntaxKind::ColonColon {
-                return Some(tok.span);
-            }
-            // Check for function definition pattern: name followed by params
-            // then `=`, within the next tokens (allowing for parameters).
-            for next_tok in non_trivia.iter().skip(i + 1).take(19) {
-                if next_tok.kind == SyntaxKind::Equals {
-                    return Some(tok.span);
-                }
-                // Stop if we hit something that cannot be a parameter
-                if next_tok.kind == SyntaxKind::Eof || next_tok.kind.is_keyword() {
-                    break;
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Check whether the text at the start of a Range in the source matches the expected name.
-/// This validates that a goto-definition result actually points to a definition of the name,
-/// not a spurious span from mismatched prelude symbols.
-fn location_text_matches(source: &str, range: &Range, name: &str) -> bool {
-    let Some(start) = shadml_ide::position_to_offset(source, range.start) else {
-        return false;
-    };
-    let end = start + name.len();
-    end <= source.len() && &source[start..end] == name
-}
 
 /// Extract the identifier text at a given cursor position.
 fn ident_at_position(source: &str, pos: Position) -> Option<String> {
@@ -951,102 +820,6 @@ fn ident_at_position(source: &str, pos: Position) -> Option<String> {
             && offset < t.span.end
     })?;
     Some(tok.text(source).to_string())
-}
-
-/// Find the definition of a name in a source string, returning its Range.
-fn find_definition_in_source(source: &str, name: &str) -> Option<Range> {
-    let tokens = lex(source);
-    let span = find_definition_span(&tokens, source, name)?;
-    Some(shadml_ide::span_to_range(source, span))
-}
-
-/// Check whether the cursor is on a field name (preceded by `.` in the token stream).
-fn is_field_access_at(source: &str, pos: Position) -> bool {
-    let Some(offset) = shadml_ide::position_to_offset(source, pos) else {
-        return false;
-    };
-    let offset = offset as u32;
-    let tokens = lex(source);
-    // Find the token at cursor
-    let tok_idx = tokens.iter().position(|t| {
-        (t.kind == SyntaxKind::Ident || t.kind == SyntaxKind::UpperIdent)
-            && t.span.start <= offset
-            && offset < t.span.end
-    });
-    let Some(idx) = tok_idx else { return false };
-    // Check if the previous non-trivia token is `.`
-    tokens[..idx]
-        .iter()
-        .rev()
-        .find(|t| !t.kind.is_trivia())
-        .is_some_and(|t| t.kind == SyntaxKind::Dot)
-}
-
-/// Find a record field definition in source. Scans for `Ident(name) Colon`
-/// patterns inside `{ }` blocks that belong to data declarations, returning the
-/// span of the field name token.
-fn find_record_field_in_source(source: &str, field_name: &str) -> Option<Range> {
-    let tokens = lex(source);
-    let non_trivia: Vec<&Token> = tokens
-        .iter()
-        .filter(|t| {
-            !t.kind.is_trivia()
-                && t.kind != SyntaxKind::LayoutBraceOpen
-                && t.kind != SyntaxKind::LayoutSemicolon
-                && t.kind != SyntaxKind::LayoutBraceClose
-        })
-        .collect();
-
-    // Track whether we're inside a data declaration's record braces.
-    // Look for: `data Name = ConName {` ... `fieldName : Type` ... `}`
-    let mut in_data_decl = false;
-    let mut brace_depth: i32 = 0;
-    let mut data_brace_depth: i32 = 0; // brace depth when we entered data decl braces
-
-    for (i, tok) in non_trivia.iter().enumerate() {
-        match tok.kind {
-            SyntaxKind::KwData => {
-                in_data_decl = true;
-            }
-            SyntaxKind::LBrace if in_data_decl => {
-                brace_depth += 1;
-                if data_brace_depth == 0 {
-                    data_brace_depth = brace_depth;
-                }
-            }
-            SyntaxKind::LBrace => {
-                brace_depth += 1;
-            }
-            SyntaxKind::RBrace => {
-                if brace_depth == data_brace_depth {
-                    data_brace_depth = 0;
-                    in_data_decl = false;
-                }
-                brace_depth -= 1;
-            }
-            SyntaxKind::Ident if data_brace_depth > 0 && brace_depth == data_brace_depth => {
-                // Inside a data decl record block — check if this ident matches
-                // and is followed by `:`
-                if tok.text(source) == field_name {
-                    if i + 1 < non_trivia.len() && non_trivia[i + 1].kind == SyntaxKind::Colon {
-                        return Some(shadml_ide::span_to_range(source, tok.span));
-                    }
-                }
-            }
-            _ => {
-                // If we see a top-level keyword that isn't part of data decl, reset
-                if brace_depth == 0
-                    && in_data_decl
-                    && tok.kind.is_keyword()
-                    && tok.kind != SyntaxKind::KwData
-                {
-                    in_data_decl = false;
-                    data_brace_depth = 0;
-                }
-            }
-        }
-    }
-    None
 }
 
 fn find_builtin_operator_definition(source: &str, pos: Position) -> Option<Location> {
@@ -2557,7 +2330,7 @@ mod tests {
         let source = "add x y = x + y\nresult = add 1 2";
         let uri = Url::parse("file:///test.shadml").unwrap();
         // Position on "add" in "result = add 1 2" (line 1, col 9)
-        let result = build_goto_definition(&uri, source, Position::new(1, 9));
+        let result = ide_build_goto_definition_with_prelude_flag(&uri, source, Position::new(1, 9), false);
         assert!(result.is_some());
         match result.unwrap() {
             GotoDefinitionResponse::Scalar(loc) => {
@@ -2573,7 +2346,7 @@ mod tests {
         let source = "let x = 42";
         let uri = Url::parse("file:///test.shadml").unwrap();
         // Position on "=" sign
-        let result = build_goto_definition(&uri, source, Position::new(0, 6));
+        let result = ide_build_goto_definition_with_prelude_flag(&uri, source, Position::new(0, 6), false);
         assert!(result.is_none());
     }
 

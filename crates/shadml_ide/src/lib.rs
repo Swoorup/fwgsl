@@ -11,7 +11,7 @@ use lsp_types::{
     HoverContents, Location, MarkupContent, MarkupKind, Position, Range, Url,
 };
 use shadml_parser::lexer::Token;
-use shadml_parser::parser::{Attribute, ConFields, Decl, DoStmt, Expr, Pat, Program, Type};
+use shadml_parser::parser::{Attribute, ConFields, Decl, DoStmt, Expr, ImportKind, Pat, Program, Type};
 use shadml_parser::{lex, Parser};
 use shadml_semantic::SemanticAnalyzer;
 use shadml_span::Span;
@@ -36,9 +36,12 @@ enum OccurrenceRole {
 enum SymbolKind {
     Function,
     EntryPoint,
+    Binding,
     Parameter,
     LocalBinding,
     PatternBinding,
+    Module,
+    Import,
     BuiltinType,
     DataType,
     TypeAlias,
@@ -230,209 +233,143 @@ impl<'a> IndexBuilder<'a> {
     fn collect_top_level(&mut self, program: &Program, whole_file: Span) {
         let all_decls = Decl::flatten_cfg_decls(&program.decls);
         for decl in &all_decls {
-            match decl {
-                Decl::TypeSig { name, span, .. } => {
-                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
-                        let id = self.index.push_symbol(NewSymbol {
-                            name: name.clone(),
-                            namespace: Namespace::Value,
-                            kind: SymbolKind::Function,
-                            span: name_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_values.insert(name.clone(), id);
-                        id
-                    });
-                    self.index.add_definition_span(symbol_id, name_span);
-                }
-                Decl::FunDecl { name, span, .. }
-                | Decl::ExternDecl { name, span, .. }
-                | Decl::BuiltinExternDecl { name, span, .. } => {
-                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
-                        let id = self.index.push_symbol(NewSymbol {
-                            name: name.clone(),
-                            namespace: Namespace::Value,
-                            kind: SymbolKind::Function,
-                            span: name_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_values.insert(name.clone(), id);
-                        id
-                    });
-                    self.index.add_definition_span(symbol_id, name_span);
-                }
-                Decl::EntryPoint { name, span, .. } => {
-                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
-                        let id = self.index.push_symbol(NewSymbol {
-                            name: name.clone(),
-                            namespace: Namespace::Value,
-                            kind: SymbolKind::EntryPoint,
-                            span: name_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_values.insert(name.clone(), id);
-                        id
-                    });
-                    self.index.symbols[symbol_id].kind = SymbolKind::EntryPoint;
-                    self.index.add_definition_span(symbol_id, name_span);
-                }
-                Decl::BuiltinTypeDecl {
-                    name, span, arity, ..
-                } => {
-                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    let symbol_id = self.top_level_types.get(name).copied().unwrap_or_else(|| {
-                        let id = self.index.push_symbol(NewSymbol {
-                            name: name.clone(),
-                            namespace: Namespace::Type,
-                            kind: SymbolKind::BuiltinType,
-                            span: name_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(format!("builtin-type/{}", arity)),
-                        });
-                        self.top_level_types.insert(name.clone(), id);
-                        id
-                    });
-                    self.index.symbols[symbol_id].kind = SymbolKind::BuiltinType;
-                    self.index.add_definition_span(symbol_id, name_span);
-                }
-                Decl::DataDecl {
-                    name,
-                    constructors,
-                    span,
-                    ..
-                } => {
-                    let type_name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    let type_id = self.top_level_types.get(name).copied().unwrap_or_else(|| {
-                        let id = self.index.push_symbol(NewSymbol {
-                            name: name.clone(),
-                            namespace: Namespace::Type,
-                            kind: SymbolKind::DataType,
-                            span: type_name_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_types.insert(name.clone(), id);
-                        id
-                    });
-                    self.index.symbols[type_id].kind = SymbolKind::DataType;
-                    self.index.add_definition_span(type_id, type_name_span);
+            self.index_top_level_decl(decl, whole_file, None);
+        }
+    }
 
-                    for constructor in constructors {
-                        let constructor_span = self
-                            .first_name_span(&constructor.name, constructor.span)
-                            .unwrap_or(constructor.span);
-                        let constructor_id = self.index.push_symbol(NewSymbol {
-                            name: constructor.name.clone(),
-                            namespace: Namespace::Value,
-                            kind: SymbolKind::Constructor,
-                            span: constructor_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_values
-                            .insert(constructor.name.clone(), constructor_id);
-                    }
-                }
-                Decl::TypeAlias { name, span, .. } => {
-                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    let symbol_id = self.top_level_types.get(name).copied().unwrap_or_else(|| {
-                        let id = self.index.push_symbol(NewSymbol {
-                            name: name.clone(),
-                            namespace: Namespace::Type,
-                            kind: SymbolKind::TypeAlias,
-                            span: name_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_types.insert(name.clone(), id);
-                        id
+    fn index_top_level_decl(
+        &mut self,
+        decl: &Decl,
+        whole_file: Span,
+        override_container: Option<String>,
+    ) {
+        match decl {
+            Decl::TypeSig { name, span, .. } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
+                    let id = self.index.push_symbol(NewSymbol {
+                        name: name.clone(),
+                        namespace: Namespace::Value,
+                        kind: SymbolKind::Function,
+                        span: name_span,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container.clone().or_else(|| Some(name.clone())),
                     });
-                    self.index.symbols[symbol_id].kind = SymbolKind::TypeAlias;
-                    self.index.add_definition_span(symbol_id, name_span);
-                }
-                Decl::BindingDecl { name, span, .. } => {
-                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
-                        let id = self.index.push_symbol(NewSymbol {
-                            name: name.clone(),
-                            namespace: Namespace::Value,
-                            kind: SymbolKind::Function,
-                            span: name_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_values.insert(name.clone(), id);
-                        id
+                    self.top_level_values.insert(name.clone(), id);
+                    id
+                });
+                self.index.add_definition_span(symbol_id, name_span);
+            }
+            Decl::FunDecl { name, span, .. }
+            | Decl::ExternDecl { name, span, .. }
+            | Decl::BuiltinExternDecl { name, span, .. } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
+                    let id = self.index.push_symbol(NewSymbol {
+                        name: name.clone(),
+                        namespace: Namespace::Value,
+                        kind: SymbolKind::Function,
+                        span: name_span,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container.clone().or_else(|| Some(name.clone())),
                     });
-                    self.index.add_definition_span(symbol_id, name_span);
-                }
-                Decl::BitfieldDecl { name, span, .. } => {
-                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    let symbol_id = self.top_level_types.get(name).copied().unwrap_or_else(|| {
-                        let id = self.index.push_symbol(NewSymbol {
-                            name: name.clone(),
-                            namespace: Namespace::Type,
-                            kind: SymbolKind::TypeAlias,
-                            span: name_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_types.insert(name.clone(), id);
-                        id
+                    self.top_level_values.insert(name.clone(), id);
+                    id
+                });
+                self.index.add_definition_span(symbol_id, name_span);
+            }
+            Decl::EntryPoint { name, span, .. } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
+                    let id = self.index.push_symbol(NewSymbol {
+                        name: name.clone(),
+                        namespace: Namespace::Value,
+                        kind: SymbolKind::EntryPoint,
+                        span: name_span,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container.clone().or_else(|| Some(name.clone())),
                     });
-                    self.index.add_definition_span(symbol_id, name_span);
-                }
-                Decl::ConstDecl { name, span, .. } => {
-                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
-                        let id = self.index.push_symbol(NewSymbol {
-                            name: name.clone(),
-                            namespace: Namespace::Value,
-                            kind: SymbolKind::Function,
-                            span: name_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_values.insert(name.clone(), id);
-                        id
+                    self.top_level_values.insert(name.clone(), id);
+                    id
+                });
+                self.index.symbols[symbol_id].kind = SymbolKind::EntryPoint;
+                self.index.add_definition_span(symbol_id, name_span);
+            }
+            Decl::BuiltinTypeDecl {
+                name, span, arity, ..
+            } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                let symbol_id = self.top_level_types.get(name).copied().unwrap_or_else(|| {
+                    let id = self.index.push_symbol(NewSymbol {
+                        name: name.clone(),
+                        namespace: Namespace::Type,
+                        kind: SymbolKind::BuiltinType,
+                        span: name_span,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container
+                            .clone()
+                            .or_else(|| Some(format!("builtin-type/{}", arity))),
                     });
-                    self.index.add_definition_span(symbol_id, name_span);
+                    self.top_level_types.insert(name.clone(), id);
+                    id
+                });
+                self.index.symbols[symbol_id].kind = SymbolKind::BuiltinType;
+                self.index.add_definition_span(symbol_id, name_span);
+            }
+            Decl::DataDecl {
+                name,
+                constructors,
+                span,
+                ..
+            } => {
+                let type_name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                let type_id = self.top_level_types.get(name).copied().unwrap_or_else(|| {
+                    let id = self.index.push_symbol(NewSymbol {
+                        name: name.clone(),
+                        namespace: Namespace::Type,
+                        kind: SymbolKind::DataType,
+                        span: type_name_span,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container.clone().or_else(|| Some(name.clone())),
+                    });
+                    self.top_level_types.insert(name.clone(), id);
+                    id
+                });
+                self.index.symbols[type_id].kind = SymbolKind::DataType;
+                self.index.add_definition_span(type_id, type_name_span);
+
+                for constructor in constructors {
+                    let constructor_span = self
+                        .first_name_span(&constructor.name, constructor.span)
+                        .unwrap_or(constructor.span);
+                    let constructor_id = self.index.push_symbol(NewSymbol {
+                        name: constructor.name.clone(),
+                        namespace: Namespace::Value,
+                        kind: SymbolKind::Constructor,
+                        span: constructor_span,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container.clone().or_else(|| Some(name.clone())),
+                    });
+                    self.top_level_values
+                        .insert(constructor.name.clone(), constructor_id);
                 }
-                Decl::TraitDecl {
-                    name,
-                    span,
-                    methods,
-                    associated_types,
-                    ..
-                } => {
-                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    let symbol_id = self.index.push_symbol(NewSymbol {
+            }
+            Decl::TypeAlias { name, span, .. } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                let symbol_id = self.top_level_types.get(name).copied().unwrap_or_else(|| {
+                    let id = self.index.push_symbol(NewSymbol {
                         name: name.clone(),
                         namespace: Namespace::Type,
                         kind: SymbolKind::TypeAlias,
@@ -440,150 +377,283 @@ impl<'a> IndexBuilder<'a> {
                         scope_span: whole_file,
                         scope_depth: 0,
                         visible_from: 0,
-                        container: Some(name.clone()),
+                        container: override_container.clone().or_else(|| Some(name.clone())),
                     });
-                    self.top_level_types.insert(name.clone(), symbol_id);
-                    for at in associated_types {
-                        let at_span = self.first_name_span(&at.name, at.span).unwrap_or(at.span);
-                        let at_id = self.index.push_symbol(NewSymbol {
-                            name: at.name.clone(),
-                            namespace: Namespace::Type,
-                            kind: SymbolKind::AssociatedType,
-                            span: at_span,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_types.insert(at.name.clone(), at_id);
-                    }
-                    for m in methods {
-                        let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
-                        let mid = self.index.push_symbol(NewSymbol {
-                            name: m.name.clone(),
-                            namespace: Namespace::Value,
-                            kind: SymbolKind::Function,
-                            span: mspan,
-                            scope_span: whole_file,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(name.clone()),
-                        });
-                        self.top_level_values.insert(m.name.clone(), mid);
-                    }
-                }
-                Decl::ImplDecl {
-                    trait_name,
-                    tys,
-                    methods,
-                    span,
-                    associated_types,
-                    ..
-                } => {
-                    let container = match trait_name {
-                        Some(trait_name) => format!(
-                            "impl {} {}",
-                            trait_name,
-                            tys.iter().map(format_type).collect::<Vec<_>>().join(" ")
-                        ),
-                        None => format!("impl {}", format_type(&tys[0])),
-                    };
-                    for at in associated_types {
-                        let at_span = self.first_name_span(&at.name, at.span).unwrap_or(at.span);
-                        let at_id = self.index.push_symbol(NewSymbol {
-                            name: at.name.clone(),
-                            namespace: Namespace::Type,
-                            kind: SymbolKind::AssociatedType,
-                            span: at_span,
-                            scope_span: *span,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(container.clone()),
-                        });
-                        self.top_level_types.insert(at.name.clone(), at_id);
-                    }
-                    for m in methods {
-                        let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
-                        let mid = self.index.push_symbol(NewSymbol {
-                            name: m.name.clone(),
-                            namespace: Namespace::Value,
-                            kind: SymbolKind::Function,
-                            span: mspan,
-                            scope_span: *span,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(container.clone()),
-                        });
-                        self.impl_method_symbols
-                            .entry(m.name.clone())
-                            .or_default()
-                            .push(mid);
-                    }
-                }
-                Decl::BuiltinImplDecl {
-                    trait_name,
-                    tys,
-                    methods,
-                    span,
-                    associated_types,
-                    ..
-                } => {
-                    let container = format!(
-                        "builtin impl {} {}",
-                        trait_name,
-                        tys.iter().map(format_type).collect::<Vec<_>>().join(" ")
-                    );
-                    for at in associated_types {
-                        let at_span = self.first_name_span(&at.name, at.span).unwrap_or(at.span);
-                        let at_id = self.index.push_symbol(NewSymbol {
-                            name: at.name.clone(),
-                            namespace: Namespace::Type,
-                            kind: SymbolKind::AssociatedType,
-                            span: at_span,
-                            scope_span: *span,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(container.clone()),
-                        });
-                        self.top_level_types.insert(at.name.clone(), at_id);
-                    }
-                    for m in methods {
-                        let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
-                        let mid = self.index.push_symbol(NewSymbol {
-                            name: m.name.clone(),
-                            namespace: Namespace::Value,
-                            kind: SymbolKind::Function,
-                            span: mspan,
-                            scope_span: *span,
-                            scope_depth: 0,
-                            visible_from: 0,
-                            container: Some(container.clone()),
-                        });
-                        self.impl_method_symbols
-                            .entry(m.name.clone())
-                            .or_default()
-                            .push(mid);
-                    }
-                }
-                Decl::ModuleDecl { .. } | Decl::ImportDecl { .. } => {
-                    // Module/import declarations don't define symbols.
-                }
-                Decl::RenderBlock { name, span, .. } => {
-                    let name_span = self.first_name_span(name, *span).unwrap_or(*span);
-                    self.index.push_symbol(NewSymbol {
+                    self.top_level_types.insert(name.clone(), id);
+                    id
+                });
+                self.index.symbols[symbol_id].kind = SymbolKind::TypeAlias;
+                self.index.add_definition_span(symbol_id, name_span);
+            }
+            Decl::BindingDecl { name, span, .. } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
+                    let id = self.index.push_symbol(NewSymbol {
+                        name: name.clone(),
+                        namespace: Namespace::Value,
+                        kind: SymbolKind::Binding,
+                        span: name_span,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container.clone().or_else(|| Some(name.clone())),
+                    });
+                    self.top_level_values.insert(name.clone(), id);
+                    id
+                });
+                self.index.add_definition_span(symbol_id, name_span);
+            }
+            Decl::BitfieldDecl { name, span, .. } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                let symbol_id = self.top_level_types.get(name).copied().unwrap_or_else(|| {
+                    let id = self.index.push_symbol(NewSymbol {
+                        name: name.clone(),
+                        namespace: Namespace::Type,
+                        kind: SymbolKind::TypeAlias,
+                        span: name_span,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container.clone().or_else(|| Some(name.clone())),
+                    });
+                    self.top_level_types.insert(name.clone(), id);
+                    id
+                });
+                self.index.add_definition_span(symbol_id, name_span);
+            }
+            Decl::ConstDecl { name, span, .. } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                let symbol_id = self.top_level_values.get(name).copied().unwrap_or_else(|| {
+                    let id = self.index.push_symbol(NewSymbol {
                         name: name.clone(),
                         namespace: Namespace::Value,
                         kind: SymbolKind::Function,
                         span: name_span,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container.clone().or_else(|| Some(name.clone())),
+                    });
+                    self.top_level_values.insert(name.clone(), id);
+                    id
+                });
+                self.index.add_definition_span(symbol_id, name_span);
+            }
+            Decl::TraitDecl {
+                name,
+                span,
+                methods,
+                associated_types,
+                ..
+            } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                let symbol_id = self.index.push_symbol(NewSymbol {
+                    name: name.clone(),
+                    namespace: Namespace::Type,
+                    kind: SymbolKind::TypeAlias,
+                    span: name_span,
+                    scope_span: whole_file,
+                    scope_depth: 0,
+                    visible_from: 0,
+                    container: override_container.clone().or_else(|| Some(name.clone())),
+                });
+                self.top_level_types.insert(name.clone(), symbol_id);
+                for at in associated_types {
+                    let at_span = self.first_name_span(&at.name, at.span).unwrap_or(at.span);
+                    let at_id = self.index.push_symbol(NewSymbol {
+                        name: at.name.clone(),
+                        namespace: Namespace::Type,
+                        kind: SymbolKind::AssociatedType,
+                        span: at_span,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container.clone().or_else(|| Some(name.clone())),
+                    });
+                    self.top_level_types.insert(at.name.clone(), at_id);
+                }
+                for m in methods {
+                    let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
+                    let mid = self.index.push_symbol(NewSymbol {
+                        name: m.name.clone(),
+                        namespace: Namespace::Value,
+                        kind: SymbolKind::Function,
+                        span: mspan,
+                        scope_span: whole_file,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: override_container.clone().or_else(|| Some(name.clone())),
+                    });
+                    self.top_level_values.insert(m.name.clone(), mid);
+                }
+            }
+            Decl::ImplDecl {
+                trait_name,
+                tys,
+                methods,
+                span,
+                associated_types,
+                ..
+            } => {
+                let container = match trait_name {
+                    Some(trait_name) => format!(
+                        "impl {} {}",
+                        trait_name,
+                        tys.iter().map(format_type).collect::<Vec<_>>().join(" ")
+                    ),
+                    None => format!("impl {}", format_type(&tys[0])),
+                };
+                let effective_container = override_container.clone().unwrap_or(container);
+                for at in associated_types {
+                    let at_span = self.first_name_span(&at.name, at.span).unwrap_or(at.span);
+                    let at_id = self.index.push_symbol(NewSymbol {
+                        name: at.name.clone(),
+                        namespace: Namespace::Type,
+                        kind: SymbolKind::AssociatedType,
+                        span: at_span,
                         scope_span: *span,
                         scope_depth: 0,
                         visible_from: 0,
-                        container: Some(name.clone()),
+                        container: Some(effective_container.clone()),
                     });
+                    self.top_level_types.insert(at.name.clone(), at_id);
                 }
-                Decl::CfgDecl { .. } => {
-                    // CfgDecl nodes are flattened above — unreachable here.
+                for m in methods {
+                    let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
+                    let mid = self.index.push_symbol(NewSymbol {
+                        name: m.name.clone(),
+                        namespace: Namespace::Value,
+                        kind: SymbolKind::Function,
+                        span: mspan,
+                        scope_span: *span,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: Some(effective_container.clone()),
+                    });
+                    self.impl_method_symbols
+                        .entry(m.name.clone())
+                        .or_default()
+                        .push(mid);
                 }
+            }
+            Decl::BuiltinImplDecl {
+                trait_name,
+                tys,
+                methods,
+                span,
+                associated_types,
+                ..
+            } => {
+                let container = format!(
+                    "builtin impl {} {}",
+                    trait_name,
+                    tys.iter().map(format_type).collect::<Vec<_>>().join(" ")
+                );
+                let effective_container = override_container.clone().unwrap_or(container);
+                for at in associated_types {
+                    let at_span = self.first_name_span(&at.name, at.span).unwrap_or(at.span);
+                    let at_id = self.index.push_symbol(NewSymbol {
+                        name: at.name.clone(),
+                        namespace: Namespace::Type,
+                        kind: SymbolKind::AssociatedType,
+                        span: at_span,
+                        scope_span: *span,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: Some(effective_container.clone()),
+                    });
+                    self.top_level_types.insert(at.name.clone(), at_id);
+                }
+                for m in methods {
+                    let mspan = self.first_name_span(&m.name, m.span).unwrap_or(m.span);
+                    let mid = self.index.push_symbol(NewSymbol {
+                        name: m.name.clone(),
+                        namespace: Namespace::Value,
+                        kind: SymbolKind::Function,
+                        span: mspan,
+                        scope_span: *span,
+                        scope_depth: 0,
+                        visible_from: 0,
+                        container: Some(effective_container.clone()),
+                    });
+                    self.impl_method_symbols
+                        .entry(m.name.clone())
+                        .or_default()
+                        .push(mid);
+                }
+            }
+            Decl::ModuleDecl { name, span, .. } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                self.index.push_symbol(NewSymbol {
+                    name: name.clone(),
+                    namespace: Namespace::Type,
+                    kind: SymbolKind::Module,
+                    span: name_span,
+                    scope_span: whole_file,
+                    scope_depth: 0,
+                    visible_from: 0,
+                    container: None,
+                });
+            }
+            Decl::ImportDecl {
+                module_path,
+                kind,
+                span,
+                ..
+            } => {
+                let name_span = self.first_name_span(module_path, *span).unwrap_or(*span);
+                self.index.push_symbol(NewSymbol {
+                    name: module_path.clone(),
+                    namespace: Namespace::Type,
+                    kind: SymbolKind::Import,
+                    span: name_span,
+                    scope_span: whole_file,
+                    scope_depth: 0,
+                    visible_from: 0,
+                    container: None,
+                });
+                if let ImportKind::Selective(names) = kind {
+                    for imported_name in names {
+                        if let Some(name_span) = self.first_name_span(imported_name, *span) {
+                            self.index.push_symbol(NewSymbol {
+                                name: imported_name.to_string(),
+                                namespace: Namespace::Value,
+                                kind: SymbolKind::Import,
+                                span: name_span,
+                                scope_span: whole_file,
+                                scope_depth: 0,
+                                visible_from: name_span.start,
+                                container: Some(module_path.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+            Decl::RenderBlock {
+                name,
+                span,
+                bindings,
+                entries,
+                ..
+            } => {
+                let name_span = self.first_name_span(name, *span).unwrap_or(*span);
+                self.index.push_symbol(NewSymbol {
+                    name: name.clone(),
+                    namespace: Namespace::Value,
+                    kind: SymbolKind::Function,
+                    span: name_span,
+                    scope_span: *span,
+                    scope_depth: 0,
+                    visible_from: 0,
+                    container: Some(name.clone()),
+                });
+                let container = format!("render/{}", name);
+                for inner in bindings.iter().chain(entries.iter()) {
+                    self.index_top_level_decl(inner, whole_file, Some(container.clone()));
+                }
+            }
+            Decl::CfgDecl { .. } => {
+                // CfgDecl nodes are flattened above — unreachable here.
             }
         }
     }
@@ -601,8 +671,60 @@ impl<'a> IndexBuilder<'a> {
 
     fn walk_decl(&mut self, decl: &Decl, frames: &mut Vec<ScopeFrame>) {
         match decl {
-            Decl::TypeSig { ty, .. } => {
+            Decl::TypeSig {
+                constraints,
+                ty,
+                span,
+                ..
+            } => {
+                // Collect free type variables from the signature so they can be
+                // resolved when walking the type (e.g., `a` in `map : (a -> b) -> ...`).
+                let mut free_vars = Vec::new();
+                for constraint in constraints {
+                    for t in &constraint.tys {
+                        self.collect_type_vars(t, &mut free_vars);
+                    }
+                }
+                self.collect_type_vars(ty, &mut free_vars);
+
+                frames.push(ScopeFrame::new(*span, None));
+                for var_name in free_vars {
+                    // Only add if not already in scope (e.g., from a data decl header)
+                    if self.resolve_type(&var_name, frames).is_none() {
+                        let var_span = self.first_name_span(&var_name, *span).unwrap_or(*span);
+                        let symbol_id = self.index.push_symbol(NewSymbol {
+                            name: var_name.clone(),
+                            namespace: Namespace::Type,
+                            kind: SymbolKind::TypeParameter,
+                            span: var_span,
+                            scope_span: *span,
+                            scope_depth: frames.len() - 1,
+                            visible_from: span.start,
+                            container: None,
+                        });
+                        frames
+                            .last_mut()
+                            .expect("type sig scope")
+                            .type_defs
+                            .insert(var_name.clone(), symbol_id);
+                    }
+                }
+
+                // Walk constraints: trait name + type arguments
+                for constraint in constraints {
+                    if let Some(symbol_id) = self.top_level_types.get(&constraint.trait_name).copied() {
+                        self.index.push_occurrence(
+                            symbol_id,
+                            constraint.span,
+                            OccurrenceRole::Reference,
+                        );
+                    }
+                    for t in &constraint.tys {
+                        self.walk_type(t, frames);
+                    }
+                }
                 self.walk_type(ty, frames);
+                frames.pop();
             }
             Decl::FunDecl {
                 name,
@@ -847,7 +969,13 @@ impl<'a> IndexBuilder<'a> {
 
     fn walk_expr(&mut self, expr: &Expr, frames: &mut Vec<ScopeFrame>) {
         match expr {
-            Expr::Lit(_, _) | Expr::OpSection(_, _) => {}
+            Expr::Lit(_, _) => {}
+            Expr::OpSection(op, span) => {
+                if let Some(symbol_id) = self.resolve_value(op, frames) {
+                    self.index
+                        .push_occurrence(symbol_id, *span, OccurrenceRole::Reference);
+                }
+            }
             Expr::Var(name, span) | Expr::Con(name, span) => {
                 if let Some(symbol_id) = self.resolve_value(name, frames) {
                     self.index
@@ -1084,6 +1212,28 @@ impl<'a> IndexBuilder<'a> {
                 }
             }
             Type::Nat(_, _) | Type::Unit(_) | Type::Self_(_) => {}
+        }
+    }
+
+    fn collect_type_vars(&self, ty: &Type, out: &mut Vec<String>) {
+        match ty {
+            Type::Var(name, _) => {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            Type::App(left, right, _) | Type::Arrow(left, right, _) => {
+                self.collect_type_vars(left, out);
+                self.collect_type_vars(right, out);
+            }
+            Type::Paren(inner, _) => self.collect_type_vars(inner, out),
+            Type::Tuple(items, _) => {
+                for item in items {
+                    self.collect_type_vars(item, out);
+                }
+            }
+            Type::Proj(base, _, _) => self.collect_type_vars(base, out),
+            Type::Con(_, _) | Type::Nat(_, _) | Type::Unit(_) | Type::Self_(_) => {}
         }
     }
 
@@ -1466,6 +1616,29 @@ pub fn build_hover_with_prelude_flag(
             }),
             range: Some(range),
         }),
+        kind if kind.is_literal() => {
+            let ty = state
+                .analyzer
+                .expr_types
+                .get(&tok.span)
+                .map(|ty| format_ty(&state.analyzer.engine, ty))
+                .unwrap_or_else(|| "unknown".to_owned());
+            let lit = tok.text(source);
+            let label = match kind {
+                SyntaxKind::IntLiteral => "integer literal",
+                SyntaxKind::FloatLiteral => "float literal",
+                SyntaxKind::StringLiteral => "string literal",
+                SyntaxKind::CharLiteral => "char literal",
+                _ => "literal",
+            };
+            Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("`{}` : {}\n\n{}", lit, ty, label),
+                }),
+                range: Some(range),
+            })
+        }
         _ => None,
     }
 }
@@ -1566,6 +1739,31 @@ pub fn build_goto_definition_with_prelude_flag(
         [single] => Some(GotoDefinitionResponse::Scalar(single.clone())),
         _ => Some(GotoDefinitionResponse::Array(locations)),
     }
+}
+
+/// Find all definition ranges for a given name in a source string.
+/// This is used by the language server for cross-file goto-definition
+/// on imported names.
+pub fn find_definition_ranges(source: &str, name: &str) -> Vec<Range> {
+    let state = build_ide_state(source, false);
+    let symbol = match state.index.symbols.iter().find(|s| s.name == name) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let mut ranges: Vec<Range> = symbol
+        .definition_spans
+        .iter()
+        .copied()
+        .map(|span| span_to_range(source, span))
+        .collect();
+    ranges.sort_by(|a, b| {
+        a.start
+            .line
+            .cmp(&b.start.line)
+            .then_with(|| a.start.character.cmp(&b.start.character))
+    });
+    ranges.dedup();
+    ranges
 }
 
 pub fn build_references(
@@ -1911,10 +2109,11 @@ fn is_word_completion(label: &str) -> bool {
 fn completion_kind_for_symbol(symbol: &Symbol) -> CompletionItemKind {
     match symbol.kind {
         SymbolKind::Function | SymbolKind::EntryPoint => CompletionItemKind::FUNCTION,
-        SymbolKind::Parameter | SymbolKind::LocalBinding | SymbolKind::PatternBinding => {
+        SymbolKind::Binding | SymbolKind::Parameter | SymbolKind::LocalBinding | SymbolKind::PatternBinding => {
             CompletionItemKind::VARIABLE
         }
         SymbolKind::Constructor => CompletionItemKind::CONSTRUCTOR,
+        SymbolKind::Module | SymbolKind::Import => CompletionItemKind::MODULE,
         SymbolKind::BuiltinType
         | SymbolKind::DataType
         | SymbolKind::TypeAlias
@@ -2036,6 +2235,14 @@ fn document_symbol_detail(state: &DocumentState<'_>, symbol: &Symbol) -> String 
                 format!("entry point : {}", format_scheme(&state.analyzer.engine, scheme))
             })
             .unwrap_or_else(|| "entry point".to_owned()),
+        SymbolKind::Binding => state
+            .analyzer
+            .env
+            .lookup(&symbol.name)
+            .map(|scheme| format!("binding : {}", format_scheme(&state.analyzer.engine, scheme)))
+            .unwrap_or_else(|| "binding".to_owned()),
+        SymbolKind::Module => "module".to_owned(),
+        SymbolKind::Import => "import".to_owned(),
         SymbolKind::Parameter => state
             .symbol_types
             .get(&symbol.primary_span)
@@ -2136,6 +2343,9 @@ fn document_symbol_summary(state: &DocumentState<'_>, symbol: &Symbol) -> String
     match symbol.kind {
         SymbolKind::Function => "Top-level binding from this document.".to_owned(),
         SymbolKind::EntryPoint => "Shader entry point from this document.".to_owned(),
+        SymbolKind::Binding => "Shader resource binding from this document.".to_owned(),
+        SymbolKind::Module => "Module declaration.".to_owned(),
+        SymbolKind::Import => "Import declaration.".to_owned(),
         SymbolKind::Parameter => match &symbol.container {
             Some(container) => format!("Parameter of `{}`.", container),
             None => "Function parameter.".to_owned(),
@@ -2225,6 +2435,14 @@ fn symbol_detail(state: &IdeState<'_>, symbol: &Symbol) -> String {
                 )
             })
             .unwrap_or_else(|| "entry point".to_owned()),
+        SymbolKind::Binding => state
+            .analyzer
+            .env
+            .lookup(&symbol.name)
+            .map(|scheme| format!("binding : {}", format_scheme(&state.analyzer.engine, scheme)))
+            .unwrap_or_else(|| "binding".to_owned()),
+        SymbolKind::Module => "module".to_owned(),
+        SymbolKind::Import => "import".to_owned(),
         SymbolKind::Parameter => state
             .symbol_types
             .get(&symbol.primary_span)
@@ -2320,6 +2538,9 @@ fn symbol_summary(state: &IdeState<'_>, symbol: &Symbol) -> String {
     match symbol.kind {
         SymbolKind::Function => "Top-level binding from this document.".to_owned(),
         SymbolKind::EntryPoint => "Shader entry point from this document.".to_owned(),
+        SymbolKind::Binding => "Shader resource binding from this document.".to_owned(),
+        SymbolKind::Module => "Module declaration.".to_owned(),
+        SymbolKind::Import => "Import declaration.".to_owned(),
         SymbolKind::Parameter => match &symbol.container {
             Some(container) => format!("Parameter of `{}`.", container),
             None => "Function parameter.".to_owned(),
