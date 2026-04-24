@@ -299,7 +299,11 @@ fn parse_compute_entry_point_with_workgroup_size() {
         );
         assert_eq!(attributes[0].name, "compute");
         assert_eq!(attributes[1].name, "workgroup_size");
-        assert_eq!(attributes[1].args, vec!["64", "1", "1"]);
+        match attributes[1].args.as_slice() {
+            [AttrArg::Positional(AttrValue::Int(64)), AttrArg::Positional(AttrValue::Int(1)), AttrArg::Positional(AttrValue::Int(1))] =>
+                {}
+            other => panic!("expected [64, 1, 1], got {:?}", other),
+        }
     } else {
         panic!("expected EntryPoint, got {:?}", program.decls[0]);
     }

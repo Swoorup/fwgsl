@@ -333,7 +333,21 @@ module.exports = grammar({
       seq(
         "@",
         $.identifier,
-        optional(seq("(", commaSep1($.expression), ")")),
+        optional(seq("(", commaSep1($.attr_arg), ")")),
+      ),
+
+    attr_arg: ($) =>
+      choice(
+        seq($.identifier, "=", $.attr_value),
+        $.attr_value,
+      ),
+
+    attr_value: ($) =>
+      choice(
+        $.identifier,
+        $.string_literal,
+        $.integer_literal,
+        $.float_literal,
       ),
 
     // -- Types ---------------------------------------------------------------

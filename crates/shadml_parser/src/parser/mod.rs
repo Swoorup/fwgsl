@@ -447,8 +447,48 @@ pub struct RecordField {
 #[derive(Debug, Clone)]
 pub struct Attribute {
     pub name: String,
-    pub args: Vec<String>,
+    pub args: Vec<AttrArg>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum AttrArg {
+    Positional(AttrValue),
+    Named(String, AttrValue),
+}
+
+#[derive(Debug, Clone)]
+pub enum AttrValue {
+    Ident(String),
+    String(String),
+    Int(i64),
+    UInt(u64),
+    Float(f64),
+}
+
+impl AttrValue {
+    /// Format as a canonical string for HIR/MIR compatibility.
+    /// Strings are wrapped in double quotes; everything else is bare.
+    pub fn to_canonical_string(&self) -> String {
+        match self {
+            AttrValue::Ident(s) => s.clone(),
+            AttrValue::String(s) => format!("\"{}\"", s),
+            AttrValue::Int(v) => v.to_string(),
+            AttrValue::UInt(v) => v.to_string(),
+            AttrValue::Float(v) => v.to_string(),
+        }
+    }
+}
+
+impl AttrArg {
+    /// Format as a canonical string for HIR/MIR compatibility.
+    /// Named arguments use `name = value` syntax.
+    pub fn to_canonical_string(&self) -> String {
+        match self {
+            AttrArg::Positional(v) => v.to_canonical_string(),
+            AttrArg::Named(name, v) => format!("{} = {}", name, v.to_canonical_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -324,7 +324,7 @@ impl AstLowering {
             .iter()
             .map(|a| HirAttribute {
                 name: a.name.clone(),
-                args: a.args.clone(),
+                args: a.args.iter().map(|arg| arg.to_canonical_string()).collect(),
             })
             .collect();
 
@@ -427,7 +427,7 @@ impl AstLowering {
                             .iter()
                             .map(|a| HirAttribute {
                                 name: a.name.clone(),
-                                args: a.args.clone(),
+                                args: a.args.iter().map(|arg| arg.to_canonical_string()).collect(),
                             })
                             .collect();
                         HirFieldDef {

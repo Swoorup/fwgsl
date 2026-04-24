@@ -1691,7 +1691,7 @@ pub fn hover(state: &IdeState, pos: Position) -> Option<Hover> {
         SyntaxKind::At => Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: "Use `@` to introduce a WGSL attribute such as `@compute`, `@vertex`, or `@workgroup_size(...)`.".to_owned(),
+                value: "Use `@` to introduce a shader attribute such as `@compute`, `@vertex`, or `@workgroup_size(...)`.".to_owned(),
             }),
             range: Some(range),
         }),

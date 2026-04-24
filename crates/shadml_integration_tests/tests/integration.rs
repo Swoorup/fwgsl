@@ -14,7 +14,7 @@
 use shadml_ast_lowering::AstLowering;
 use shadml_mir::*;
 use shadml_parser::lexer::lex;
-use shadml_parser::parser::{Decl, Expr, Parser, Program};
+use shadml_parser::parser::{AttrArg, AttrValue, Decl, Expr, Parser, Program};
 use shadml_parser::resolve_layout;
 use shadml_semantic::SemanticAnalyzer;
 use shadml_syntax::SyntaxKind;

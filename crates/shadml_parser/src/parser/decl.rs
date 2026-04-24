@@ -1355,25 +1355,36 @@ impl Parser {
     /// Parse `@name(N)` — a numbered binding attribute like `@group(0)` or `@binding(1)`.
     /// Consumes `@`, the identifier, `(`, integer literal, `)` and returns the integer value.
     pub(crate) fn parse_binding_numbered_attr(&mut self, expected: &str) -> u32 {
-        self.expect(SyntaxKind::At);
-        self.skip_trivia();
-        let attr_tok = self.expect(SyntaxKind::Ident);
-        let attr = self.text_of(&attr_tok).to_owned();
-        if attr != expected {
+        let attr = self.parse_attribute();
+        if attr.name != expected {
             self.diagnostics.push(
-                Diagnostic::error(format!("expected '{}', found '{}'", expected, attr)).with_label(
-                    Label::primary(attr_tok.span, format!("expected '{}'", expected)),
-                ),
+                Diagnostic::error(format!(
+                    "expected '@{}(...)', found '@{}(...)'",
+                    expected, attr.name
+                ))
+                .with_label(Label::primary(
+                    attr.span,
+                    format!("expected '@{}(...)'", expected),
+                )),
             );
         }
-        self.skip_trivia();
-        self.expect(SyntaxKind::LParen);
-        self.skip_trivia();
-        let val_tok = self.expect(SyntaxKind::IntLiteral);
-        let value = parse_int_literal(self.text_of(&val_tok)).max(0) as u32;
-        self.skip_trivia();
-        self.expect(SyntaxKind::RParen);
-        value
+        match attr.args.as_slice() {
+            [AttrArg::Positional(AttrValue::UInt(v))] => *v as u32,
+            [AttrArg::Positional(AttrValue::Int(v))] => (*v).max(0) as u32,
+            _ => {
+                self.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "'@{}' expects a single unsigned integer argument",
+                        expected
+                    ))
+                    .with_label(Label::primary(
+                        attr.span,
+                        format!("expected '@{}(N)'", expected),
+                    )),
+                );
+                0
+            }
+        }
     }
 
     /// Parse `bitfield Name : U32 = { field1 : width, field2 : width, ... }`
@@ -1744,8 +1755,7 @@ impl Parser {
         };
         let name = self.text_of(&name_tok).to_owned();
 
-        // Optional arguments: either parenthesized `@name(a, b)` or
-        // bare integer literals `@name 64 1 1`.
+        // Optional arguments: parenthesized `@name(a, b)`.
         let mut args = Vec::new();
         self.skip_trivia();
         if self.at(SyntaxKind::LParen) {
@@ -1755,28 +1765,76 @@ impl Parser {
                 if self.at(SyntaxKind::RParen) || self.at_end() {
                     break;
                 }
-                let arg_tok = self.bump();
-                args.push(self.text_of(&arg_tok).to_owned());
+
+                // Try to parse a named argument: `ident = value`
+                let is_named = if self.at(SyntaxKind::Ident) {
+                    let saved = self.pos;
+                    self.bump();
+                    self.skip_trivia();
+                    let result = self.at(SyntaxKind::Equals);
+                    self.pos = saved;
+                    result
+                } else {
+                    false
+                };
+
+                if is_named {
+                    let name_tok = self.bump();
+                    let arg_name = self.text_of(&name_tok).to_owned();
+                    self.skip_trivia();
+                    self.expect(SyntaxKind::Equals);
+                    self.skip_trivia();
+                    let value = self.parse_attr_value();
+                    args.push(AttrArg::Named(arg_name, value));
+                } else {
+                    let value = self.parse_attr_value();
+                    args.push(AttrArg::Positional(value));
+                }
+
                 self.skip_trivia();
                 if !self.eat(SyntaxKind::Comma) {
                     break;
                 }
             }
             self.expect(SyntaxKind::RParen);
-        } else {
-            // Bare integer/float literal arguments (e.g. `@workgroup_size 64 1 1`)
-            while matches!(
-                self.peek_non_trivia(),
-                SyntaxKind::IntLiteral | SyntaxKind::FloatLiteral
-            ) {
-                self.skip_trivia();
-                let arg_tok = self.bump();
-                args.push(self.text_of(&arg_tok).to_owned());
-            }
         }
 
         let span = self.span_from(start);
         Attribute { name, args, span }
+    }
+
+    /// Parse a single attribute value: identifier, string literal, int literal, or float literal.
+    fn parse_attr_value(&mut self) -> AttrValue {
+        match self.peek_non_trivia() {
+            SyntaxKind::Ident => {
+                let tok = self.bump();
+                AttrValue::Ident(self.text_of(&tok).to_owned())
+            }
+            SyntaxKind::StringLiteral => {
+                let tok = self.bump();
+                let text = self.text_of(&tok);
+                let inner = &text[1..text.len() - 1];
+                AttrValue::String(unescape_string(inner))
+            }
+            SyntaxKind::IntLiteral => {
+                let tok = self.bump();
+                let text = self.text_of(&tok);
+                match parse_int_literal_typed(text) {
+                    ParsedInt::Unsigned(v) => AttrValue::UInt(v),
+                    ParsedInt::Signed(v) => AttrValue::Int(v),
+                }
+            }
+            SyntaxKind::FloatLiteral => {
+                let tok = self.bump();
+                let text = self.text_of(&tok);
+                let val: f64 = text.parse().unwrap_or(0.0);
+                AttrValue::Float(val)
+            }
+            _ => {
+                let tok = self.bump();
+                AttrValue::Ident(self.text_of(&tok).to_owned())
+            }
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════

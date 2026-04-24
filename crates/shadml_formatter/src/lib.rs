@@ -479,7 +479,7 @@ impl<'a> FormatEngine<'a> {
             .map(|idx| self.tokens[idx].kind)
     }
 
-    /// Check if the current output line contains an `@` (attribute context).
+    /// Check if the current output line contains `@` (attribute context).
     fn line_has_attribute(&self) -> bool {
         let line_start = self.output.rfind('\n').map_or(0, |i| i + 1);
         self.output[line_start..].contains('@')
