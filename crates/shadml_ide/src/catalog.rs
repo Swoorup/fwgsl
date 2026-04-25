@@ -577,6 +577,16 @@ pub const ATTRIBUTE_SPECS: &[CompletionSpec] = &[
         sort_group: "00",
         contexts: ATTRIBUTE_CONTEXTS,
     },
+    CompletionSpec {
+        label: "const",
+        kind: CompletionItemKind::PROPERTY,
+        detail: "Compile-time constant attribute",
+        documentation: "Mark a zero-parameter binding as compile-time evaluable.\n\n```shadml\n@const\nmaxLights : I32\nmaxLights = 64\n```",
+        insert_text: "const",
+        insert_text_format: None,
+        sort_group: "00",
+        contexts: ATTRIBUTE_CONTEXTS,
+    },
 ];
 
 pub fn all_completion_specs() -> impl Iterator<Item = &'static CompletionSpec> {

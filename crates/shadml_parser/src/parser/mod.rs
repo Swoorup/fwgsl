@@ -139,6 +139,7 @@ pub enum Decl {
         where_binds: Vec<LocalBind>,
         span: Span,
         comments: Vec<String>,
+        attributes: Vec<Attribute>,
     },
     DataDecl {
         name: String,

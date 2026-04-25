@@ -46,6 +46,10 @@ struct LowerCtx<'a> {
     /// Source-level nullary definitions lower to zero-arg WGSL functions.
     /// References to them in value position must become calls.
     zero_arg_functions: HashSet<String>,
+    /// Zero-arg functions that are marked `@const` — these become WGSL `const`
+    /// declarations, not `fn` declarations. References should be emitted as
+    /// variable references, not calls.
+    const_functions: HashSet<String>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -93,6 +97,12 @@ impl<'a> LowerCtx<'a> {
             .filter(|f| f.params.is_empty())
             .map(|f| f.name.clone())
             .collect();
+        let const_functions: HashSet<String> = hir
+            .functions
+            .iter()
+            .filter(|f| f.params.is_empty() && f.is_const)
+            .map(|f| f.name.clone())
+            .collect();
         for f in &hir.functions {
             collect_mono_instances_from_expr(
                 &f.body,
@@ -136,6 +146,7 @@ impl<'a> LowerCtx<'a> {
             generic_types,
             mono_instances,
             zero_arg_functions,
+            const_functions,
         }
     }
 
@@ -674,11 +685,39 @@ pub fn lower_hir_to_mir<'a>(
         }
     }
 
-    // Lower functions
+    // Lower functions — `@const` zero-param functions are lowered directly to
+    // `MirConst` so they get emitted as WGSL `const` declarations. Other
+    // functions become `MirFunction` and may be auto-promoted later.
+    let mut constants = Vec::new();
+    let mut known_consts: HashSet<String> = HashSet::new();
+    let mut promoted_const_names: HashSet<String> = HashSet::new();
+
     for f in &hir.functions {
-        match lower_hir_function(f, &ctx) {
-            Ok(mir_f) => functions.push(mir_f),
-            Err(e) => errors.push(e),
+        if f.params.is_empty() && f.is_const {
+            let mir_ty = match ty_to_mir_type_with_ctx(&f.return_ty, Some(&ctx)) {
+                Ok(t) => t,
+                Err(e) => {
+                    errors.push(e);
+                    continue;
+                }
+            };
+            match lower_hir_expr_const(&f.body, &ctx) {
+                Ok(mir_expr) => {
+                    known_consts.insert(f.name.clone());
+                    promoted_const_names.insert(f.name.clone());
+                    constants.push(MirConst {
+                        name: ctx.arena.alloc_str(&f.name),
+                        ty: mir_ty,
+                        value: mir_expr,
+                    });
+                }
+                Err(e) => errors.push(e),
+            }
+        } else {
+            match lower_hir_function(f, &ctx) {
+                Ok(mir_f) => functions.push(mir_f),
+                Err(e) => errors.push(e),
+            }
         }
     }
 
@@ -691,8 +730,6 @@ pub fn lower_hir_to_mir<'a>(
     }
 
     // Lower explicit constants
-    let mut constants = Vec::new();
-    let mut known_consts: HashSet<String> = HashSet::new();
     for c in &hir.constants {
         let mir_ty = match ty_to_mir_type_with_ctx(&c.ty, Some(&ctx)) {
             Ok(t) => t,
@@ -717,7 +754,6 @@ pub fn lower_hir_to_mir<'a>(
     // Promote zero-param functions with const-evaluable bodies to constants.
     // This turns `maxLights = 64` into `const maxLights: i32 = 64i;` instead
     // of `fn maxLights() -> i32 { return 64i; }`.
-    let mut promoted_const_names: HashSet<String> = HashSet::new();
     let mut remaining_functions = functions;
     loop {
         let mut made_progress = false;
@@ -984,6 +1020,7 @@ fn lower_hir_function<'a>(
             .iter()
             .map(|s| ctx.arena.alloc_str(s) as &str)
             .collect(),
+        is_const: f.is_const,
     })
 }
 
@@ -2396,10 +2433,155 @@ fn is_const_expr(expr: &MirExpr, known_consts: &HashSet<String>) -> bool {
                 || (is_wgsl_const_builtin(name)
                     && args.iter().all(|a| is_const_expr(a, known_consts)))
         }
-        // Struct construction, field access, index — not const-evaluable in WGSL
-        MirExpr::ConstructStruct(_, _)
-        | MirExpr::FieldAccess(_, _, _)
-        | MirExpr::Index(_, _, _) => false,
+        // Struct construction is const-evaluable if all fields are const.
+        MirExpr::ConstructStruct(_, fields) => {
+            fields.iter().all(|f| is_const_expr(f, known_consts))
+        }
+        // Field access and index are not const-evaluable in WGSL const expressions
+        // (conservative — could be relaxed later).
+        MirExpr::FieldAccess(_, _, _) | MirExpr::Index(_, _, _) => false,
+    }
+}
+
+/// Inline a variable reference in a MIR expression by substituting it with
+/// a given value expression. Used when lowering `let` bindings in const
+/// contexts where WGSL `const` declarations cannot contain local variables.
+fn inline_var_in_mir_expr<'a>(
+    expr: MirExpr<'a>,
+    name: &'a str,
+    value: MirExpr<'a>,
+    arena: &'a Allocator,
+) -> MirExpr<'a> {
+    match expr {
+        MirExpr::Var(n, _ty) if n == name => value,
+        MirExpr::Call(n, args, _ty) if n == name && args.is_empty() => value,
+        MirExpr::BinOp(op, lhs, rhs, ty) => MirExpr::BinOp(
+            op,
+            arena.alloc(inline_var_in_mir_expr(
+                (*lhs).clone(),
+                name,
+                value.clone(),
+                arena,
+            )),
+            arena.alloc(inline_var_in_mir_expr(
+                (*rhs).clone(),
+                name,
+                value.clone(),
+                arena,
+            )),
+            ty,
+        ),
+        MirExpr::UnaryOp(op, operand, ty) => MirExpr::UnaryOp(
+            op,
+            arena.alloc(inline_var_in_mir_expr(
+                (*operand).clone(),
+                name,
+                value.clone(),
+                arena,
+            )),
+            ty,
+        ),
+        MirExpr::Call(func_name, args, ty) => MirExpr::Call(
+            func_name,
+            args.into_iter()
+                .map(|arg| inline_var_in_mir_expr(arg, name, value.clone(), arena))
+                .collect(),
+            ty,
+        ),
+        MirExpr::ConstructStruct(struct_name, fields) => MirExpr::ConstructStruct(
+            struct_name,
+            fields
+                .into_iter()
+                .map(|field| inline_var_in_mir_expr(field, name, value.clone(), arena))
+                .collect(),
+        ),
+        MirExpr::FieldAccess(base, field, ty) => MirExpr::FieldAccess(
+            arena.alloc(inline_var_in_mir_expr(
+                (*base).clone(),
+                name,
+                value.clone(),
+                arena,
+            )),
+            field,
+            ty,
+        ),
+        MirExpr::Index(base, index, ty) => MirExpr::Index(
+            arena.alloc(inline_var_in_mir_expr(
+                (*base).clone(),
+                name,
+                value.clone(),
+                arena,
+            )),
+            arena.alloc(inline_var_in_mir_expr(
+                (*index).clone(),
+                name,
+                value.clone(),
+                arena,
+            )),
+            ty,
+        ),
+        MirExpr::Cast(inner, ty) => MirExpr::Cast(
+            arena.alloc(inline_var_in_mir_expr(
+                (*inner).clone(),
+                name,
+                value.clone(),
+                arena,
+            )),
+            ty,
+        ),
+        MirExpr::Lit(_) => expr,
+        MirExpr::Var(_, _) => expr,
+    }
+}
+
+/// Lower a HIR expression that appears in a const context (inside a `@const`
+/// function body). Unlike `lower_hir_expr`, this handles `let` bindings by
+/// inlining and `if` expressions via WGSL `select`.
+fn lower_hir_expr_const<'a>(
+    expr: &HirExpr,
+    ctx: &LowerCtx<'a>,
+) -> Result<MirExpr<'a>, MirLowerError> {
+    match expr {
+        HirExpr::Let(binds, body, _ty, _span) => {
+            let mut body_expr = lower_hir_expr_const(body, ctx)?;
+            for (name, bind_expr) in binds.iter().rev() {
+                let bind_mir = lower_hir_expr_const(bind_expr, ctx)?;
+                let name_str = ctx.arena.alloc_str(name);
+                body_expr = inline_var_in_mir_expr(body_expr, name_str, bind_mir, ctx.arena);
+            }
+            Ok(body_expr)
+        }
+        HirExpr::If(cond, then_expr, else_expr, ty, _span) => {
+            let cond_mir = lower_hir_expr_const(cond, ctx)?;
+            let then_mir = lower_hir_expr_const(then_expr, ctx)?;
+            let else_mir = lower_hir_expr_const(else_expr, ctx)?;
+            let result_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
+            if supports_select_result_type(&result_ty) {
+                Ok(MirExpr::Call(
+                    ctx.arena.alloc_str("select"),
+                    vec![else_mir, then_mir, cond_mir],
+                    result_ty,
+                ))
+            } else {
+                Err(MirLowerError::UnsupportedExpr(format!(
+                    "const if-expression with type {} cannot be lowered to WGSL select",
+                    result_ty
+                )))
+            }
+        }
+        HirExpr::Case(_, _, _ty, _span) => Err(MirLowerError::UnsupportedExpr(
+            "match expression in const context is not yet supported".into(),
+        )),
+        HirExpr::Loop(_, _, _, _, _) => Err(MirLowerError::UnsupportedExpr(
+            "loop expression in const context is not supported".into(),
+        )),
+        // In const context, zero-arg const functions are referenced as variables,
+        // not called, because they will be emitted as WGSL `const` declarations.
+        HirExpr::Var(name, ty, _span) if ctx.const_functions.contains(name) => {
+            let mir_ty = ty_to_mir_type_with_ctx(ty, Some(ctx))?;
+            Ok(MirExpr::Var(ctx.arena.alloc_str(name), mir_ty))
+        }
+        _ => lower_hir_expr(expr, ctx),
     }
 }
 
@@ -2600,6 +2782,7 @@ mod tests {
                 ),
                 span: span(),
                 comments: vec![],
+                is_const: false,
             }],
             data_types: vec![],
             entry_points: vec![],
@@ -2641,6 +2824,7 @@ mod tests {
                 ),
                 span: span(),
                 comments: vec![],
+                is_const: false,
             }],
             data_types: vec![],
             entry_points: vec![],
@@ -2729,6 +2913,7 @@ mod tests {
                 ),
                 span: span(),
                 comments: vec![],
+                is_const: false,
             }],
             data_types: vec![],
             entry_points: vec![],
@@ -2757,6 +2942,7 @@ mod tests {
                 body: HirExpr::Lit(HirLit::Int(64), Ty::i32(), span()),
                 span: span(),
                 comments: vec![],
+                is_const: false,
             }],
             data_types: vec![],
             entry_points: vec![],
@@ -2796,6 +2982,7 @@ mod tests {
                 ),
                 span: span(),
                 comments: vec![],
+                is_const: false,
             }],
             data_types: vec![],
             entry_points: vec![],
@@ -2827,6 +3014,7 @@ mod tests {
                     body: HirExpr::Lit(HirLit::Int(4), Ty::i32(), span()),
                     span: span(),
                     comments: vec![],
+                    is_const: false,
                 },
                 HirFunction {
                     name: "derived".into(),
@@ -2841,6 +3029,7 @@ mod tests {
                     ),
                     span: span(),
                     comments: vec![],
+                    is_const: false,
                 },
             ],
             data_types: vec![],
@@ -2892,6 +3081,7 @@ mod tests {
                 ),
                 span: span(),
                 comments: vec![],
+                is_const: false,
             }],
             data_types: vec![],
             entry_points: vec![],
@@ -2922,6 +3112,7 @@ mod tests {
                 body: HirExpr::Var("x".into(), Ty::i32(), span()),
                 span: span(),
                 comments: vec![],
+                is_const: false,
             }],
             data_types: vec![],
             entry_points: vec![],
@@ -2956,6 +3147,7 @@ mod tests {
                 ),
                 span: span(),
                 comments: vec![],
+                is_const: false,
             }],
             data_types: vec![],
             entry_points: vec![],
@@ -2987,6 +3179,7 @@ mod tests {
                     body: HirExpr::Lit(HirLit::Int(64), Ty::i32(), span()),
                     span: span(),
                     comments: vec![],
+                    is_const: false,
                 },
                 HirFunction {
                     name: "useMax".into(),
@@ -3001,6 +3194,7 @@ mod tests {
                     ),
                     span: span(),
                     comments: vec![],
+                    is_const: false,
                 },
             ],
             data_types: vec![],
@@ -3040,6 +3234,7 @@ mod tests {
                 body: HirExpr::Lit(HirLit::Int(0), Ty::unit(), span()),
                 span: span(),
                 comments: vec![],
+                is_const: false,
             }],
             data_types: vec![],
             entry_points: vec![],

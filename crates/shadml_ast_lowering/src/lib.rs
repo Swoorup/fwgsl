@@ -223,6 +223,7 @@ impl AstLowering {
                     where_binds,
                     span,
                     comments,
+                    attributes,
                 } => {
                     let merged_comments = if comments.is_empty() {
                         sig_comments.get(name).cloned().unwrap_or_default()
@@ -231,9 +232,16 @@ impl AstLowering {
                         c.extend(comments.iter().cloned());
                         c
                     };
-                    if let Some(f) =
-                        self.lower_fun_decl(name, params, body, where_binds, *span, merged_comments)
-                    {
+                    let is_const = attributes.iter().any(|a| a.name == "const");
+                    if let Some(f) = self.lower_fun_decl(
+                        name,
+                        params,
+                        body,
+                        where_binds,
+                        *span,
+                        merged_comments,
+                        is_const,
+                    ) {
                         functions.push(f);
                     }
                 }
@@ -763,6 +771,7 @@ mod tests {
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -814,6 +823,7 @@ mod tests {
                 }],
                 span: span(),
                 comments: vec![],
+                attributes: vec![],
             }],
         };
         with_prelude(&mut program);

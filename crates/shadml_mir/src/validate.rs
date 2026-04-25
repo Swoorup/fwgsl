@@ -372,6 +372,7 @@ mod tests {
                 body: vec![],
                 return_expr: Some(MirExpr::Lit(MirLit::I32(1))),
                 comments: vec![],
+                is_const: false,
             }],
             constants: vec![],
             entry_points: vec![MirEntryPoint {

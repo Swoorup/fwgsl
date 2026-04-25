@@ -89,6 +89,8 @@ pub struct HirFunction {
     pub body: HirExpr,
     pub span: Span,
     pub comments: Vec<String>,
+    /// True if this function is marked with `@const`.
+    pub is_const: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -359,6 +361,7 @@ mod tests {
                 ),
                 span: Span::new(0, 20),
                 comments: vec![],
+                is_const: false,
             }],
             data_types: vec![],
             entry_points: vec![],

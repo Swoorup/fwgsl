@@ -1,0 +1,5 @@
+// ui-prelude: false
+base x = x
+
+@const
+tableSize = base 256

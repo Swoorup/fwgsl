@@ -224,3 +224,87 @@ fn mir_validation_rejects_const_call_and_codegen_panics() {
         panic_message
     );
 }
+
+#[test]
+fn explicit_const_attribute_emits_wgsl_const() {
+    let source = "@const\nmaxLights : I32\nmaxLights = 64";
+    let wgsl = compile_to_wgsl(source).expect("should compile");
+    assert!(
+        wgsl.contains("const maxLights: i32 = 64i;"),
+        "@const should emit WGSL const, got: {}",
+        wgsl
+    );
+    assert!(
+        !wgsl.contains("fn maxLights"),
+        "@const should NOT emit function, got: {}",
+        wgsl
+    );
+}
+
+#[test]
+fn explicit_const_with_arithmetic_emits_wgsl_const() {
+    let source = "@const\nstride : I32\nstride = 4 + 3";
+    let wgsl = compile_to_wgsl(source).expect("should compile");
+    assert!(
+        wgsl.contains("const stride: i32 ="),
+        "@const arithmetic should emit WGSL const, got: {}",
+        wgsl
+    );
+}
+
+#[test]
+fn explicit_const_referencing_another_const_succeeds() {
+    let source = r#"
+@const
+base = 4
+
+@const
+stride = base + 3
+"#;
+    let wgsl = compile_to_wgsl(source).expect("should compile");
+    assert!(
+        wgsl.contains("const base: i32 = 4i;"),
+        "base should be emitted as const, got: {}",
+        wgsl
+    );
+    assert!(
+        wgsl.contains("const stride: i32 ="),
+        "stride should be emitted as const, got: {}",
+        wgsl
+    );
+}
+
+#[test]
+fn explicit_const_on_function_with_params_fails() {
+    let source = "@const\ndouble : I32 -> I32\ndouble x = x * 2";
+    let result = compile_to_wgsl(source);
+    assert!(
+        result.is_err(),
+        "@const on function with params should fail"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("@const") && err.contains("parameters"),
+        "expected @const parameter error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn explicit_const_referencing_non_const_fails() {
+    let source = r#"
+getBlockSize : I32 -> I32
+getBlockSize x = x
+
+@const
+tableSize = 256 * getBlockSize 1
+"#;
+    let result = compile_to_wgsl(source);
+    assert!(result.is_err(), "@const referencing non-const should fail");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("@const"),
+        "expected @const error, got: {}",
+        err
+    );
+}

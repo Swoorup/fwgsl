@@ -16,6 +16,7 @@ impl AstLowering {
         where_binds: &[LocalBind],
         span: Span,
         comments: Vec<String>,
+        is_const: bool,
     ) -> Option<HirFunction> {
         let mut local_env = self.env.clone();
         let predicate_start = self.inferred_predicates.len();
@@ -113,6 +114,7 @@ impl AstLowering {
             body,
             span,
             comments,
+            is_const,
         })
     }
 
@@ -168,6 +170,7 @@ impl AstLowering {
             body,
             span,
             comments,
+            is_const: false,
         })
     }
 
@@ -225,6 +228,7 @@ impl AstLowering {
             body,
             span,
             comments,
+            is_const: false,
         })
     }
 

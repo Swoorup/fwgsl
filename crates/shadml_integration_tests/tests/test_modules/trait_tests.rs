@@ -211,8 +211,8 @@ fn slang_style_generic_lighting_compiles_with_specialization() {
     assert!(wgsl.contains("fn lighting_spotlight("));
     assert!(wgsl.contains("position_PointLight"));
     assert!(wgsl.contains("position_SpotLight"));
-    assert!(wgsl.contains("lighting_pointlight(point(),"));
-    assert!(wgsl.contains("lighting_spotlight(spot(),"));
+    assert!(wgsl.contains("lighting_pointlight(point,"));
+    assert!(wgsl.contains("lighting_spotlight(spot,"));
 }
 
 /// Strips the cross-module section (section 14) from the conflicts example,

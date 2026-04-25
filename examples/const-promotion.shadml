@@ -17,6 +17,20 @@ pi = 3.14159
 halfPi : F32
 halfPi = pi / 2.0
 
+@const
+halfPiEnforced : F32
+halfPiEnforced = pi / 2.0
+
+-- Explicit @const on arithmetic — guaranteed compile-time
+@const
+quarterPi : F32
+quarterPi = halfPiEnforced / 2.0
+
+-- @const can reference other @const or auto-promoted bindings
+@const
+lightFactor : I32
+lightFactor = maxLights + tileSize
+
 -- Arithmetic on literals — still const-evaluable
 verticesPerQuad : I32
 verticesPerQuad = 6
@@ -51,4 +65,5 @@ main input =
       tile   = toF32 tileSize
       flag   = if alwaysTrue then 1.0 else 0.0
       result = vec4 (toF32 lights + tile) pi halfPi (toF32 verticesPerInstance + flag)
+      r = halfPiEnforced
   in writeAt results idx result

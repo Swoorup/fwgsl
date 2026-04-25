@@ -1050,6 +1050,13 @@ mod tests {
     }
 
     #[test]
+    fn format_const_attribute() {
+        let source = "@ const\npi : F32\npi = 3.14159\n";
+        let result = format_default(source);
+        assert_eq!(result, "@const\npi : F32\npi = 3.14159\n");
+    }
+
+    #[test]
     fn format_idempotent() {
         let source = "-- Example\nf x = x + 1\n\ng : I32 -> I32\ng y = y * 2\n";
         let first = format_default(source);

@@ -391,6 +391,7 @@ mod tests {
             body,
             return_expr: Some(MirExpr::Lit(MirLit::I32(0))),
             comments: vec![],
+            is_const: false,
         }
     }
 
@@ -689,6 +690,7 @@ mod tests {
                     MirType::Struct(arena.alloc_str("Used")),
                 )),
                 comments: vec![],
+                is_const: false,
             }],
             entry_points: vec![],
             constants: vec![],

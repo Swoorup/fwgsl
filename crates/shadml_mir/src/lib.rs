@@ -223,6 +223,8 @@ pub struct MirFunction<'a> {
     pub body: Vec<MirStmt<'a>>,
     pub return_expr: Option<MirExpr<'a>>,
     pub comments: Vec<&'a str>,
+    /// True if this function is marked with `@const`.
+    pub is_const: bool,
 }
 
 /// A function parameter.

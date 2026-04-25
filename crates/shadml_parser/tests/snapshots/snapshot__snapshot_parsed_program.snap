@@ -166,6 +166,7 @@ Program {
                 end: 116,
             },
             comments: [],
+            attributes: [],
         },
         TypeSig {
             name: "add",
@@ -254,6 +255,7 @@ Program {
                 end: 157,
             },
             comments: [],
+            attributes: [],
         },
         TypeSig {
             name: "main",
@@ -375,6 +377,7 @@ Program {
                 end: 216,
             },
             comments: [],
+            attributes: [],
         },
     ],
 }

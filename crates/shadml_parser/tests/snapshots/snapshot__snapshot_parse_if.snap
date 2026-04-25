@@ -68,6 +68,7 @@ Program {
                 end: 29,
             },
             comments: [],
+            attributes: [],
         },
     ],
 }

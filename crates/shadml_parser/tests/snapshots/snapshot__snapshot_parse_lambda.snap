@@ -56,6 +56,7 @@ Program {
                 end: 17,
             },
             comments: [],
+            attributes: [],
         },
     ],
 }

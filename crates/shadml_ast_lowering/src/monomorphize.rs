@@ -735,6 +735,7 @@ impl AstLowering {
             body,
             span: template.span,
             comments: template.comments.clone(),
+            is_const: template.is_const,
         }
     }
 

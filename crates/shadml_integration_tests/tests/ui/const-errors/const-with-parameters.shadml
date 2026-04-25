@@ -1,0 +1,3 @@
+// ui-prelude: false
+@const
+double x = x

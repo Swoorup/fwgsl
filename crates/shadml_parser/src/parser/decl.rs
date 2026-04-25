@@ -37,13 +37,19 @@ impl Parser {
                     self.pending_decls = decls;
                     Some(first)
                 } else {
-                    // Entry point: parse attributes, then annotated function declaration.
+                    // Parse attributes, then determine if this is an entry point
+                    // (has shader stage attribute) or a function declaration.
                     let mut attributes = Vec::new();
                     while self.peek_non_trivia() == SyntaxKind::At {
                         self.skip_trivia();
                         attributes.push(self.parse_attribute());
                         self.skip_trivia();
                     }
+
+                    // Check if any attribute is a shader stage (compute/vertex/fragment)
+                    let is_entry_point = attributes
+                        .iter()
+                        .any(|a| matches!(a.name.as_str(), "compute" | "vertex" | "fragment"));
 
                     // Consume LayoutSemicolon between attributes and the declaration
                     self.eat_layout_semi();
@@ -76,39 +82,49 @@ impl Parser {
                     let name = self.text_of(&name_tok).to_owned();
                     self.skip_trivia();
 
-                    let mut params = Vec::new();
-                    while !self.at(SyntaxKind::Equals) && !self.at_end() && self.consume_fuel() {
-                        if matches!(
-                            self.peek_non_trivia(),
-                            SyntaxKind::LayoutSemicolon | SyntaxKind::LayoutBraceClose
-                        ) {
-                            break;
+                    if is_entry_point {
+                        let mut params = Vec::new();
+                        while !self.at(SyntaxKind::Equals) && !self.at_end() && self.consume_fuel()
+                        {
+                            if matches!(
+                                self.peek_non_trivia(),
+                                SyntaxKind::LayoutSemicolon | SyntaxKind::LayoutBraceClose
+                            ) {
+                                break;
+                            }
+                            let p = self.parse_pat_atom();
+                            params.push(p);
+                            self.skip_trivia();
                         }
-                        let p = self.parse_pat_atom();
-                        params.push(p);
+
+                        self.expect(SyntaxKind::Equals);
                         self.skip_trivia();
-                    }
+                        let body = self.parse_expr();
 
-                    self.expect(SyntaxKind::Equals);
-                    self.skip_trivia();
-                    let body = self.parse_expr();
-
-                    let span = self.span_from(start);
-                    let entry_decl = Decl::EntryPoint {
-                        attributes,
-                        name,
-                        params,
-                        body,
-                        span,
-                        comments: vec![],
-                    };
-                    if let Some(ty_sig) = type_sig_decl {
-                        // Return the type signature first, then the entry point
-                        // on the next parse_decl() call.
-                        self.pending_decls.push(entry_decl);
-                        Some(ty_sig)
+                        let span = self.span_from(start);
+                        let entry_decl = Decl::EntryPoint {
+                            attributes,
+                            name,
+                            params,
+                            body,
+                            span,
+                            comments: vec![],
+                        };
+                        if let Some(ty_sig) = type_sig_decl {
+                            self.pending_decls.push(entry_decl);
+                            Some(ty_sig)
+                        } else {
+                            Some(entry_decl)
+                        }
                     } else {
-                        Some(entry_decl)
+                        // Non-stage attributes (e.g. @const) → FunDecl
+                        let fun_decl = self.parse_fun_decl(name, start, attributes);
+                        if let Some(ty_sig) = type_sig_decl {
+                            self.pending_decls.push(fun_decl);
+                            Some(ty_sig)
+                        } else {
+                            Some(fun_decl)
+                        }
                     }
                 }
             }
@@ -201,7 +217,7 @@ impl Parser {
                 if self.at(SyntaxKind::Colon) {
                     Some(self.parse_type_sig(name, start))
                 } else {
-                    Some(self.parse_fun_decl(name, start))
+                    Some(self.parse_fun_decl(name, start, vec![]))
                 }
             }
             _ => None,
@@ -265,7 +281,12 @@ impl Parser {
         }
     }
 
-    pub(crate) fn parse_fun_decl(&mut self, name: String, start: u32) -> Decl {
+    pub(crate) fn parse_fun_decl(
+        &mut self,
+        name: String,
+        start: u32,
+        attributes: Vec<Attribute>,
+    ) -> Decl {
         // Parse patterns before `=` or `|` (guard)
         let mut params = Vec::new();
         self.skip_trivia();
@@ -304,6 +325,7 @@ impl Parser {
                 where_binds,
                 span,
                 comments: vec![],
+                attributes,
             };
         }
 
@@ -326,6 +348,7 @@ impl Parser {
             where_binds,
             span,
             comments: vec![],
+            attributes,
         }
     }
 
@@ -1747,8 +1770,11 @@ impl Parser {
         self.skip_trivia();
 
         // Attribute name: could be Ident, UpperIdent, or a reserved keyword
-        // that is valid in attribute position such as `builtin`.
-        let name_tok = if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::KwBuiltin) {
+        // that is valid in attribute position such as `builtin` or `const`.
+        let name_tok = if self.at(SyntaxKind::Ident)
+            || self.at(SyntaxKind::KwBuiltin)
+            || self.at(SyntaxKind::KwConst)
+        {
             self.bump()
         } else {
             self.expect(SyntaxKind::UpperIdent)

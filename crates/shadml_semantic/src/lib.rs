@@ -111,6 +111,9 @@ pub struct SemanticAnalyzer {
     type_names: HashMap<String, TypeNameKind>,
     /// Mangled method names from all impls, pre-built for O(1) lookup.
     impl_method_names: HashSet<String>,
+    /// Set of top-level binding names that are const-eligible
+    /// (explicit `@const`, `const` declarations, or auto-promoted zero-param functions).
+    pub const_bindings: HashSet<String>,
 }
 
 /// Information about a data type collected during semantic analysis.
@@ -140,6 +143,7 @@ impl SemanticAnalyzer {
             bitfield_field_names: HashMap::new(),
             type_names: HashMap::new(),
             impl_method_names: HashSet::new(),
+            const_bindings: HashSet::new(),
         }
     }
 
@@ -945,6 +949,14 @@ impl SemanticAnalyzer {
                 _ => {}
             }
         }
+
+        // Pass 4: validate @const attributes
+        self.const_bindings = validate_const::compute_const_bindings(program);
+        validate_const::validate_const_attributes(
+            program,
+            &self.const_bindings,
+            &mut self.engine.diagnostics,
+        );
     }
 
     pub fn has_errors(&self) -> bool {
@@ -966,6 +978,7 @@ mod decl;
 mod expr;
 mod pattern;
 mod types;
+pub mod validate_const;
 
 #[cfg(test)]
 mod tests {
@@ -1009,6 +1022,7 @@ mod tests {
                 where_binds: vec![],
                 span: span(),
                 comments: vec![],
+                attributes: vec![],
             }],
         };
         with_prelude(&mut program);
@@ -1078,6 +1092,7 @@ mod tests {
                 where_binds: vec![],
                 span: span(),
                 comments: vec![],
+                attributes: vec![],
             }],
         };
         with_prelude(&mut program);
@@ -1119,6 +1134,7 @@ mod tests {
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -1150,6 +1166,7 @@ mod tests {
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -1231,6 +1248,7 @@ mod tests {
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -1279,6 +1297,7 @@ mod tests {
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -1435,6 +1454,7 @@ mod tests {
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -1528,6 +1548,7 @@ f particle = match particle
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -1566,6 +1587,7 @@ f particle = match particle
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -1802,6 +1824,7 @@ impl Convert (Vec<3, F32>) where
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -1874,6 +1897,7 @@ impl Convert (Vec<3, F32>) where
                 where_binds: vec![],
                 span: span(),
                 comments: vec![],
+                attributes: vec![],
             }],
         };
         with_prelude(&mut program);
@@ -1907,6 +1931,7 @@ impl Convert (Vec<3, F32>) where
                 where_binds: vec![],
                 span: span(),
                 comments: vec![],
+                attributes: vec![],
             }],
         };
         with_prelude(&mut program);
@@ -1936,6 +1961,7 @@ impl Convert (Vec<3, F32>) where
                 }],
                 span: span(),
                 comments: vec![],
+                attributes: vec![],
             }],
         };
         with_prelude(&mut program);
@@ -1992,6 +2018,7 @@ impl Convert (Vec<3, F32>) where
                 where_binds: vec![],
                 span: span(),
                 comments: vec![],
+                attributes: vec![],
             }],
         };
         with_prelude(&mut program);
@@ -2050,6 +2077,7 @@ impl Convert (Vec<3, F32>) where
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -2142,6 +2170,7 @@ impl Convert (Vec<3, F32>) where
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
                 Decl::TypeSig {
                     name: "unwrap".into(),
@@ -2180,6 +2209,7 @@ impl Convert (Vec<3, F32>) where
                     where_binds: vec![],
                     span: span(),
                     comments: vec![],
+                    attributes: vec![],
                 },
             ],
         };
@@ -2266,6 +2296,118 @@ vsMain pos = pos
         assert!(
             !has_render_block_error,
             "@compute entry points should NOT require a render block"
+        );
+    }
+
+    #[test]
+    fn test_const_attribute_on_literal_passes() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::FunDecl {
+                name: "maxLights".into(),
+                params: vec![],
+                body: Expr::Lit(Lit::Int(64), span()),
+                where_binds: vec![],
+                span: span(),
+                comments: vec![],
+                attributes: vec![Attribute {
+                    name: "const".into(),
+                    args: vec![],
+                    span: span(),
+                }],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        let has_const_error = sa.diagnostics().iter().any(|d| {
+            d.severity == shadml_diagnostics::Severity::Error && d.message.contains("@const")
+        });
+        assert!(
+            !has_const_error,
+            "@const on literal should not produce an error, got: {:?}",
+            sa.diagnostics().iter().collect::<Vec<_>>()
+        );
+        assert!(sa.const_bindings.contains("maxLights"));
+    }
+
+    #[test]
+    fn test_const_attribute_on_non_const_binding_fails() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![
+                Decl::FunDecl {
+                    name: "getBlockSize".into(),
+                    params: vec![Pat::Var("x".into(), span())],
+                    body: Expr::Var("x".into(), span()),
+                    where_binds: vec![],
+                    span: span(),
+                    comments: vec![],
+                    attributes: vec![],
+                },
+                Decl::FunDecl {
+                    name: "tableSize".into(),
+                    params: vec![],
+                    body: Expr::App(
+                        Box::new(Expr::Var("getBlockSize".into(), span())),
+                        Box::new(Expr::Lit(Lit::Int(16), span())),
+                        span(),
+                    ),
+                    where_binds: vec![],
+                    span: span(),
+                    comments: vec![],
+                    attributes: vec![Attribute {
+                        name: "const".into(),
+                        args: vec![],
+                        span: span(),
+                    }],
+                },
+            ],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        let has_const_error = sa.diagnostics().iter().any(|d| {
+            d.severity == shadml_diagnostics::Severity::Error && d.message.contains("@const")
+        });
+        assert!(
+            has_const_error,
+            "@const referencing non-const binding should produce an error, got: {:?}",
+            sa.diagnostics().iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_const_attribute_on_function_with_params_fails() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::FunDecl {
+                name: "double".into(),
+                params: vec![Pat::Var("x".into(), span())],
+                body: Expr::Infix(
+                    Box::new(Expr::Var("x".into(), span())),
+                    "*".into(),
+                    Box::new(Expr::Lit(Lit::Int(2), span())),
+                    span(),
+                ),
+                where_binds: vec![],
+                span: span(),
+                comments: vec![],
+                attributes: vec![Attribute {
+                    name: "const".into(),
+                    args: vec![],
+                    span: span(),
+                }],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        let has_const_error = sa.diagnostics().iter().any(|d| {
+            d.severity == shadml_diagnostics::Severity::Error
+                && d.message.contains("@const")
+                && d.message.contains("parameters")
+        });
+        assert!(
+            has_const_error,
+            "@const on function with parameters should produce an error"
         );
     }
 }

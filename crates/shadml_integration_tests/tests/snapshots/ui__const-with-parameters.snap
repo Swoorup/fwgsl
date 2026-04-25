@@ -1,0 +1,11 @@
+---
+source: crates/shadml_integration_tests/tests/ui.rs
+expression: output
+---
+error: `@const` cannot be used on functions with parameters
+  --> const-with-parameters.shadml:1:1
+   |
+1 | @const
+  | ~~~~~~~~~~~~~~~~~~~ function has parameters here
+   |
+   = help: remove parameters or remove `@const`
