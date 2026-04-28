@@ -173,6 +173,30 @@ pub struct BindingInfo {
     pub origin_module: Vec<String>,
     /// Doc comment attached to this binding declaration.
     pub doc: Option<String>,
+    /// Hint attributes (e.g. `@samplerState(...)`) attached to this binding.
+    pub hints: Vec<HintAttribute>,
+}
+
+/// A hint attribute on a binding declaration.
+#[derive(Debug, Clone)]
+pub struct HintAttribute {
+    pub name: String,
+    pub args: Vec<HintArg>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HintArg {
+    Positional(HintValue),
+    Named(String, HintValue),
+}
+
+#[derive(Debug, Clone)]
+pub enum HintValue {
+    Ident(String),
+    String(String),
+    Int(i64),
+    UInt(u64),
+    Float(f64),
 }
 
 /// Bind group address space exposed to bindgen.
@@ -329,6 +353,7 @@ pub(crate) fn bind_groups_from_globals(
             } else {
                 Some(global.comments.join("\n"))
             },
+            hints: global.hints.iter().map(hint_from_mir).collect(),
         });
     }
 
@@ -339,6 +364,34 @@ pub(crate) fn bind_groups_from_globals(
             BindGroupInfo { group, bindings }
         })
         .collect()
+}
+
+fn hint_from_mir(hint: &shadml_mir::MirHint<'_>) -> HintAttribute {
+    HintAttribute {
+        name: hint.name.to_string(),
+        args: hint
+            .args
+            .iter()
+            .map(|arg| match arg {
+                shadml_mir::MirHintArg::Positional(v) => {
+                    HintArg::Positional(hint_value_from_mir(v))
+                }
+                shadml_mir::MirHintArg::Named(name, v) => {
+                    HintArg::Named(name.to_string(), hint_value_from_mir(v))
+                }
+            })
+            .collect(),
+    }
+}
+
+fn hint_value_from_mir(v: &shadml_mir::MirHintValue<'_>) -> HintValue {
+    match v {
+        shadml_mir::MirHintValue::Ident(s) => HintValue::Ident(s.to_string()),
+        shadml_mir::MirHintValue::String(s) => HintValue::String(s.to_string()),
+        shadml_mir::MirHintValue::Int(n) => HintValue::Int(*n),
+        shadml_mir::MirHintValue::UInt(n) => HintValue::UInt(*n),
+        shadml_mir::MirHintValue::Float(n) => HintValue::Float(*n),
+    }
 }
 
 pub(crate) fn exported_types_from_structs(
@@ -650,6 +703,7 @@ mod tests {
             binding: 0,
             origin_module: None,
             comments: vec![],
+            hints: vec![],
         }];
         let result = push_constants_from_globals(&globals, &[s]);
         assert!(result.is_some());
@@ -668,6 +722,7 @@ mod tests {
             binding: 0,
             origin_module: None,
             comments: vec![],
+            hints: vec![],
         }];
         let result = push_constants_from_globals(&globals, &[]);
         assert!(result.is_none());

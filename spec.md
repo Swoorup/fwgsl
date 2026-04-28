@@ -1859,6 +1859,31 @@ Compiles to:
 @group(0) @binding(3) var mySampArray: binding_array<sampler, 4>;
 ```
 
+#### Sampler State Hints
+
+Sampler bindings may carry an `@samplerState` hint attribute that controls both the generated `wgpu::SamplerDescriptor` and the `wgpu::BindingType` for the bind group layout entry:
+
+```
+@group(0) @binding(1)
+@samplerState(filter = "nearest", address_mode_u = "clamp_to_edge")
+mySampler : Sampler
+```
+
+Supported fields:
+
+| Field | Values | Default |
+|-------|--------|---------|
+| `filter` | `"linear"`, `"nearest"` | `"linear"` |
+| `mipmap_filter` | `"linear"`, `"nearest"` | `"linear"` |
+| `address_mode_u` | `"repeat"`, `"clamp_to_edge"`, `"mirror_repeat"` | `"repeat"` |
+| `address_mode_v` | `"repeat"`, `"clamp_to_edge"`, `"mirror_repeat"` | `"repeat"` |
+| `address_mode_w` | `"repeat"`, `"clamp_to_edge"`, `"mirror_repeat"` | `"repeat"` |
+
+- `filter = "nearest"` causes the generated `BindingType` to be `SamplerBindingType::NonFiltering`; otherwise it is `Filtering`.
+- `SamplerComparison` bindings always use `Comparison` regardless of hints.
+- `@samplerState` is stripped during WGSL lowering and does not appear in the generated shader.
+- The bindgen layer emits a `create_{name}_sampler(device)` helper function for each sampler binding that carries `@samplerState` hints.
+
 ### 13.7 Resource Operations
 
 | shadml | WGSL | Description |

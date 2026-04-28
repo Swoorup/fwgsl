@@ -355,10 +355,18 @@ impl SemanticAnalyzer {
                 let inferred_ty = self.convert_syntax_type(ty);
                 self.env.insert(name.clone(), inferred_ty);
             }
-            if let Decl::BindingDecl { name, ty, .. } = decl {
+            if let Decl::BindingDecl {
+                name,
+                ty,
+                attributes,
+                span,
+                ..
+            } = decl
+            {
                 let inferred_ty = self.convert_syntax_type(ty);
                 // The type is already the inner type (no Uniform/Storage wrappers).
                 self.env.insert(name.clone(), Scheme::mono(inferred_ty.ty));
+                self.validate_binding_hints(name, ty, attributes, *span);
             }
             if let Decl::ExternDecl { name, ty, .. } = decl {
                 let inferred_ty = self.convert_syntax_type(ty);
@@ -966,6 +974,103 @@ impl SemanticAnalyzer {
     pub fn diagnostics(&self) -> &DiagnosticSink {
         &self.engine.diagnostics
     }
+
+    /// Validate hint attributes on a binding declaration.
+    fn validate_binding_hints(
+        &mut self,
+        name: &str,
+        ty: &Type,
+        attributes: &[Attribute],
+        _span: Span,
+    ) {
+        let sampler_state_attrs: Vec<&Attribute> = attributes
+            .iter()
+            .filter(|a| a.name == "samplerState")
+            .collect();
+
+        if sampler_state_attrs.is_empty() {
+            return;
+        }
+
+        let is_sampler = is_sampler_type(ty);
+        let is_sampler_comparison = is_sampler_comparison_type(ty);
+        let is_binding_array_sampler = is_binding_array_of_sampler_type(ty);
+
+        if !is_sampler && !is_sampler_comparison && !is_binding_array_sampler {
+            for attr in &sampler_state_attrs {
+                self.engine.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "'@samplerState' can only be used on sampler bindings, but '{}' has type '{}'",
+                        name,
+                        type_to_string(ty)
+                    ))
+                    .with_label(Label::primary(attr.span, "invalid hint attribute")),
+                );
+            }
+            return;
+        }
+
+        for attr in &sampler_state_attrs {
+            for arg in &attr.args {
+                let (field_name, value) = match arg {
+                    AttrArg::Positional(_v) => {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(
+                                "'@samplerState' arguments must be named (e.g. filter = \"linear\")"
+                            )
+                            .with_label(Label::primary(attr.span, "expected named argument")),
+                        );
+                        continue;
+                    }
+                    AttrArg::Named(name, v) => (name.as_str(), v),
+                };
+
+                match field_name {
+                    "filter" | "mipmap_filter" => {
+                        if !is_filter_value(value) {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "'@samplerState' field '{}' must be \"linear\" or \"nearest\"",
+                                    field_name
+                                ))
+                                .with_label(Label::primary(attr.span, "invalid filter value")),
+                            );
+                        }
+                    }
+                    "address_mode_u" | "address_mode_v" | "address_mode_w" => {
+                        if !is_address_mode_value(value) {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "'@samplerState' field '{}' must be \"repeat\", \"clamp_to_edge\", or \"mirror_repeat\"",
+                                    field_name
+                                ))
+                                .with_label(Label::primary(attr.span, "invalid address mode value")),
+                            );
+                        }
+                    }
+                    "compare" => {
+                        if !is_sampler_comparison && !is_binding_array_sampler {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(
+                                    "'@samplerState' field 'compare' can only be used on 'SamplerComparison' bindings"
+                                )
+                                .with_label(Label::primary(attr.span, "invalid field for type")),
+                            );
+                        }
+                    }
+                    _ => {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "unknown '@samplerState' field '{}'",
+                                field_name
+                            ))
+                            .with_label(Label::primary(attr.span, "unknown field")),
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Default for SemanticAnalyzer {
@@ -979,6 +1084,50 @@ mod expr;
 mod pattern;
 mod types;
 pub mod validate_const;
+
+// ---------------------------------------------------------------------------
+// Binding hint validation helpers
+// ---------------------------------------------------------------------------
+
+fn is_sampler_type(ty: &Type) -> bool {
+    matches!(ty, Type::Con(name, _) if name == "Sampler")
+}
+
+fn is_sampler_comparison_type(ty: &Type) -> bool {
+    matches!(ty, Type::Con(name, _) if name == "SamplerComparison")
+}
+
+fn is_binding_array_of_sampler_type(ty: &Type) -> bool {
+    match ty {
+        Type::App(a, b, _) => match (&**a, &**b) {
+            (Type::Con(arr, _), Type::Con(elem, _)) => {
+                arr == "BindingArray" && (elem == "Sampler" || elem == "SamplerComparison")
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn is_filter_value(v: &AttrValue) -> bool {
+    matches!(v, AttrValue::Ident(s) | AttrValue::String(s) if s == "linear" || s == "nearest")
+}
+
+fn is_address_mode_value(v: &AttrValue) -> bool {
+    matches!(
+        v,
+        AttrValue::Ident(s) | AttrValue::String(s)
+            if s == "repeat" || s == "clamp_to_edge" || s == "mirror_repeat"
+    )
+}
+
+fn type_to_string(ty: &Type) -> String {
+    match ty {
+        Type::Con(name, _) => name.clone(),
+        Type::App(a, b, _) => format!("{} {}", type_to_string(a), type_to_string(b)),
+        _ => "<unknown>".to_string(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2408,6 +2557,113 @@ vsMain pos = pos
         assert!(
             has_const_error,
             "@const on function with parameters should produce an error"
+        );
+    }
+
+    #[test]
+    fn test_sampler_state_on_non_sampler_binding_fails() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::BindingDecl {
+                name: "buf".into(),
+                ty: Type::Con("F32".into(), span()),
+                address_space: shadml_parser::parser::BindingAddressSpace::Uniform,
+                group: 0,
+                binding: 0,
+                span: span(),
+                comments: vec![],
+                attributes: vec![Attribute {
+                    name: "samplerState".into(),
+                    args: vec![AttrArg::Named(
+                        "filter".into(),
+                        AttrValue::String("nearest".into()),
+                    )],
+                    span: span(),
+                }],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        let has_error = sa.diagnostics().iter().any(|d| {
+            d.severity == shadml_diagnostics::Severity::Error
+                && d.message.contains("@samplerState")
+                && d.message.contains("sampler bindings")
+        });
+        assert!(
+            has_error,
+            "@samplerState on non-sampler should produce an error, got: {:?}",
+            sa.diagnostics().iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_sampler_state_unknown_field_fails() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::BindingDecl {
+                name: "mySampler".into(),
+                ty: Type::Con("Sampler".into(), span()),
+                address_space: shadml_parser::parser::BindingAddressSpace::Opaque,
+                group: 0,
+                binding: 0,
+                span: span(),
+                comments: vec![],
+                attributes: vec![Attribute {
+                    name: "samplerState".into(),
+                    args: vec![AttrArg::Named(
+                        "unknown_field".into(),
+                        AttrValue::String("value".into()),
+                    )],
+                    span: span(),
+                }],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        let has_error = sa.diagnostics().iter().any(|d| {
+            d.severity == shadml_diagnostics::Severity::Error
+                && d.message.contains("unknown '@samplerState' field")
+        });
+        assert!(
+            has_error,
+            "unknown @samplerState field should produce an error, got: {:?}",
+            sa.diagnostics().iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_sampler_state_compare_on_sampler_fails() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::BindingDecl {
+                name: "mySampler".into(),
+                ty: Type::Con("Sampler".into(), span()),
+                address_space: shadml_parser::parser::BindingAddressSpace::Opaque,
+                group: 0,
+                binding: 0,
+                span: span(),
+                comments: vec![],
+                attributes: vec![Attribute {
+                    name: "samplerState".into(),
+                    args: vec![AttrArg::Named(
+                        "compare".into(),
+                        AttrValue::String("less_equal".into()),
+                    )],
+                    span: span(),
+                }],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        let has_error = sa.diagnostics().iter().any(|d| {
+            d.severity == shadml_diagnostics::Severity::Error
+                && d.message.contains("compare")
+                && d.message.contains("SamplerComparison")
+        });
+        assert!(
+            has_error,
+            "compare on Sampler should produce an error, got: {:?}",
+            sa.diagnostics().iter().collect::<Vec<_>>()
         );
     }
 }

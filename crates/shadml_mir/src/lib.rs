@@ -75,6 +75,30 @@ pub struct MirGlobal<'a> {
     pub origin_module: Option<&'a str>,
     /// Leading doc comments attached to this binding declaration.
     pub comments: Vec<&'a str>,
+    /// Hint attributes (e.g. `@samplerState(...)`) attached to this binding.
+    pub hints: Vec<MirHint<'a>>,
+}
+
+/// A hint attribute on a binding declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MirHint<'a> {
+    pub name: &'a str,
+    pub args: Vec<MirHintArg<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MirHintArg<'a> {
+    Positional(MirHintValue<'a>),
+    Named(&'a str, MirHintValue<'a>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MirHintValue<'a> {
+    Ident(&'a str),
+    String(&'a str),
+    Int(i64),
+    UInt(u64),
+    Float(f64),
 }
 
 /// WGSL address space for global bindings.

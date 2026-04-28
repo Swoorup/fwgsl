@@ -304,3 +304,102 @@ fn test_full_pipeline_loop_expression() {
         wgsl
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sampler state hint attribute tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_full_pipeline_sampler_state_stripped_from_wgsl() {
+    let source = r#"@group(0) @binding(0) @samplerState(filter = "nearest", address_mode_u = "clamp_to_edge") mySampler : Sampler
+
+@compute @workgroup_size(1, 1, 1)
+main : () -> ()
+main () = ()
+"#;
+    let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
+    assert!(
+        !wgsl.contains("samplerState"),
+        "WGSL should not contain @samplerState, got: {}",
+        wgsl
+    );
+}
+
+#[test]
+fn test_full_pipeline_sampler_state_on_non_sampler_produces_error() {
+    let source = r#"@group(0) @binding(0) @samplerState(filter = "nearest") myBuf : F32
+
+@compute @workgroup_size(1, 1, 1)
+main : () -> ()
+main () = ()
+"#;
+    let result = compile_to_wgsl(source);
+    assert!(
+        result.is_err(),
+        "compilation should fail for @samplerState on non-sampler"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("@samplerState") && err.contains("sampler bindings"),
+        "Error should mention @samplerState and sampler bindings, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_full_pipeline_sampler_state_unknown_field_produces_error() {
+    let source = r#"@group(0) @binding(0) @samplerState(unknown_field = "value") mySampler : Sampler
+
+@compute @workgroup_size(1, 1, 1)
+main : () -> ()
+main () = ()
+"#;
+    let result = compile_to_wgsl(source);
+    assert!(
+        result.is_err(),
+        "compilation should fail for unknown @samplerState field"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("unknown '@samplerState' field"),
+        "Error should mention unknown field, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_full_pipeline_sampler_state_compare_on_sampler_produces_error() {
+    let source = r#"@group(0) @binding(0) @samplerState(compare = "less_equal") mySampler : Sampler
+
+@compute @workgroup_size(1, 1, 1)
+main : () -> ()
+main () = ()
+"#;
+    let result = compile_to_wgsl(source);
+    assert!(
+        result.is_err(),
+        "compilation should fail for compare on Sampler"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("compare") && err.contains("SamplerComparison"),
+        "Error should mention compare and SamplerComparison, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_full_pipeline_sampler_state_valid_on_sampler_comparison() {
+    let source = r#"@group(0) @binding(0) @samplerState(filter = "nearest") mySampler : SamplerComparison
+
+@compute @workgroup_size(1, 1, 1)
+main : () -> ()
+main () = ()
+"#;
+    let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
+    assert!(
+        !wgsl.contains("samplerState"),
+        "WGSL should not contain @samplerState, got: {}",
+        wgsl
+    );
+}

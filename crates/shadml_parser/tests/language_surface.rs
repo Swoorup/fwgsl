@@ -253,6 +253,32 @@ fn parse_index_expr() {
 }
 
 #[test]
+fn parse_binding_with_sampler_state_hint() {
+    let mut p = Parser::new(
+        "@group(0) @binding(1) @samplerState(filter = \"nearest\", address_mode_u = \"clamp_to_edge\") mySampler : Sampler"
+    );
+    let program = p.parse_program();
+    let Decl::BindingDecl {
+        name,
+        address_space,
+        group,
+        binding,
+        attributes,
+        ..
+    } = &program.decls[0]
+    else {
+        panic!("binding")
+    };
+    assert_eq!(name, "mySampler");
+    assert_eq!(*address_space, BindingAddressSpace::Opaque);
+    assert_eq!(*group, 0);
+    assert_eq!(*binding, 1);
+    assert_eq!(attributes.len(), 1);
+    assert_eq!(attributes[0].name, "samplerState");
+    assert_eq!(attributes[0].args.len(), 2);
+}
+
+#[test]
 fn parse_vec_literal_arguments_after_whitespace_application() {
     let mut p = Parser::new("main = lighting point [0.0, 0.0, 0.0] [0.0, 1.0, 0.0]");
     let program = p.parse_program();

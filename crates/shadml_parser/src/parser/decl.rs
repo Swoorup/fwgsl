@@ -1317,6 +1317,12 @@ impl Parser {
     /// Parse a single binding declaration after `@group(N) @binding(N)` have been consumed.
     /// Expects: `uniform name : Type` or `storage name : Type` or `storage(read_write) name : Type`
     pub(crate) fn parse_binding_body(&mut self, start: u32, group: u32, binding: u32) -> Decl {
+        let mut attributes = Vec::new();
+        self.skip_trivia();
+        while self.at(SyntaxKind::At) {
+            attributes.push(self.parse_attribute());
+            self.skip_trivia();
+        }
         let address_space = if self.at(SyntaxKind::KwUniform) {
             self.bump();
             BindingAddressSpace::Uniform
@@ -1372,6 +1378,7 @@ impl Parser {
             binding,
             span,
             comments: vec![],
+            attributes,
         }
     }
 

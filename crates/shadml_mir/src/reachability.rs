@@ -535,6 +535,7 @@ mod tests {
                     binding: 0,
                     origin_module: None,
                     comments: vec![],
+                    hints: vec![],
                 },
                 MirGlobal {
                     name: arena.alloc_str("unused_buf"),
@@ -544,6 +545,7 @@ mod tests {
                     binding: 1,
                     origin_module: None,
                     comments: vec![],
+                    hints: vec![],
                 },
             ],
             functions: vec![],
@@ -601,6 +603,7 @@ mod tests {
                 binding: 0,
                 origin_module: None,
                 comments: vec![],
+                hints: vec![],
             }],
             functions: vec![],
             entry_points: vec![MirEntryPoint {

@@ -91,6 +91,34 @@ fn lower_address_space(
     }
 }
 
+/// Convert parser attributes to HIR hint attributes.
+fn lower_hint_attributes(attrs: &[Attribute]) -> Vec<HirHintAttribute> {
+    attrs
+        .iter()
+        .map(|a| HirHintAttribute {
+            name: a.name.clone(),
+            args: a
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    AttrArg::Positional(v) => HirHintArg::Positional(lower_hint_value(v)),
+                    AttrArg::Named(name, v) => HirHintArg::Named(name.clone(), lower_hint_value(v)),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn lower_hint_value(v: &AttrValue) -> HirHintValue {
+    match v {
+        AttrValue::Ident(s) => HirHintValue::Ident(s.clone()),
+        AttrValue::String(s) => HirHintValue::String(s.clone()),
+        AttrValue::Int(n) => HirHintValue::Int(*n),
+        AttrValue::UInt(n) => HirHintValue::UInt(*n),
+        AttrValue::Float(n) => HirHintValue::Float(*n),
+    }
+}
+
 impl AstLowering {
     /// Create a new lowering context from a completed semantic analyzer.
     pub fn new(sa: &shadml_semantic::SemanticAnalyzer) -> Self {
@@ -285,6 +313,7 @@ impl AstLowering {
                     group,
                     binding,
                     comments,
+                    attributes,
                     ..
                 } => {
                     let scheme = self.convert_syntax_type_scheme(ty);
@@ -295,6 +324,7 @@ impl AstLowering {
                         group: *group,
                         binding: *binding,
                         comments: comments.clone(),
+                        hints: lower_hint_attributes(attributes),
                     });
                 }
                 Decl::BitfieldDecl {
@@ -444,6 +474,7 @@ impl AstLowering {
                                 group,
                                 binding,
                                 comments: bcomments,
+                                attributes: battrs,
                                 ..
                             } = b
                             {
@@ -455,6 +486,7 @@ impl AstLowering {
                                     group: *group,
                                     binding: *binding,
                                     comments: bcomments.clone(),
+                                    hints: lower_hint_attributes(battrs),
                                 }
                             } else {
                                 panic!("Expected BindingDecl in render block bindings")
@@ -511,6 +543,7 @@ impl AstLowering {
                                 group,
                                 binding,
                                 comments: bcomments,
+                                attributes: battrs,
                                 ..
                             } => {
                                 let scheme = self.convert_syntax_type_scheme(bty);
@@ -521,6 +554,7 @@ impl AstLowering {
                                     group: *group,
                                     binding: *binding,
                                     comments: bcomments.clone(),
+                                    hints: lower_hint_attributes(battrs),
                                 });
                             }
                             Decl::EntryPoint {

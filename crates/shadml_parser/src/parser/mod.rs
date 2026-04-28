@@ -181,6 +181,7 @@ pub enum Decl {
         binding: u32,
         span: Span,
         comments: Vec<String>,
+        attributes: Vec<Attribute>,
     },
     BitfieldDecl {
         name: String,

@@ -71,6 +71,30 @@ pub struct HirBinding {
     pub binding: u32,
     /// Leading doc comments attached to this binding declaration.
     pub comments: Vec<String>,
+    /// Hint attributes (e.g. `@samplerState(...)`) attached to this binding.
+    pub hints: Vec<HirHintAttribute>,
+}
+
+/// A hint attribute on a binding declaration (e.g. `@samplerState(filter = "nearest")`).
+#[derive(Debug, Clone)]
+pub struct HirHintAttribute {
+    pub name: String,
+    pub args: Vec<HirHintArg>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HirHintArg {
+    Positional(HirHintValue),
+    Named(String, HirHintValue),
+}
+
+#[derive(Debug, Clone)]
+pub enum HirHintValue {
+    Ident(String),
+    String(String),
+    Int(i64),
+    UInt(u64),
+    Float(f64),
 }
 
 /// A render block: `render name { bindings; entry_points }`

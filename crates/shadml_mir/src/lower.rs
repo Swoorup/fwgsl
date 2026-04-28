@@ -2403,6 +2403,25 @@ fn lower_hir_binding<'a>(res: &HirBinding, ctx: &LowerCtx<'a>) -> Option<MirGlob
         shadml_hir::BindingAddressSpace::Immediate => AddressSpace::Immediate,
         shadml_hir::BindingAddressSpace::Opaque => AddressSpace::Opaque,
     };
+    let hints = res
+        .hints
+        .iter()
+        .map(|h| MirHint {
+            name: ctx.arena.alloc_str(&h.name),
+            args: h
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    shadml_hir::HirHintArg::Positional(v) => {
+                        MirHintArg::Positional(lower_hint_value(v, ctx))
+                    }
+                    shadml_hir::HirHintArg::Named(name, v) => {
+                        MirHintArg::Named(ctx.arena.alloc_str(name), lower_hint_value(v, ctx))
+                    }
+                })
+                .collect(),
+        })
+        .collect();
     Some(MirGlobal {
         name: ctx.arena.alloc_str(&res.name),
         address_space,
@@ -2415,7 +2434,18 @@ fn lower_hir_binding<'a>(res: &HirBinding, ctx: &LowerCtx<'a>) -> Option<MirGlob
             .iter()
             .map(|c| ctx.arena.alloc_str(c) as &str)
             .collect(),
+        hints,
     })
+}
+
+fn lower_hint_value<'a>(v: &shadml_hir::HirHintValue, ctx: &LowerCtx<'a>) -> MirHintValue<'a> {
+    match v {
+        shadml_hir::HirHintValue::Ident(s) => MirHintValue::Ident(ctx.arena.alloc_str(s)),
+        shadml_hir::HirHintValue::String(s) => MirHintValue::String(ctx.arena.alloc_str(s)),
+        shadml_hir::HirHintValue::Int(n) => MirHintValue::Int(*n),
+        shadml_hir::HirHintValue::UInt(n) => MirHintValue::UInt(*n),
+        shadml_hir::HirHintValue::Float(n) => MirHintValue::Float(*n),
+    }
 }
 
 // ---------------------------------------------------------------------------
