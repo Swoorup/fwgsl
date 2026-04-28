@@ -1884,6 +1884,31 @@ Supported fields:
 - `@samplerState` is stripped during WGSL lowering and does not appear in the generated shader.
 - The bindgen layer emits a `create_{name}_sampler(device)` helper function for each sampler binding that carries `@samplerState` hints.
 
+#### Texture Sample Type Hints
+
+Texture bindings may carry a `@textureSampleType` hint attribute that controls the `sample_type` field of the generated `wgpu::BindingType::Texture` entry:
+
+```
+@group(0) @binding(0)
+@textureSampleType(filterable = false)
+myTex : Texture2d F32
+```
+
+Supported fields:
+
+| Field | Values | Default | Applicable to |
+|-------|--------|---------|---------------|
+| `filterable` | `true`, `false` | `true` | `Texture2d F32`, `Texture2dArray F32` only |
+
+- The `sample_type` is automatically derived from the texture's element type:
+  - `Texture2d F32` → `Float { filterable: true }` (default)
+  - `Texture2d F32` + `@textureSampleType(filterable = false)` → `Float { filterable: false }`
+  - `Texture2d I32` → `Sint`
+  - `Texture2d U32` → `Uint`
+- `Texture2dMultisampled` is always `Float { filterable: false }` regardless of hints.
+- The `filterable` field is only valid when the texture's element type is `F32`; using it on `I32` or `U32` textures produces a compile error.
+- `@textureSampleType` is stripped during WGSL lowering and does not appear in the generated shader.
+
 ### 13.7 Resource Operations
 
 | shadml | WGSL | Description |

@@ -403,3 +403,86 @@ main () = ()
         wgsl
     );
 }
+
+// ---------------------------------------------------------------------------
+// Texture sample type hint attribute tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_full_pipeline_texture_sample_type_stripped_from_wgsl() {
+    let source = r#"@group(0) @binding(0) @textureSampleType(filterable = false) myTex : Texture2d F32
+
+@compute @workgroup_size(1, 1, 1)
+main : () -> ()
+main () = ()
+"#;
+    let wgsl = compile_to_wgsl(source).expect("compilation should succeed");
+    assert!(
+        !wgsl.contains("textureSampleType"),
+        "WGSL should not contain @textureSampleType, got: {}",
+        wgsl
+    );
+}
+
+#[test]
+fn test_full_pipeline_texture_sample_type_on_sampler_produces_error() {
+    let source = r#"@group(0) @binding(0) @textureSampleType(filterable = false) mySampler : Sampler
+
+@compute @workgroup_size(1, 1, 1)
+main : () -> ()
+main () = ()
+"#;
+    let result = compile_to_wgsl(source);
+    assert!(
+        result.is_err(),
+        "compilation should fail for @textureSampleType on sampler"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("@textureSampleType") && err.contains("texture bindings"),
+        "Error should mention @textureSampleType and texture bindings, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_full_pipeline_texture_sample_type_filterable_on_i32_produces_error() {
+    let source = r#"@group(0) @binding(0) @textureSampleType(filterable = false) myTex : Texture2d I32
+
+@compute @workgroup_size(1, 1, 1)
+main : () -> ()
+main () = ()
+"#;
+    let result = compile_to_wgsl(source);
+    assert!(
+        result.is_err(),
+        "compilation should fail for filterable on I32 texture"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("filterable") && err.contains("F32"),
+        "Error should mention filterable and F32, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_full_pipeline_texture_sample_type_unknown_field_produces_error() {
+    let source = r#"@group(0) @binding(0) @textureSampleType(unknown = "value") myTex : Texture2d F32
+
+@compute @workgroup_size(1, 1, 1)
+main : () -> ()
+main () = ()
+"#;
+    let result = compile_to_wgsl(source);
+    assert!(
+        result.is_err(),
+        "compilation should fail for unknown @textureSampleType field"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("unknown '@textureSampleType' field"),
+        "Error should mention unknown field, got: {}",
+        err
+    );
+}

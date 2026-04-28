@@ -983,6 +983,11 @@ impl SemanticAnalyzer {
         attributes: &[Attribute],
         _span: Span,
     ) {
+        self.validate_sampler_state_hints(name, ty, attributes);
+        self.validate_texture_sample_type_hints(name, ty, attributes);
+    }
+
+    fn validate_sampler_state_hints(&mut self, name: &str, ty: &Type, attributes: &[Attribute]) {
         let sampler_state_attrs: Vec<&Attribute> = attributes
             .iter()
             .filter(|a| a.name == "samplerState")
@@ -1071,6 +1076,87 @@ impl SemanticAnalyzer {
             }
         }
     }
+
+    fn validate_texture_sample_type_hints(
+        &mut self,
+        name: &str,
+        ty: &Type,
+        attributes: &[Attribute],
+    ) {
+        let texture_sample_type_attrs: Vec<&Attribute> = attributes
+            .iter()
+            .filter(|a| a.name == "textureSampleType")
+            .collect();
+
+        if texture_sample_type_attrs.is_empty() {
+            return;
+        }
+
+        let is_texture = is_texture_type(ty);
+        let is_binding_array_texture = is_binding_array_of_texture_type(ty);
+
+        if !is_texture && !is_binding_array_texture {
+            for attr in &texture_sample_type_attrs {
+                self.engine.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "'@textureSampleType' can only be used on texture bindings, but '{}' has type '{}'",
+                        name,
+                        type_to_string(ty)
+                    ))
+                    .with_label(Label::primary(attr.span, "invalid hint attribute")),
+                );
+            }
+            return;
+        }
+
+        let is_float_texture = is_float_texture_type(ty);
+
+        for attr in &texture_sample_type_attrs {
+            for arg in &attr.args {
+                let (field_name, value) = match arg {
+                    AttrArg::Positional(_v) => {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(
+                                "'@textureSampleType' arguments must be named (e.g. filterable = false)"
+                            )
+                            .with_label(Label::primary(attr.span, "expected named argument")),
+                        );
+                        continue;
+                    }
+                    AttrArg::Named(name, v) => (name.as_str(), v),
+                };
+
+                match field_name {
+                    "filterable" => {
+                        if !is_float_texture {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(
+                                    "'@textureSampleType' field 'filterable' can only be used on textures with element type 'F32'"
+                                )
+                                .with_label(Label::primary(attr.span, "invalid field for type")),
+                            );
+                        } else if !is_bool_value(value) {
+                            self.engine.diagnostics.push(
+                                Diagnostic::error(
+                                    "'@textureSampleType' field 'filterable' must be true or false",
+                                )
+                                .with_label(Label::primary(attr.span, "expected boolean value")),
+                            );
+                        }
+                    }
+                    _ => {
+                        self.engine.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "unknown '@textureSampleType' field '{}'",
+                                field_name
+                            ))
+                            .with_label(Label::primary(attr.span, "unknown field")),
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Default for SemanticAnalyzer {
@@ -1118,6 +1204,50 @@ fn is_address_mode_value(v: &AttrValue) -> bool {
         v,
         AttrValue::Ident(s) | AttrValue::String(s)
             if s == "repeat" || s == "clamp_to_edge" || s == "mirror_repeat"
+    )
+}
+
+fn is_texture_type(ty: &Type) -> bool {
+    match ty {
+        Type::Con(name, _) if name.starts_with("Texture2d") => true,
+        Type::App(a, _, _) => match &**a {
+            Type::Con(name, _) if name.starts_with("Texture2d") => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn is_binding_array_of_texture_type(ty: &Type) -> bool {
+    match ty {
+        Type::App(a, b, _) => match (&**a, &**b) {
+            (Type::Con(arr, _), Type::Con(elem, _)) => {
+                arr == "BindingArray" && elem.starts_with("Texture2d")
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn is_float_texture_type(ty: &Type) -> bool {
+    match ty {
+        Type::App(a, b, _) => match (&**a, &**b) {
+            (Type::Con(name, _), Type::Con(inner_name, _)) => {
+                name.starts_with("Texture2d") && inner_name == "F32"
+            }
+            _ => false,
+        },
+        Type::Con(name, _) => name.starts_with("Texture2d"),
+        _ => false,
+    }
+}
+
+fn is_bool_value(v: &AttrValue) -> bool {
+    matches!(
+        v,
+        AttrValue::Ident(s) | AttrValue::String(s)
+            if s == "true" || s == "false"
     )
 }
 
@@ -2663,6 +2793,117 @@ vsMain pos = pos
         assert!(
             has_error,
             "compare on Sampler should produce an error, got: {:?}",
+            sa.diagnostics().iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_texture_sample_type_on_non_texture_fails() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::BindingDecl {
+                name: "mySampler".into(),
+                ty: Type::Con("Sampler".into(), span()),
+                address_space: shadml_parser::parser::BindingAddressSpace::Opaque,
+                group: 0,
+                binding: 0,
+                span: span(),
+                comments: vec![],
+                attributes: vec![Attribute {
+                    name: "textureSampleType".into(),
+                    args: vec![AttrArg::Named(
+                        "filterable".into(),
+                        AttrValue::String("false".into()),
+                    )],
+                    span: span(),
+                }],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        let has_error = sa.diagnostics().iter().any(|d| {
+            d.severity == shadml_diagnostics::Severity::Error
+                && d.message.contains("@textureSampleType")
+                && d.message.contains("texture bindings")
+        });
+        assert!(
+            has_error,
+            "@textureSampleType on sampler should produce an error, got: {:?}",
+            sa.diagnostics().iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_texture_sample_type_filterable_on_i32_fails() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::BindingDecl {
+                name: "myTex".into(),
+                ty: Type::App(
+                    Box::new(Type::Con("Texture2d".into(), span())),
+                    Box::new(Type::Con("I32".into(), span())),
+                    span(),
+                ),
+                address_space: shadml_parser::parser::BindingAddressSpace::Opaque,
+                group: 0,
+                binding: 0,
+                span: span(),
+                comments: vec![],
+                attributes: vec![Attribute {
+                    name: "textureSampleType".into(),
+                    args: vec![AttrArg::Named(
+                        "filterable".into(),
+                        AttrValue::String("false".into()),
+                    )],
+                    span: span(),
+                }],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        let has_error = sa.diagnostics().iter().any(|d| {
+            d.severity == shadml_diagnostics::Severity::Error
+                && d.message.contains("filterable")
+                && d.message.contains("F32")
+        });
+        assert!(
+            has_error,
+            "filterable on I32 texture should produce an error, got: {:?}",
+            sa.diagnostics().iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_texture_sample_type_valid_on_f32_texture() {
+        let mut sa = SemanticAnalyzer::new();
+        let mut program = Program {
+            decls: vec![Decl::BindingDecl {
+                name: "myTex".into(),
+                ty: Type::App(
+                    Box::new(Type::Con("Texture2d".into(), span())),
+                    Box::new(Type::Con("F32".into(), span())),
+                    span(),
+                ),
+                address_space: shadml_parser::parser::BindingAddressSpace::Opaque,
+                group: 0,
+                binding: 0,
+                span: span(),
+                comments: vec![],
+                attributes: vec![Attribute {
+                    name: "textureSampleType".into(),
+                    args: vec![AttrArg::Named(
+                        "filterable".into(),
+                        AttrValue::String("false".into()),
+                    )],
+                    span: span(),
+                }],
+            }],
+        };
+        with_prelude(&mut program);
+        sa.analyze(&program);
+        assert!(
+            !sa.has_errors(),
+            "@textureSampleType on F32 texture should be valid, got: {:?}",
             sa.diagnostics().iter().collect::<Vec<_>>()
         );
     }
