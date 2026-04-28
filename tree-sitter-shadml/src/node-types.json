@@ -369,9 +369,13 @@
       }
     },
     "children": {
-      "multiple": false,
+      "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "attribute",
+          "named": true
+        },
         {
           "type": "expression",
           "named": true
@@ -770,6 +774,10 @@
         },
         {
           "type": "module_declaration",
+          "named": true
+        },
+        {
+          "type": "render_declaration",
           "named": true
         },
         {
@@ -2822,6 +2830,44 @@
     }
   },
   {
+    "type": "render_declaration",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "binding_declaration",
+          "named": true
+        },
+        {
+          "type": "function_declaration",
+          "named": true
+        },
+        {
+          "type": "immediate_declaration",
+          "named": true
+        },
+        {
+          "type": "type_signature",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "source_file",
     "named": true,
     "root": true,
@@ -2880,6 +2926,10 @@
         },
         {
           "type": "module_declaration",
+          "named": true
+        },
+        {
+          "type": "render_declaration",
           "named": true
         },
         {
@@ -3778,6 +3828,10 @@
   {
     "type": "operator_symbol",
     "named": true
+  },
+  {
+    "type": "render",
+    "named": false
   },
   {
     "type": "self_type",

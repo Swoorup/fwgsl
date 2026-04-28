@@ -17,8 +17,14 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 if command -v shadml &>/dev/null; then
   SHADML=(shadml)
 else
-  # Fall back to cargo run
-  SHADML=(cargo run -p shadml_cli --quiet --)
+  # Build once and reuse the binary for speed.
+  cargo build -p shadml_cli --quiet 2>/dev/null || true
+  bin="$REPO_ROOT/target/debug/shadml"
+  if [[ -x "$bin" ]]; then
+    SHADML=("$bin")
+  else
+    SHADML=(cargo run -p shadml_cli --quiet --)
+  fi
 fi
 
 # ---------------------------------------------------------------------------

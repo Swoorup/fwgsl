@@ -71,6 +71,7 @@ static bool is_decl_keyword(const char *ident, unsigned len) {
          (len == 6 && strncmp(ident, "module", 6) == 0) ||
          (len == 4 && strncmp(ident, "else", 4) == 0) ||
          (len == 9 && strncmp(ident, "immediate", 9) == 0) ||
+         (len == 6 && strncmp(ident, "render", 6) == 0) ||
          (len == 7 && strncmp(ident, "storage", 7) == 0);
 }
 
@@ -110,8 +111,24 @@ bool tree_sitter_shadml_external_scanner_scan(void *payload, TSLexer *lexer,
     lexer->mark_end(lexer);
 
     if (lexer->lookahead == '@') {
-      lexer->result_symbol = LAYOUT_SEMICOLON;
-      return true;
+      // Only emit LAYOUT_SEMICOLON for @group and @binding, which start
+      // binding declarations/entries. Other @foo (attributes like @vertex)
+      // should not trigger a semicolon so they can attach to the next
+      // declaration.
+      lexer->advance(lexer, false);
+      char word[16];
+      unsigned word_len = 0;
+      while (is_ident_continue(lexer->lookahead) && word_len < sizeof(word) - 1) {
+        word[word_len++] = (char)lexer->lookahead;
+        lexer->advance(lexer, false);
+      }
+      word[word_len] = '\0';
+      if ((word_len == 5 && strncmp(word, "group", 5) == 0) ||
+          (word_len == 7 && strncmp(word, "binding", 7) == 0)) {
+        lexer->result_symbol = LAYOUT_SEMICOLON;
+        return true;
+      }
+      return false;
     }
 
     if (lexer->lookahead == '(') {

@@ -28,6 +28,8 @@ module.exports = grammar({
     [$.type_constraint, $.type_constructor],
     [$.assoc_type_decl],
     [$.assoc_type_def],
+    [$.immediate_declaration],
+    [$.binding_declaration],
   ],
 
   rules: {
@@ -49,6 +51,7 @@ module.exports = grammar({
         $.cfg_declaration,
         $.type_signature,
         $.function_declaration,
+        $.render_declaration,
         $.builtin_type_declaration,
         $.builtin_impl_declaration,
       ),
@@ -130,15 +133,19 @@ module.exports = grammar({
     // Flat:    @group(N) @binding(N) uniform name : Type
     // Grouped: @group(N) \n @binding(N) uniform name : Type \n @binding(M) ...
     binding_declaration: ($) =>
-      prec.right(seq(
+      seq(
         "@", "group", "(", $.expression, ")",
-        sepBy1($._layout_semicolon, $.binding_entry),
-        optional(choice($._layout_semicolon, $._layout_end)),
-      )),
+        optional($._layout_semicolon),
+        $.binding_entry,
+        repeat(seq($._layout_semicolon, $.binding_entry)),
+        optional($._layout_semicolon),
+        optional($._layout_end),
+      ),
 
     binding_entry: ($) =>
       seq(
         "@", "binding", "(", $.expression, ")",
+        repeat($.attribute),
         field("space", optional(choice("uniform", seq("storage", optional(seq("(", $.identifier, ")")))))),
         field("name", $.identifier),
         ":",
@@ -326,6 +333,24 @@ module.exports = grammar({
         $.expression,
         optional($._layout_semicolon),
       )),
+
+    // -- Render declarations -------------------------------------------------
+
+    render_declaration: ($) =>
+      prec.right(seq(
+        "render",
+        field("name", $.identifier),
+        repeat($._render_member),
+        optional($._layout_end),
+      )),
+
+    _render_member: ($) =>
+      choice(
+        $.binding_declaration,
+        $.immediate_declaration,
+        $.type_signature,
+        $.function_declaration,
+      ),
 
     // -- Attributes ----------------------------------------------------------
 
