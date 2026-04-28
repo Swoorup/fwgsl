@@ -13,7 +13,7 @@ shadml_ast_lowering = { workspace = true }
 shadml_hir = { workspace = true }
 shadml_mir = { workspace = true }
 shadml_wgsl_codegen = { workspace = true }
-toml = "0.8"
-serde = { version = "1", features = ["derive"] }
+toml = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

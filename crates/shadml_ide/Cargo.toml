@@ -9,7 +9,7 @@ shadml_semantic = { workspace = true }
 shadml_span = { workspace = true }
 shadml_syntax = { workspace = true }
 shadml_typechecker = { workspace = true }
-lsp-types = "0.94"
+lsp-types = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
