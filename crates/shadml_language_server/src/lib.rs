@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use dashmap::DashMap;
 use shadml_ide::{
@@ -26,6 +27,10 @@ use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
 use shadml_typechecker::{format_scheme_surface, normalize_type_aliases, InferEngine, Scheme};
 
+// ============================================================================
+// Formatter config resolution
+// ============================================================================
+
 /// Check whether the URI points at the compiler prelude file.
 fn is_compiler_prelude_uri(uri: &Url) -> bool {
     let Ok(path) = uri.to_file_path() else {
@@ -34,33 +39,24 @@ fn is_compiler_prelude_uri(uri: &Url) -> bool {
     path.ends_with(Path::new("prelude").join("prelude.shadml"))
 }
 
-/// Prepend prelude declarations to a parsed program.
-fn with_prelude(program: &mut Program, is_compiler_prelude: bool) {
-    if is_compiler_prelude {
-        return;
+/// Walk up from `start_dir` looking for `shadml.toml` and parse the
+/// `[formatter]` section. Returns `None` if no config file is found.
+fn search_config_upwards(start_dir: &Path) -> Option<shadml_formatter::FormatConfig> {
+    let mut dir = Some(start_dir);
+    while let Some(d) = dir {
+        let candidate = d.join("shadml.toml");
+        if candidate.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&candidate) {
+                match shadml_formatter::load_formatter_config(&text) {
+                    Ok(Some(cfg)) => return Some(cfg),
+                    Ok(None) => return Some(shadml_formatter::FormatConfig::default()),
+                    Err(_) => return Some(shadml_formatter::FormatConfig::default()),
+                }
+            }
+        }
+        dir = d.parent();
     }
-    let prelude = shadml_parser::prelude_program();
-    let mut combined = prelude.decls.clone();
-    combined.append(&mut program.decls);
-    program.decls = combined;
-}
-
-/// Check if the program has import declarations (needs multi-file resolution).
-fn has_imports(program: &Program) -> bool {
-    has_imports_in(&program.decls)
-}
-
-fn has_imports_in(decls: &[shadml_parser::parser::Decl]) -> bool {
-    use shadml_parser::parser::Decl;
-    decls.iter().any(|d| match d {
-        Decl::ImportDecl { .. } => true,
-        Decl::CfgDecl {
-            then_decls,
-            else_decls,
-            ..
-        } => has_imports_in(then_decls) || has_imports_in(else_decls),
-        _ => false,
-    })
+    None
 }
 
 // ============================================================================
@@ -126,6 +122,8 @@ pub struct ShadmlBackend {
     module_files: DashMap<Url, Vec<(std::path::PathBuf, String)>>,
     /// Cached IDE state per document URI, to avoid rebuilding on every request.
     ide_states: DashMap<Url, (shadml_ide::IdeState, Vec<String>)>,
+    /// Workspace root directory (set during `initialize`).
+    workspace_root: OnceLock<std::path::PathBuf>,
 }
 
 impl ShadmlBackend {
@@ -136,7 +134,28 @@ impl ShadmlBackend {
             documents: DashMap::new(),
             module_files: DashMap::new(),
             ide_states: DashMap::new(),
+            workspace_root: OnceLock::new(),
         }
+    }
+
+    /// Resolve the formatter config by searching for `shadml.toml` starting
+    /// from the document's directory, then falling back to the workspace root.
+    fn resolve_formatter_config(&self, uri: &Url) -> shadml_formatter::FormatConfig {
+        // Search from the document's directory first.
+        if let Ok(file_path) = uri.to_file_path() {
+            if let Some(parent) = file_path.parent() {
+                if let Some(cfg) = search_config_upwards(parent) {
+                    return cfg;
+                }
+            }
+        }
+        // Fall back to workspace root.
+        if let Some(ref root_path) = self.workspace_root.get() {
+            if let Some(cfg) = search_config_upwards(root_path) {
+                return cfg;
+            }
+        }
+        shadml_formatter::FormatConfig::default()
     }
 
     /// Build and cache the IDE state for a document.
@@ -197,7 +216,7 @@ impl ShadmlBackend {
         }
 
         // Phase 2: Module resolution (if the file has imports)
-        let mut program = if has_imports(&root_program) {
+        let mut program = if shadml_parser::has_imports(&root_program) {
             if let Ok(file_path) = uri.to_file_path() {
                 let source_root = file_path
                     .parent()
@@ -248,7 +267,7 @@ impl ShadmlBackend {
         };
 
         // Prepend prelude
-        with_prelude(&mut program, is_compiler_prelude);
+        shadml_parser::with_prelude(&mut program, is_compiler_prelude);
 
         // Phase 3: Semantic analysis
         let mut analyzer = SemanticAnalyzer::new();
@@ -272,7 +291,11 @@ impl ShadmlBackend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for ShadmlBackend {
-    async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Capture workspace root for config lookup.
+        if let Some(root_uri) = params.root_uri.as_ref().and_then(|u| u.to_file_path().ok()) {
+            let _ = self.workspace_root.set(root_uri);
+        }
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -473,7 +496,8 @@ impl LanguageServer for ShadmlBackend {
             None => return Ok(None),
         };
 
-        let formatted = shadml_formatter::format_default(&text);
+        let config = self.resolve_formatter_config(uri);
+        let formatted = shadml_formatter::format(&text, &config);
 
         if formatted == text {
             return Ok(None);
@@ -516,7 +540,8 @@ impl LanguageServer for ShadmlBackend {
         let line_end = text[end..].find('\n').map_or(text.len(), |i| end + i);
 
         let slice = &text[line_start..line_end];
-        let formatted = shadml_formatter::format_default(slice);
+        let config = self.resolve_formatter_config(uri);
+        let formatted = shadml_formatter::format(slice, &config);
 
         if formatted.trim_end() == slice.trim_end() {
             return Ok(None);
@@ -574,7 +599,7 @@ pub fn build_completions(source: &str, pos: Position) -> Vec<CompletionItem> {
 
     let mut parser = Parser::new(source);
     let mut program = parser.parse_program();
-    with_prelude(&mut program, false);
+    shadml_parser::with_prelude(&mut program, false);
     let mut analyzer = SemanticAnalyzer::new();
     analyzer.analyze(&program);
     let mut document_seen = HashSet::new();
@@ -776,7 +801,7 @@ pub fn build_hover(source: &str, pos: Position) -> Option<Hover> {
 
             let mut parser = Parser::new(source);
             let mut program = parser.parse_program();
-            with_prelude(&mut program, false);
+            shadml_parser::with_prelude(&mut program, false);
             let mut analyzer = SemanticAnalyzer::new();
             analyzer.analyze(&program);
 
@@ -858,7 +883,7 @@ fn find_builtin_operator_definition(source: &str, pos: Position) -> Option<Locat
     let mut parser = Parser::new(source);
     let user_program = parser.parse_program();
     let mut full_program = user_program.clone();
-    with_prelude(&mut full_program, false);
+    shadml_parser::with_prelude(&mut full_program, false);
 
     let mut analyzer = SemanticAnalyzer::new();
     analyzer.analyze(&full_program);
@@ -1035,7 +1060,7 @@ fn build_document_symbols(source: &str) -> Vec<DocumentSymbol> {
 
     // Also run semantic analysis so we can show type info in details
     let mut full_program = program.clone();
-    with_prelude(&mut full_program, false);
+    shadml_parser::with_prelude(&mut full_program, false);
     let mut analyzer = SemanticAnalyzer::new();
     analyzer.analyze(&full_program);
 
@@ -2537,8 +2562,14 @@ mod tests {
         // Position on "getFrameSize" in `let aspect = getFrameSize.x / getFrameSize.y`
         let pos = {
             let offset = sdf_scene_src.find("getFrameSize").unwrap();
-            let line = sdf_scene_src[..offset].chars().filter(|&c| c == '\n').count() as u32;
-            let line_start = sdf_scene_src[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line = sdf_scene_src[..offset]
+                .chars()
+                .filter(|&c| c == '\n')
+                .count() as u32;
+            let line_start = sdf_scene_src[..offset]
+                .rfind('\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             let character = (offset - line_start) as u32;
             Position::new(line, character)
         };

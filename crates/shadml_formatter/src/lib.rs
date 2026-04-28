@@ -8,31 +8,34 @@ use shadml_parser::lex;
 use shadml_parser::lexer::{is_negative_literal_start, Token};
 use shadml_syntax::SyntaxKind;
 
-/// Formatting configuration.
-#[derive(Debug, Clone)]
-pub struct FormatConfig {
-    /// Number of spaces per indentation level.
-    pub indent_width: usize,
-    /// Maximum line width (soft limit — no auto-wrapping yet).
-    pub max_width: usize,
-}
+pub mod config;
 
-impl Default for FormatConfig {
-    fn default() -> Self {
-        FormatConfig {
-            indent_width: 2,
-            max_width: 100,
-        }
-    }
-}
+pub use config::{load_formatter_config, AttributeStyle, FormatConfig};
 
 /// Format a shadml source string with the given configuration.
+///
+/// Processing pipeline (in order):
+///   1. Token-stream pass       — normalise intra-line spacing, emit tokens
+///   2. Binding-group collapse  — fold flat `@group` lines into indented blocks
+///   3. Record-field alignment  — align `:` colons across consecutive fields
+///   4. If-then-else restructure — canonicalise multi-line `if` expressions
+///   5. Line breaking           — break over-long lines at safe syntactic points
+///
+/// Restructuring runs *before* line breaking so that the canonical `if`-form
+/// is established first; subsequent line-breaking then ensures each output
+/// line stays within `max_width`.  If the order were reversed, line-breaking
+/// decisions (e.g. breaking at `=`) would be partially undone by the
+/// restructuring pass, and the test suite would need adjusting.
 pub fn format(source: &str, config: &FormatConfig) -> String {
     let tokens = lex(source);
-    let mut engine = FormatEngine::new(source, &tokens, config);
+    let mut engine = FormatEngine::new(source, &tokens);
     engine.run();
     collapse_binding_group_blocks(&mut engine.output, config);
-    align_record_fields(&mut engine.output);
+    align_record_fields(&mut engine.output, config);
+    restructure_if_then_else(&mut engine.output, config);
+    if config.enforce_max_width {
+        break_long_lines(&mut engine.output, config);
+    }
     engine.output
 }
 
@@ -48,8 +51,6 @@ pub fn format_default(source: &str) -> String {
 struct FormatEngine<'a> {
     source: &'a str,
     tokens: &'a [Token],
-    #[allow(dead_code)]
-    config: &'a FormatConfig,
     pos: usize,
     output: String,
     /// Current column in the output (0-based).
@@ -62,14 +63,31 @@ struct FormatEngine<'a> {
     type_angle_depth: usize,
     /// The last mid-line whitespace that was skipped (for alignment preservation).
     last_skipped_ws: Option<&'a str>,
+    /// Kind of the last non-trivia token emitted (cached for O(1) lookup).
+    last_kind: Option<SyntaxKind>,
+    /// The end byte offset of the last non-trivia token (cached for adjacency check).
+    last_span_end: u32,
+    /// Whether we are in `@ident` attribute-name context.
+    at_attr: bool,
+    /// Whether the last non-trivia token puts us in a unary prefix context.
+    unary_context: bool,
+    /// Whether the current output line contains an `@`.
+    line_has_at: bool,
+    /// The index of the last non-trivia token in the input slice.
+    last_idx: usize,
+    /// Whether the current output line is indented (starts with whitespace).
+    line_indented: bool,
+    /// Whether the current output line already has at least one `=` token.
+    /// Subsequent `=` on the same line (e.g. in `where` / `let` clauses) are
+    /// treated as alignment targets even on non-indented lines.
+    line_has_equals: bool,
 }
 
 impl<'a> FormatEngine<'a> {
-    fn new(source: &'a str, tokens: &'a [Token], config: &'a FormatConfig) -> Self {
+    fn new(source: &'a str, tokens: &'a [Token]) -> Self {
         FormatEngine {
             source,
             tokens,
-            config,
             pos: 0,
             output: String::with_capacity(source.len()),
             col: 0,
@@ -77,6 +95,14 @@ impl<'a> FormatEngine<'a> {
             blank_lines: 0,
             type_angle_depth: 0,
             last_skipped_ws: None,
+            last_kind: None,
+            last_span_end: 0,
+            at_attr: false,
+            unary_context: true, // start-of-file = unary context
+            line_has_at: false,
+            last_idx: 0,
+            line_indented: false,
+            line_has_equals: false,
         }
     }
 
@@ -105,9 +131,17 @@ impl<'a> FormatEngine<'a> {
             if ch == '\n' {
                 self.col = 0;
                 self.at_line_start = true;
+                self.line_has_at = false;
+                self.line_indented = false;
             } else {
+                if self.at_line_start && (ch == ' ' || ch == '\t') {
+                    self.line_indented = true;
+                }
                 self.col += 1;
                 self.at_line_start = false;
+                if ch == '@' {
+                    self.line_has_at = true;
+                }
             }
         }
         self.output.push_str(s);
@@ -117,6 +151,9 @@ impl<'a> FormatEngine<'a> {
         self.output.push('\n');
         self.col = 0;
         self.at_line_start = true;
+        self.line_has_at = false;
+        self.line_indented = false;
+        self.line_has_equals = false;
     }
 
     fn emit_space(&mut self) {
@@ -228,16 +265,67 @@ impl<'a> FormatEngine<'a> {
 
                     // Track type-parameter angle brackets (after spacing decision)
                     if tok.kind == SyntaxKind::Less
-                        && self.last_emitted_kind() == Some(SyntaxKind::UpperIdent)
+                        && self.last_kind == Some(SyntaxKind::UpperIdent)
                     {
                         self.type_angle_depth += 1;
                     } else if tok.kind == SyntaxKind::Greater && self.type_angle_depth > 0 {
                         self.type_angle_depth -= 1;
                     }
 
+                    // Update cached state for the next spacing decision.
+                    self.last_kind = Some(tok.kind);
+                    self.last_span_end = tok.span.end;
+                    self.last_idx = self.pos;
+
+                    // Track attribute context: @ ident -> at_attr = true.
+                    // Reset at_attr when we reach a non-ident, non-upper-ident token.
+                    if tok.kind == SyntaxKind::At {
+                        self.at_attr = true;
+                    } else if tok.kind == SyntaxKind::Ident
+                        || tok.kind == SyntaxKind::UpperIdent
+                        || tok.kind == SyntaxKind::KwBuiltin
+                    {
+                        // keep at_attr state (it was set by preceding @ or already false)
+                    } else {
+                        self.at_attr = false;
+                    }
+
+                    // Track unary context for the next token.
+                    // Don't overwrite when the current token is itself a prefix operator
+                    // (so that e.g. `|| !b` keeps unary_context=true from `||`).
+                    if !matches!(
+                        tok.kind,
+                        SyntaxKind::Minus | SyntaxKind::Bang | SyntaxKind::Tilde
+                    ) {
+                        self.unary_context = matches!(
+                            tok.kind,
+                            SyntaxKind::LParen
+                                | SyntaxKind::LBracket
+                                | SyntaxKind::Equals
+                                | SyntaxKind::Comma
+                                | SyntaxKind::Arrow
+                                | SyntaxKind::Pipe
+                                | SyntaxKind::OrOr
+                                | SyntaxKind::AndAnd
+                                | SyntaxKind::KwLet
+                                | SyntaxKind::KwIn
+                                | SyntaxKind::KwThen
+                                | SyntaxKind::KwElse
+                                | SyntaxKind::KwIf
+                                | SyntaxKind::KwMatch
+                                | SyntaxKind::KwCase
+                                | SyntaxKind::KwOf
+                        );
+                    }
+
                     let text = self.text(tok);
                     self.advance();
                     self.emit_str(text);
+
+                    // Track `=` tokens for multi-equals alignment on the current line.
+                    if tok.kind == SyntaxKind::Equals {
+                        self.line_has_equals = true;
+                    }
                 }
             }
         }
@@ -257,7 +345,7 @@ impl<'a> FormatEngine<'a> {
     /// Emit appropriate spacing between the previous token and the next one.
     fn emit_inter_token_space(&mut self, next: &Token) {
         let kind = next.kind;
-        let prev = self.last_emitted_kind();
+        let prev = self.last_kind;
 
         // No space before certain punctuation
         if matches!(
@@ -294,7 +382,7 @@ impl<'a> FormatEngine<'a> {
                 prev,
                 Some(SyntaxKind::Ident | SyntaxKind::UpperIdent | SyntaxKind::KwBuiltin)
             )
-            && self.is_prev_attribute_name()
+            && self.at_attr
         {
             return;
         }
@@ -327,31 +415,26 @@ impl<'a> FormatEngine<'a> {
         if (prev == Some(SyntaxKind::Minus)
             || prev == Some(SyntaxKind::Bang)
             || prev == Some(SyntaxKind::Tilde))
-            && self.is_prev_unary_context()
+            && self.unary_context
         {
             return;
         }
 
         // Keep negative literals as single "words" when there's a space before `-` but no space after it.
         // e.g., `vec2 -0.5` instead of `vec2 - 0.5`.
-        if let Some(prev_idx) = self.last_non_trivia_token_index() {
-            if is_negative_literal_start(self.tokens, prev_idx) {
-                return;
-            }
+        if self.last_idx > 0 && is_negative_literal_start(self.tokens, self.last_idx) {
+            return;
         }
 
         // No space between two adjacent `>` tokens that form `>>` (shift right).
-        // The lexer emits two separate `Greater` tokens; we detect adjacency
-        // via source byte offsets.
         if kind == SyntaxKind::Greater
             && prev == Some(SyntaxKind::Greater)
-            && self.are_prev_and_current_adjacent(next)
+            && self.last_span_end == next.span.start
         {
             return;
         }
 
         // Type parameter angle brackets: no space around `<`, `>`, or after `,`
-        // when inside `Type<...>`.
         if kind == SyntaxKind::Less && prev == Some(SyntaxKind::UpperIdent) {
             return; // no space before `<` in `Vec<`
         }
@@ -368,14 +451,15 @@ impl<'a> FormatEngine<'a> {
         if let Some(ws) = self.last_skipped_ws {
             if ws.len() > 1 {
                 let is_alignment_target = match kind {
-                    // `=` alignment only preserved on indented lines (let/where bindings,
-                    // record construction fields) — not top-level function defs.
-                    SyntaxKind::Equals => self.line_is_indented(),
+                    // `=` alignment preserved on indented lines (let/where bindings,
+                    // record construction fields) OR when there's already a `=` on
+                    // the line (secondary `=` in `where` / `let` clauses).
+                    SyntaxKind::Equals => self.line_indented || self.line_has_equals,
                     // `:`, `->`, `@` alignment preserved everywhere (const, binding, match arms).
                     SyntaxKind::Colon | SyntaxKind::Arrow | SyntaxKind::At => true,
                     // Ident after `)` — preserve attribute-to-field-name padding in records
                     SyntaxKind::Ident | SyntaxKind::UpperIdent
-                        if prev == Some(SyntaxKind::RParen) && self.line_has_attribute() =>
+                        if prev == Some(SyntaxKind::RParen) && self.line_has_at =>
                     {
                         true
                     }
@@ -390,116 +474,6 @@ impl<'a> FormatEngine<'a> {
 
         // Single space for everything else
         self.ensure_single_space();
-    }
-
-    /// Check if the previous token is an attribute name (follows `@`).
-    fn is_prev_attribute_name(&self) -> bool {
-        if self.pos < 2 {
-            return false;
-        }
-        // Walk back from current pos to find the identifier, then check if `@` precedes it
-        for i in (0..self.pos).rev() {
-            let k = self.tokens[i].kind;
-            if k.is_trivia() {
-                continue;
-            }
-            if matches!(
-                k,
-                SyntaxKind::Ident | SyntaxKind::UpperIdent | SyntaxKind::KwBuiltin
-            ) {
-                // Now check if the token before this ident is `@`
-                for j in (0..i).rev() {
-                    let k2 = self.tokens[j].kind;
-                    if k2.is_trivia() {
-                        continue;
-                    }
-                    return k2 == SyntaxKind::At;
-                }
-                return false;
-            }
-            return false;
-        }
-        false
-    }
-
-    /// Check if the previous `-` or `!` is in a unary (prefix) context.
-    fn is_prev_unary_context(&self) -> bool {
-        if self.pos < 2 {
-            return true; // at the start, it must be unary
-        }
-        // Find the token before the `-` or `!`
-        let op_idx = self.pos - 1; // the `-` or `!` token
-        for i in (0..op_idx).rev() {
-            let k = self.tokens[i].kind;
-            if k.is_trivia() {
-                continue;
-            }
-            // Prefix context: after `(`, `[`, `=`, `,`, `->`, `||`, `&&`, keywords, operators
-            return matches!(
-                k,
-                SyntaxKind::LParen
-                    | SyntaxKind::LBracket
-                    | SyntaxKind::Equals
-                    | SyntaxKind::Comma
-                    | SyntaxKind::Arrow
-                    | SyntaxKind::Pipe
-                    | SyntaxKind::OrOr
-                    | SyntaxKind::AndAnd
-                    | SyntaxKind::KwLet
-                    | SyntaxKind::KwIn
-                    | SyntaxKind::KwThen
-                    | SyntaxKind::KwElse
-                    | SyntaxKind::KwIf
-                    | SyntaxKind::KwMatch
-                    | SyntaxKind::KwCase
-                    | SyntaxKind::KwOf
-            );
-        }
-        true
-    }
-
-    /// Check whether the previous non-trivia token and `next` are adjacent in source
-    /// (no whitespace between them). Used to detect `>>` as two glued `>` tokens.
-    fn are_prev_and_current_adjacent(&self, next: &Token) -> bool {
-        self.last_non_trivia_token_index()
-            .is_some_and(|idx| self.tokens[idx].span.end == next.span.start)
-    }
-
-    fn last_non_trivia_token_index(&self) -> Option<usize> {
-        if self.pos == 0 {
-            return None;
-        }
-        (0..self.pos)
-            .rev()
-            .find(|&i| !self.tokens[i].kind.is_trivia())
-    }
-
-    fn last_emitted_kind(&self) -> Option<SyntaxKind> {
-        self.last_non_trivia_token_index()
-            .map(|idx| self.tokens[idx].kind)
-    }
-
-    /// Check if the current output line contains `@` (attribute context).
-    fn line_has_attribute(&self) -> bool {
-        let line_start = self.output.rfind('\n').map_or(0, |i| i + 1);
-        self.output[line_start..].contains('@')
-    }
-
-    /// Check if the current output line is indented (starts with whitespace).
-    fn line_is_indented(&self) -> bool {
-        if let Some(nl) = self.output.rfind('\n') {
-            let line_start = nl + 1;
-            self.output[line_start..]
-                .bytes()
-                .next()
-                .is_some_and(|b| b == b' ' || b == b'\t')
-        } else {
-            // No newline yet — check from start
-            self.output
-                .bytes()
-                .next()
-                .is_some_and(|b| b == b' ' || b == b'\t')
-        }
     }
 
     fn ensure_single_space(&mut self) {
@@ -527,84 +501,241 @@ impl<'a> FormatEngine<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// Post-processing helpers
+// ---------------------------------------------------------------------------
+
+/// Apply a line-based transformation to the formatted output.  Wraps the
+/// common "split → process → join" pattern that every post-processing pass
+/// uses, removing boilerplate.
+fn with_lines(output: &mut String, f: impl FnOnce(Vec<&str>) -> Vec<String>) {
+    let lines: Vec<&str> = output.split('\n').collect();
+    *output = f(lines).join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Post-processing: align `:` in record field blocks
 // ---------------------------------------------------------------------------
 
-/// Align colons in consecutive record field lines that share the same indentation.
-///
-/// A "field line" matches the pattern: `<indent><name> : <type>...`
-/// Groups of consecutive field lines with identical indent get their `:`
-/// aligned to the longest name in the group.
-fn align_record_fields(output: &mut String) {
-    let lines: Vec<&str> = output.split('\n').collect();
-    let mut result = Vec::with_capacity(lines.len());
-    let mut i = 0;
+/// Parsed structure of a single record field line.
+struct FieldLineInfo {
+    /// Byte offset where leading whitespace ends.
+    indent: usize,
+    /// The raw text of all attributes (including trailing spaces).
+    attrs_text: String,
+    /// The raw field name.
+    name: String,
+    /// Everything from the colon to the end of the line.
+    suffix: String,
+}
 
-    while i < lines.len() {
-        // Try to start a group of field lines
-        if let Some((indent, _name_end)) = parse_field_line(lines[i]) {
-            let mut group_indices = vec![i];
-            i += 1;
-            // Collect consecutive field lines with the same indent
-            while i < lines.len() {
-                if let Some((ind2, _)) = parse_field_line(lines[i]) {
-                    if ind2 == indent {
-                        group_indices.push(i);
-                        i += 1;
-                        continue;
+/// Align attributes, field names, and colons in consecutive record field lines
+/// that share the same indentation.
+///
+/// When `config.record_attribute_style` is `Auto`, any field whose aligned
+/// version would exceed `max_width` is emitted in "Style B" (attributes on
+/// their own line, field name indented underneath).
+fn align_record_fields(output: &mut String, config: &FormatConfig) {
+    with_lines(output, |lines| {
+        let mut result: Vec<String> = Vec::with_capacity(lines.len());
+        let mut i = 0;
+
+        while i < lines.len() {
+            if let Some(info) = parse_field_line(lines[i]) {
+                let mut group: Vec<(usize, FieldLineInfo)> = vec![(i, info)];
+                i += 1;
+                while i < lines.len() {
+                    if let Some(info2) = parse_field_line(lines[i]) {
+                        if info2.indent == group[0].1.indent {
+                            group.push((i, info2));
+                            i += 1;
+                            continue;
+                        }
                     }
+                    break;
                 }
-                break;
-            }
-            if group_indices.len() > 1 {
-                // Find max name_end column in the group
-                let max_name_end = group_indices
-                    .iter()
-                    .map(|&idx| parse_field_line(lines[idx]).unwrap().1)
-                    .max()
-                    .unwrap();
-                // Rewrite each line with aligned colon
-                for &idx in &group_indices {
-                    let (_, name_end) = parse_field_line(lines[idx]).unwrap();
-                    let line = lines[idx];
-                    // Everything up to end of field name
-                    let before = &line[..name_end];
-                    // Find `: <rest>` after the name
-                    let after_name = &line[name_end..];
-                    let colon_rel = after_name.find(':').unwrap();
-                    let from_colon = &after_name[colon_rel..]; // ": <type>,..."
-                    let padding = max_name_end - name_end + 1; // +1 for the space before `:`
-                    let mut aligned = String::with_capacity(line.len() + padding);
-                    aligned.push_str(before);
-                    for _ in 0..padding {
-                        aligned.push(' ');
+
+                if group.len() > 1 {
+                    let infos: Vec<&FieldLineInfo> = group.iter().map(|(_, info)| info).collect();
+                    let has_attrs = infos.iter().any(|i| !i.attrs_text.trim().is_empty());
+                    let max_attr_len = infos
+                        .iter()
+                        .map(|i| i.attrs_text.trim_end().len())
+                        .max()
+                        .unwrap();
+                    let max_name_len = infos.iter().map(|i| i.name.len()).max().unwrap();
+
+                    for (idx, info) in &group {
+                        let line = lines[*idx];
+                        let use_own_line = should_field_use_own_line(
+                            info,
+                            max_attr_len,
+                            max_name_len,
+                            line,
+                            config,
+                        );
+
+                        // If the line was already manually aligned (multi-space gap
+                        // between name and colon), preserve the original.
+                        if !use_own_line && is_manually_aligned_field(line, info) {
+                            result.push(line.to_string());
+                            continue;
+                        }
+
+                        if use_own_line {
+                            // Style B: attributes on their own line, then indented field name
+                            let indent_str = &line[..info.indent];
+                            let inner_indent =
+                                format!("{}{}", indent_str, " ".repeat(config.indent_width));
+                            if !info.attrs_text.trim().is_empty() {
+                                for attr in info
+                                    .attrs_text
+                                    .trim_end()
+                                    .split('@')
+                                    .filter(|s| !s.trim().is_empty())
+                                {
+                                    result.push(format!("{}@{}", indent_str, attr.trim()));
+                                }
+                            }
+                            let name_padding = max_name_len - info.name.len();
+                            let padded_name = format!("{}{}", info.name, " ".repeat(name_padding));
+                            result
+                                .push(format!("{}{} : {}", inner_indent, padded_name, info.suffix));
+                        } else {
+                            // Style A: inline with aligned columns
+                            let attr_text = info.attrs_text.trim_end();
+                            let attr_padding = if has_attrs {
+                                max_attr_len - attr_text.len() + 1
+                            } else {
+                                0
+                            };
+                            let name_padding = max_name_len - info.name.len() + 1;
+
+                            let mut aligned =
+                                String::with_capacity(line.len() + max_attr_len + max_name_len + 4);
+                            aligned.push_str(&line[..info.indent]);
+                            aligned.push_str(attr_text);
+                            aligned.push_str(" ".repeat(attr_padding).as_str());
+                            aligned.push_str(&info.name);
+                            aligned.push_str(" ".repeat(name_padding).as_str());
+                            aligned.push_str(": ");
+                            aligned.push_str(&info.suffix);
+                            result.push(aligned);
+                        }
                     }
-                    aligned.push_str(from_colon);
-                    result.push(aligned);
+                } else {
+                    for (idx, _) in &group {
+                        result.push(lines[*idx].to_string());
+                    }
                 }
             } else {
-                // Single field line — no alignment needed
-                for &idx in &group_indices {
-                    result.push(lines[idx].to_string());
-                }
+                result.push(lines[i].to_string());
+                i += 1;
             }
-        } else {
-            result.push(lines[i].to_string());
-            i += 1;
+        }
+
+        result
+    });
+}
+
+/// Decide whether a field should use Style B (attributes on own line).
+fn should_field_use_own_line(
+    info: &FieldLineInfo,
+    max_attr_len: usize,
+    max_name_len: usize,
+    _original_line: &str,
+    config: &FormatConfig,
+) -> bool {
+    let attr_part = if info.attrs_text.trim().is_empty() {
+        max_attr_len + 1
+    } else {
+        info.attrs_text.trim_end().len() + (max_attr_len - info.attrs_text.trim_end().len() + 1)
+    };
+    let name_part = info.name.len() + (max_name_len - info.name.len() + 1);
+    let aligned_len = info.indent + attr_part + name_part + 3 + info.suffix.len();
+    should_fallback_to_own_line(
+        &info.attrs_text,
+        aligned_len,
+        config.record_attribute_style,
+        config.attribute_threshold,
+        config.enforce_max_width,
+        config.max_width,
+    )
+}
+
+/// Check whether any single attribute in `attrs_text` exceeds the threshold.
+fn has_long_attribute(attrs_text: &str, threshold: usize) -> bool {
+    attrs_text.split('@').filter(|s| !s.is_empty()).any(|attr| {
+        let len = attr.trim_end().len() + 1; // +1 for the leading '@'
+        len > threshold
+    })
+}
+
+/// Shared logic for deciding whether to fall back to Style B (own-line)
+/// in `Auto` mode.  Used by both field alignment and binding alignment.
+fn should_fallback_to_own_line(
+    attrs_text: &str,
+    aligned_len: usize,
+    style: AttributeStyle,
+    attribute_threshold: usize,
+    enforce_max_width: bool,
+    max_width: usize,
+) -> bool {
+    match style {
+        AttributeStyle::OwnLine => true,
+        AttributeStyle::Inline => false,
+        AttributeStyle::Auto => {
+            if has_long_attribute(attrs_text, attribute_threshold) {
+                return true;
+            }
+            if !enforce_max_width {
+                return false;
+            }
+            aligned_len > max_width
+        }
+    }
+}
+
+/// Check whether a field line already has manual multi-space alignment.
+///
+/// Returns `true` when there are two or more spaces between either:
+/// - the last attribute and the field name, or
+/// - the field name and the colon,
+/// indicating the author intentionally aligned the line.
+fn is_manually_aligned_field(line: &str, info: &FieldLineInfo) -> bool {
+    let name_start = match line[info.indent..].find(&info.name) {
+        Some(p) => info.indent + p,
+        None => return false,
+    };
+    let name_end = name_start + info.name.len();
+
+    // Check gap between attribute and name
+    let attr_to_name_gap =
+        name_start.saturating_sub(info.indent + info.attrs_text.trim_end().len());
+    if attr_to_name_gap > 1 {
+        return true;
+    }
+
+    // Check gap between name and colon
+    if let Some(colon_pos) = line[name_end..].find(':') {
+        let colon_abs = name_end + colon_pos;
+        let gap = line[name_end..colon_abs].len();
+        if gap > 1 {
+            return true;
         }
     }
 
-    *output = result.join("\n");
+    false
 }
 
 /// Parse a line as a record field declaration.
-/// Returns `(indent_len, name_end_col)` where `name_end_col` is the column
-/// (from line start) where the field name ends. The caller pads between
-/// `name_end_col` and `:` to align colons across a group.
-/// Matches: `<indent>[<@attr(...)> ]<ident> : ...`
-fn parse_field_line(line: &str) -> Option<(usize, usize)> {
+///
+/// Returns `Some(FieldLineInfo)` when the line matches:
+/// `<indent>[<@attr(...)> ]*<ident> : <rest>`
+///
+/// Lines whose parsed attributes contain `@binding(` are rejected so that
+/// render-block binding declarations are not mistaken for record fields.
+fn parse_field_line(line: &str) -> Option<FieldLineInfo> {
     let bytes = line.as_bytes();
-    // Measure leading whitespace (must have some indent for a record field)
     let indent = bytes
         .iter()
         .take_while(|&&b| b == b' ' || b == b'\t')
@@ -612,12 +743,13 @@ fn parse_field_line(line: &str) -> Option<(usize, usize)> {
     if indent == 0 || indent >= bytes.len() {
         return None;
     }
-    // Work with byte offset from line start
+
     let mut pos = indent;
-    // Skip optional attributes like @builtin(...) @location(0) @interpolate(flat)
+    let attr_start = pos;
+
+    // Parse optional attributes
     while bytes.get(pos) == Some(&b'@') {
         pos += 1;
-        // Skip ident
         let ident_start = pos;
         while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
             pos += 1;
@@ -625,21 +757,28 @@ fn parse_field_line(line: &str) -> Option<(usize, usize)> {
         if pos == ident_start {
             return None;
         }
-        // Optionally skip (...)
         if pos < bytes.len() && bytes[pos] == b'(' {
             let close = line[pos..].find(')')?;
             pos += close + 1;
         }
-        // Skip whitespace after attribute
         while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
             pos += 1;
         }
     }
+
+    let attr_end = pos;
+    let attrs_text = line[attr_start..attr_end].to_string();
+
+    // Reject binding declarations (e.g. `@group(0) @binding(0) uniform name : Type`)
+    if attrs_text.contains("@binding(") {
+        return None;
+    }
+
     // Must start with an identifier character
     if pos >= bytes.len() || !(bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_') {
         return None;
     }
-    // Measure name
+
     let name_start = pos;
     while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
         pos += 1;
@@ -647,28 +786,826 @@ fn parse_field_line(line: &str) -> Option<(usize, usize)> {
     if pos == name_start {
         return None;
     }
-    let name_end = pos;
+    let name = line[name_start..pos].to_string();
+
     // Must be followed by whitespace then `: `
     if pos >= bytes.len() || bytes[pos] != b' ' {
         return None;
     }
-    // Skip whitespace to find `:`
     while pos < bytes.len() && bytes[pos] == b' ' {
         pos += 1;
     }
     if pos >= bytes.len() || bytes[pos] != b':' {
         return None;
     }
-    // `:` must be followed by ` `
     if pos + 1 >= bytes.len() || bytes[pos + 1] != b' ' {
         return None;
     }
-    Some((indent, name_end))
+    pos += 2; // skip ": "
+
+    let suffix = line[pos..].to_string();
+
+    Some(FieldLineInfo {
+        indent,
+        attrs_text,
+        name,
+        suffix,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Post-processing: restructure if-then-else expressions
+// ---------------------------------------------------------------------------
+
+/// Byte lengths of the keywords we restructure (excluding trailing space).
+const IF_LEN: usize = 2;
+const THEN_LEN: usize = 4;
+const ELSE_LEN: usize = 4;
+
+/// Restructure multi-line `if … then … else …` expressions to put `then` and
+/// `else` on their own lines with consistent indentation.
+///
+/// Only applies to expressions that already span multiple physical lines or
+/// that exceed `max_width`.  Expressions that fit on a single line are left
+/// unchanged so that compact `if … then … else …` one-liners are preserved.
+fn restructure_if_then_else(output: &mut String, config: &FormatConfig) {
+    with_lines(output, |lines| {
+        let mut result: Vec<String> = Vec::with_capacity(lines.len() * 3);
+        let mut i = 0;
+
+        while i < lines.len() {
+            let line = lines[i];
+            let trimmed = line.trim_start();
+
+            // Never touch empty / comment lines.
+            if trimmed.is_empty() || trimmed.starts_with("--") {
+                result.push(line.to_string());
+                i += 1;
+                continue;
+            }
+
+            // Collect a logical expression group: one line that contains an `if`,
+            // possibly followed by continuation lines (lines indented *more* than
+            // the first line, ending at a blank / comment / keyword-started line).
+            let indent_len = leading_indent_len(line);
+
+            // Only consider multi-line candidates.  A single-line if-expression
+            // that fits within max_width is already fine.
+            let mut full = String::from(trimmed);
+            let mut consumed = 1;
+
+            if i + 1 < lines.len() {
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let next = lines[j];
+                    let next_trimmed = next.trim_start();
+                    // A blank or comment-only line between the expression and its
+                    // continuation signals a logical break; stop collecting.
+                    if next_trimmed.is_empty() || next_trimmed.starts_with("--") {
+                        break;
+                    }
+                    // A continuation line has more indent than the first line, but
+                    // not so much more that it's clearly a deeper nesting level.
+                    // We cap the indent delta to 3× indent_width so that top-level
+                    // lines don't accidentally swallow an entire indented block.
+                    let next_indent = leading_indent_len(next);
+                    let max_cont_indent = indent_len + config.indent_width * 3;
+                    if next_indent <= indent_len || next_indent > max_cont_indent {
+                        break;
+                    }
+                    // Lines containing `=` are standalone `where` / `let` bindings,
+                    // not expression continuations.  Stop collecting when we hit one.
+                    // We check for ` = ` (space-equals-space) or line starting with `= `,
+                    // which are assignment-like; we skip `<=`, `>=`, `==`, `!=`, `->`.
+                    if has_standalone_equals(next_trimmed) {
+                        break;
+                    }
+                    full.push(' ');
+                    full.push_str(next_trimmed);
+                    consumed += 1;
+                    j += 1;
+                }
+            }
+
+            if consumed == 1 {
+                // Single physical line — leave it alone.
+                result.push(line.to_string());
+                i += 1;
+                continue;
+            }
+
+            // If any of the continuation lines already start with `then` or
+            // `else`, the expression is already well-structured — do not
+            // restructure it.  We only restructure cases where `then` / `else`
+            // sit inline with other tokens (often the result of a clumsy manual
+            // line break).
+            let already_structured = (i + 1..i + consumed).any(|j| {
+                let start = lines[j].trim_start();
+                start.starts_with("then ")
+                    || start.starts_with("then\n")
+                    || start == "then"
+                    || start.starts_with("else ")
+                    || start.starts_with("else\n")
+                    || start == "else"
+            });
+            if already_structured {
+                // Re-emit the original lines unchanged.
+                for j in i..i + consumed {
+                    result.push(lines[j].to_string());
+                }
+                i += consumed;
+                continue;
+            }
+
+            // We have a multi-line candidate.  Try to restructure `if-then-else`.
+            let restructured = restructure_if_expr(&full, line, indent_len, config);
+            // If `restructure_if_expr` returned the unchanged first line, the
+            // expression either didn't contain if-then-else or it was compact
+            // enough.  In that case re-emit all the original lines.
+            if restructured == line {
+                for j in i..i + consumed {
+                    result.push(lines[j].to_string());
+                }
+            } else {
+                for rline in restructured.lines() {
+                    result.push(rline.to_string());
+                }
+            }
+            i += consumed;
+        }
+
+        result
+    });
+}
+
+/// Given a (possibly multi-line) expression text and the first line's
+/// information, attempt to restructure `if-then-else` into canonical form.
+///
+/// Returns the restructured string (which may be the same as the original
+/// line if no `if-then-else` pattern was found).
+fn restructure_if_expr(
+    expr: &str,
+    original_line: &str,
+    indent_len: usize,
+    config: &FormatConfig,
+) -> String {
+    // Find whole-word positions of `if`, `then`, `else` in the flattened
+    // expression.
+    let if_pos = find_keyword_pos(expr, "if", 0);
+    let then_pos = if_pos.and_then(|ip| find_keyword_pos(expr, "then", ip + IF_LEN));
+    let else_pos = then_pos.and_then(|tp| find_keyword_pos(expr, "else", tp + THEN_LEN));
+
+    let (if_p, then_p, else_p) = match (if_pos, then_pos, else_pos) {
+        (Some(a), Some(b), Some(c)) => (a, b, c),
+        _ => {
+            // Not a complete if-then-else — keep the original first line.
+            return original_line.to_string();
+        }
+    };
+
+    let base_indent = &original_line[..indent_len];
+    let then_else_indent = format!("{}{}", base_indent, " ".repeat(config.indent_width));
+
+    let prefix = expr[..if_p].trim_end().to_string();
+    let condition = expr[if_p + IF_LEN + 1..then_p].trim();
+    let then_body = expr[then_p + THEN_LEN + 1..else_p].trim();
+    let else_body = expr[else_p + ELSE_LEN + 1..].trim();
+
+    let mut out = String::new();
+
+    // Line 1: <prefix> if <condition>
+    if !prefix.is_empty() {
+        out.push_str(&format!("{}{} if {}", base_indent, prefix, condition));
+    } else {
+        out.push_str(&format!("{}if {}", base_indent, condition));
+    }
+
+    // Line 2: <then-indent> then <then_body>
+    out.push('\n');
+    out.push_str(&format!("{}then {}", then_else_indent, then_body));
+
+    // Line 3: <else-indent> else <else_body>
+    out.push('\n');
+    out.push_str(&format!("{}else {}", then_else_indent, else_body));
+
+    out
+}
+
+/// Find a whole-word keyword (`kw`) in `s` starting from position `start`.
+/// The keyword must be surrounded by non-identifier characters (or string
+/// boundaries).  Skips string literals to avoid false matches inside `"…"`.
+fn find_keyword_pos(s: &str, kw: &str, start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let kw_bytes = kw.as_bytes();
+    let kw_len = kw_bytes.len();
+    let mut i = start;
+
+    while i + kw_len <= bytes.len() {
+        // Skip string literals
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+
+        if &bytes[i..i + kw_len] == kw_bytes {
+            // Word boundary before
+            let before = i == 0 || {
+                let b = bytes[i - 1];
+                !b.is_ascii_alphanumeric() && b != b'_' && b != b'\''
+            };
+            // Word boundary after
+            let after = i + kw_len >= bytes.len() || {
+                let b = bytes[i + kw_len];
+                b == b' ' || b == b'\n' || b == b'\t' || b == b'('
+            };
+            if before && after {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Post-processing: break long lines
+// ---------------------------------------------------------------------------
+
+/// Break lines that exceed `max_width` at safe syntactic boundaries.
+///
+/// This is a best-effort heuristic pass.  It operates on the already-
+/// formatted text and attempts to insert line breaks after:
+///
+/// 1. `-> ` in type signatures,
+/// 2. `= ` in bindings (when preceded by a name at line start),
+/// 3. Binary operators surrounded by spaces,
+/// 4. `, ` in parameter / argument lists.
+///
+/// Continuation lines are indented by one extra level.
+fn break_long_lines(output: &mut String, config: &FormatConfig) {
+    with_lines(output, |lines| {
+        let mut result: Vec<String> = Vec::with_capacity(lines.len() * 2);
+
+        for line in lines {
+            // Skip comment lines — breaking inside a comment would turn the
+            // continuation into code, which breaks compilation.
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("--")
+                || line.len() <= config.max_width
+                || parse_field_line(line).is_some()
+                || parse_binding_line(line).is_some()
+                || parse_child_binding_line(line).is_some()
+            {
+                result.push(line.to_string());
+                continue;
+            }
+
+            let mut remaining = line.to_string();
+            let base_indent_len = leading_indent_len(line);
+            let preferred_cont_indent = compute_continuation_indent(line, base_indent_len, config);
+
+            while remaining.len() > config.max_width {
+                let indent_len = leading_indent_len(&remaining);
+                let indent = &remaining[..indent_len];
+                // For the first break on the original line, align with the
+                // expression start; for nested breaks add one more level.
+                let continuation_indent = if remaining.as_str() == line {
+                    preferred_cont_indent.clone()
+                } else {
+                    format!("{}{}", indent, " ".repeat(config.indent_width))
+                };
+
+                if let Some(break_at) = find_break_point(&remaining, config.max_width, indent_len) {
+                    let before = remaining[..break_at].trim_end().to_string();
+                    let after = remaining[break_at..].trim_start().to_string();
+                    result.push(before);
+                    remaining = format!("{}{}", continuation_indent, after);
+                } else {
+                    // No safe break point found — keep the line as-is
+                    break;
+                }
+            }
+            result.push(remaining);
+        }
+
+        result
+    });
+}
+
+/// Return the byte length of the leading whitespace on `line`.
+fn leading_indent_len(line: &str) -> usize {
+    line.bytes()
+        .take_while(|&b| b == b' ' || b == b'\t')
+        .count()
+}
+
+/// Returns true when `s` contains a standalone `=` assignment (the line is a
+/// `where` / `let` binding, not an expression continuation).  Excludes
+/// comparison operators (`<=`, `>=`, `==`, `!=`) and arrows (`->`).
+///
+/// NOTE: This is a best-effort byte-level check; it does not handle `=` inside
+/// parenthesised or bracketed expressions (e.g. `{a = b}`).  In practice such
+/// lines are rare as standalone continuations, so false positives are unlikely.
+fn has_standalone_equals(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'=' {
+            let before = i > 0 && bytes[i - 1] == b' ';
+            let after = i + 1 < bytes.len() && bytes[i + 1] != b'=';
+            if before && after {
+                return true;
+            }
+            // `=` at start of line followed by space/end (e.g. `= x`)
+            if i == 0 && (i + 1 >= bytes.len() || bytes[i + 1] == b' ') {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Compute the indentation string for a continuation line.
+///
+/// When the original line is a binding (`name = expr`) or type signature
+/// (`name : Type`), the continuation is aligned with the expression that
+/// follows `= ` or `: `.  For all other lines the continuation is indented by
+/// one extra `indent_width` beyond the current leading whitespace.
+fn compute_continuation_indent(line: &str, indent_len: usize, config: &FormatConfig) -> String {
+    let bytes = line.as_bytes();
+    let mut i = indent_len;
+    while i + 2 <= bytes.len() {
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if &bytes[i..i + 2] == b"= " {
+            // Not part of ==, <=, >=
+            if bytes.get(i + 2) != Some(&b'=')
+                && bytes.get(i.wrapping_sub(1)) != Some(&b'<')
+                && bytes.get(i.wrapping_sub(1)) != Some(&b'>')
+            {
+                return " ".repeat(i + 2);
+            }
+        }
+        if &bytes[i..i + 2] == b": " {
+            return " ".repeat(i + 2);
+        }
+        i += 1;
+    }
+
+    let indent = &line[..indent_len];
+    format!("{}{}", indent, " ".repeat(config.indent_width))
+}
+
+/// Find the best break point in `line` before `max_width`.
+///
+/// `indent_len` is the length of the leading indentation; break points
+/// before the first non-whitespace character are ignored.
+fn find_break_point(line: &str, max_width: usize, indent_len: usize) -> Option<usize> {
+    // We search for break points in the range [indent_len, max_width].
+    // The break point is the byte offset *after* the break character(s).
+    let search_end = max_width.min(line.len());
+
+    // Priority 1: break after `-> ` in type signatures (outside parens).
+    if let Some(pos) = find_rightmost_arrow(line, indent_len, search_end) {
+        return Some(pos + 3);
+    }
+
+    // Priority 2: break after `= ` in bindings (must be preceded by a name).
+    if let Some(pos) = find_binding_eq_break(line, indent_len, search_end) {
+        return Some(pos + 2);
+    }
+
+    // Priority 3: break after binary operators surrounded by spaces.
+    if let Some(pos) = find_rightmost_binary_op(line, indent_len, search_end) {
+        return Some(pos + 1);
+    }
+
+    // Priority 4: break after `, ` in lists.
+    if let Some(pos) = find_rightmost_comma(line, indent_len, search_end) {
+        return Some(pos + 2);
+    }
+
+    // Priority 5: break at space-separated application boundaries (depth 0 only).
+    if let Some(pos) = find_rightmost_application_break(line, indent_len, search_end) {
+        return Some(pos);
+    }
+
+    None
+}
+
+/// Find the rightmost `, ` in `line` within `[start, end]`, skipping string
+/// literals.  Returns the start byte offset of the match.
+fn find_rightmost_comma(line: &str, start: usize, end: usize) -> Option<usize> {
+    let mut last = None;
+    let bytes = line.as_bytes();
+    let mut i = start;
+    while i + 2 <= end {
+        if bytes[i] == b'"' {
+            // Skip string literal
+            i += 1;
+            while i < end && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if &bytes[i..i + 2] == b", " {
+            last = Some(i);
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    last
+}
+
+/// Find a break point after `= ` that looks like a binding (preceded by a
+/// name at the start of the line or after indentation).
+fn find_binding_eq_break(line: &str, indent_len: usize, end: usize) -> Option<usize> {
+    let mut last = None;
+    let bytes = line.as_bytes();
+    let mut i = indent_len;
+    while i + 2 <= end {
+        if bytes[i] == b'"' {
+            // Skip string literal
+            i += 1;
+            while i < end && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if &bytes[i..i + 2] == b"= " {
+            // Heuristic: the `=` must be preceded by an identifier character
+            // and not be part of `==` or `>=` or `<=`.
+            if i > indent_len
+                && (bytes[i - 1].is_ascii_alphanumeric()
+                    || bytes[i - 1] == b'_'
+                    || bytes[i - 1] == b')'
+                    || bytes[i - 1] == b']')
+            {
+                if bytes.get(i + 2).map_or(true, |&b| b != b'=') {
+                    last = Some(i);
+                }
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    last
+}
+
+/// Find the rightmost binary operator surrounded by spaces, preferring
+/// operators at shallower nesting depth.
+fn find_rightmost_binary_op(line: &str, start: usize, end: usize) -> Option<usize> {
+    // List of binary operators we consider safe to break after.
+    // Multi-character operators like `&&`, `||`, `<<`, `>>` are handled
+    // by their first character, but we ensure they're surrounded by spaces.
+    const OPS: &[char] = &['+', '-', '*', '/', '&', '|', '<', '>'];
+
+    // Track the best (rightmost) operator at each nesting depth.
+    // We return the rightmost at the shallowest depth.
+    let mut by_depth: Vec<Option<usize>> = Vec::new();
+    let mut paren_depth: usize = 0;
+    let bytes = line.as_bytes();
+    let mut i = start;
+    while i < end {
+        let b = bytes[i];
+        match b {
+            b'(' => {
+                paren_depth += 1;
+                i += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                i += 1;
+            }
+            b'"' => {
+                // Skip string literal
+                i += 1;
+                while i < end && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => {
+                let ch = b as char;
+                if OPS.contains(&ch)
+                    && bytes.get(i.wrapping_sub(1)).map_or(false, |&b| b == b' ')
+                    && bytes.get(i + 1).map_or(false, |&b| b == b' ')
+                {
+                    // Reject `-` that looks like unary (preceded by `(` or `,` or `=`)
+                    if ch == '-' {
+                        if let Some(&prev) = bytes.get(i.wrapping_sub(2)) {
+                            if matches!(prev, b'(' | b',' | b'=' | b'[' | b'-' | b'+') {
+                                i += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    // Reject `>` that is part of `->`
+                    if ch == '>' && bytes.get(i.wrapping_sub(1)) == Some(&b'-') {
+                        i += 1;
+                        continue;
+                    }
+                    // Reject `<` that is part of type params `Vec<`
+                    if ch == '<' {
+                        i += 1;
+                        continue;
+                    }
+                    if by_depth.len() <= paren_depth {
+                        by_depth.resize(paren_depth + 1, None);
+                    }
+                    by_depth[paren_depth] = Some(i);
+                }
+                i += 1;
+            }
+        }
+    }
+    by_depth.iter().find_map(|&opt| opt)
+}
+
+/// Find the rightmost `-> ` outside of parenthesized groups and strings.
+///
+/// Tracks nesting depth and prefers breaks at the shallowest depth.  This
+/// prevents breaking inside `(A -> B) -> C` at the inner arrow.
+fn find_rightmost_arrow(line: &str, start: usize, end: usize) -> Option<usize> {
+    let mut by_depth: Vec<Option<usize>> = Vec::new();
+    let mut paren_depth: usize = 0;
+    let bytes = line.as_bytes();
+    let mut i = start;
+    while i + 3 <= end {
+        let b = bytes[i];
+        match b {
+            b'(' => {
+                paren_depth += 1;
+                i += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                i += 1;
+            }
+            b'"' => {
+                // Skip string literal
+                i += 1;
+                while i < end && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => {
+                if &bytes[i..(i + 3).min(end)] == b"-> " {
+                    if by_depth.len() <= paren_depth {
+                        by_depth.resize(paren_depth + 1, None);
+                    }
+                    by_depth[paren_depth] = Some(i);
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    by_depth.iter().find_map(|&opt| opt)
+}
+
+/// Find a break point after a space between two word-like tokens (ident or
+/// numeric).  This handles long function application chains that have no
+/// infix operators, arrows, or commas.
+fn find_rightmost_application_break(line: &str, start: usize, end: usize) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut paren_depth: usize = 0;
+    let bytes = line.as_bytes();
+    let mut i = start;
+    while i < end {
+        let b = bytes[i];
+        match b {
+            b'(' => {
+                paren_depth += 1;
+                i += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                i += 1;
+            }
+            b'"' => {
+                i += 1;
+                while i < end && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b' ' => {
+                let prev_word = i > start && bytes[i - 1].is_ascii_alphanumeric();
+                let next_word = i + 1 < end && bytes[i + 1].is_ascii_alphanumeric();
+                if paren_depth == 0 && prev_word && next_word {
+                    best = Some(i + 1);
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    best
 }
 
 // ---------------------------------------------------------------------------
 // Post-processing: collapse flat bindings into group blocks
 // ---------------------------------------------------------------------------
+
+/// Parsed structure of a single binding line (after the `@group` header).
+struct BindingLineInfo<'a> {
+    /// The raw text of the line including leading indent.
+    raw_line: &'a str,
+    /// Byte offset where leading whitespace ends.
+    indent: usize,
+    /// `@binding(N)` text.
+    binding: &'a str,
+    /// Attribute text including trailing space, or empty.
+    attrs: &'a str,
+    /// `uniform` or `storage(...)` text.
+    keyword: &'a str,
+    /// The binding name.
+    name: &'a str,
+    /// Everything from the colon to the end (`: Type`).
+    suffix: &'a str,
+}
+
+/// Parse the portion of a binding line that follows `@group(N)`.
+///
+/// Input: `@binding(N) [@attr(...)] uniform/storage name : Type`
+/// Returns `Some(BindingLineInfo)` on success.
+fn parse_binding_rest(raw_line: &str, indent: usize) -> Option<BindingLineInfo<'_>> {
+    let trimmed = raw_line[indent..].trim_start();
+    if !trimmed.starts_with("@binding(") {
+        return None;
+    }
+
+    let (binding, mut pos) = parse_binding_prefix(trimmed)?;
+    let attrs = parse_binding_attrs(trimmed, &mut pos);
+    let keyword = parse_keyword(trimmed, &mut pos)?;
+    let (name, suffix) = parse_name_and_suffix(trimmed, &mut pos)?;
+
+    Some(BindingLineInfo {
+        raw_line,
+        indent,
+        binding,
+        attrs,
+        keyword,
+        name,
+        suffix,
+    })
+}
+
+/// Parse `@binding(N)` from the start of `trimmed`.
+fn parse_binding_prefix(trimmed: &str) -> Option<(&str, usize)> {
+    let bclose = trimmed[9..].find(')')?;
+    let binding = &trimmed[..9 + bclose + 1];
+    Some((binding, binding.len()))
+}
+
+/// Parse optional `@attr(...)` entries after `@binding(N)`.
+fn parse_binding_attrs<'a>(trimmed: &'a str, pos: &mut usize) -> &'a str {
+    let attr_start = *pos;
+    while let Some(rest) = trimmed.get(*pos..) {
+        let rest_trimmed = rest.trim_start();
+        *pos += rest.len() - rest_trimmed.len();
+        if !rest_trimmed.starts_with('@') {
+            break;
+        }
+        let attr_len = skip_attr(rest_trimmed);
+        if attr_len == 0 {
+            break;
+        }
+        *pos += attr_len;
+    }
+    trimmed[attr_start..*pos].trim_end()
+}
+
+/// Return the byte length of one `@ident` or `@ident(args)` token, or 0.
+fn skip_attr(s: &str) -> usize {
+    let mut p = 1;
+    while p < s.len() && (s.as_bytes()[p].is_ascii_alphanumeric() || s.as_bytes()[p] == b'_') {
+        p += 1;
+    }
+    if p == 1 {
+        return 0;
+    }
+    if p < s.len() && s.as_bytes()[p] == b'(' {
+        let Some(close) = s[p..].find(')') else {
+            return 0;
+        };
+        p += close + 1;
+    }
+    p
+}
+
+/// Split an attribute string like `@foo @bar(args)` into individual tokens.
+fn split_attrs(s: &str) -> Vec<&str> {
+    let mut attrs = Vec::new();
+    let mut pos = 0;
+    while pos < s.len() {
+        let rest = &s[pos..];
+        let rest_trimmed = rest.trim_start();
+        pos += rest.len() - rest_trimmed.len();
+        if rest_trimmed.is_empty() {
+            break;
+        }
+        let len = skip_attr(rest_trimmed);
+        if len == 0 {
+            break;
+        }
+        attrs.push(&rest_trimmed[..len]);
+        pos += len;
+    }
+    attrs
+}
+
+/// Parse an optional keyword (`uniform` or `storage(...)`) from a binding.
+fn parse_keyword<'a>(trimmed: &'a str, pos: &mut usize) -> Option<&'a str> {
+    let after_attrs = trimmed.get(*pos..)?.trim_start();
+    *pos += trimmed.get(*pos..)?.len() - after_attrs.len();
+
+    let keyword = if after_attrs.starts_with("uniform") {
+        *pos += "uniform".len();
+        &trimmed[*pos - "uniform".len()..*pos]
+    } else if after_attrs.starts_with("storage(") {
+        let close = after_attrs.find(')')?;
+        *pos += close + 1;
+        &trimmed[*pos - (close + 1)..*pos]
+    } else if after_attrs.starts_with("storage") {
+        *pos += "storage".len();
+        &trimmed[*pos - "storage".len()..*pos]
+    } else {
+        ""
+    };
+
+    Some(keyword)
+}
+
+/// Parse the binding name and `: Type` suffix.
+fn parse_name_and_suffix<'a>(trimmed: &'a str, pos: &mut usize) -> Option<(&'a str, &'a str)> {
+    let after_kw = trimmed.get(*pos..)?.trim_start();
+    *pos += trimmed.get(*pos..)?.len() - after_kw.len();
+
+    let name_end = after_kw.find([' ', ':', '\t']).unwrap_or(after_kw.len());
+    let name = &trimmed[*pos..*pos + name_end];
+    *pos += name_end;
+
+    let after_name = trimmed.get(*pos..)?.trim_start();
+    *pos += trimmed.get(*pos..)?.len() - after_name.len();
+
+    if !after_name.starts_with(':') {
+        return None;
+    }
+    let suffix = &trimmed[*pos..];
+
+    Some((name, suffix))
+}
 
 /// Detect consecutive binding declaration lines that share the same `@group(N)` and
 /// collapse them into the group block sugar:
@@ -686,136 +1623,267 @@ fn parse_field_line(line: &str) -> Option<(usize, usize)> {
 /// Also re-aligns existing group blocks where `@group(N)` is already on its own
 /// line followed by indented `@binding(N) ...` children.
 fn collapse_binding_group_blocks(output: &mut String, config: &FormatConfig) {
-    let lines: Vec<&str> = output.split('\n').collect();
-    let mut result: Vec<String> = Vec::with_capacity(lines.len());
-    let mut i = 0;
+    with_lines(output, |lines| {
+        let mut result: Vec<String> = Vec::with_capacity(lines.len());
+        let mut i = 0;
 
-    while i < lines.len() {
-        // Case 1: flat binding lines — collapse consecutive same-group lines
-        if let Some((indent, group_val, binding_rest)) = parse_binding_line(lines[i]) {
-            let mut group = vec![(indent, group_val, binding_rest, i)];
-            let mut j = i + 1;
-            while j < lines.len() {
-                if let Some((ind2, gv2, br2)) = parse_binding_line(lines[j]) {
-                    if ind2 == indent && gv2 == group_val {
-                        group.push((ind2, gv2, br2, j));
-                        j += 1;
-                        continue;
+        while i < lines.len() {
+            // Case 1: flat binding lines — collapse consecutive same-group lines
+            if let Some((indent, group_val, binding_rest)) = parse_binding_line(lines[i]) {
+                let mut group = vec![(indent, group_val, binding_rest, i)];
+                let mut j = i + 1;
+                while j < lines.len() {
+                    if let Some((ind2, gv2, br2)) = parse_binding_line(lines[j]) {
+                        if ind2 == indent && gv2 == group_val {
+                            group.push((ind2, gv2, br2, j));
+                            j += 1;
+                            continue;
+                        }
                     }
+                    break;
                 }
-                break;
+
+                if group.len() > 1 {
+                    let indent_str = &lines[group[0].3][..indent];
+                    result.push(format!("{}@group({})", indent_str, group_val));
+                    let child_indent = format!("{}{}", indent_str, " ".repeat(config.indent_width));
+
+                    let mut infos: Vec<BindingLineInfo> = Vec::new();
+                    for &(_, _, rest, _) in &group {
+                        if let Some(info) = parse_binding_rest(rest, indent) {
+                            infos.push(info);
+                        }
+                    }
+
+                    emit_aligned_bindings(&infos, &child_indent, config, &mut result);
+                    i = j;
+                } else {
+                    result.push(lines[i].to_string());
+                    i += 1;
+                }
             }
+            // Case 2: existing group block header — `@group(N)` on its own line
+            else if let Some((header_indent, _group_val)) = parse_group_header_line(lines[i]) {
+                let expected_child_indent = header_indent + config.indent_width;
+                result.push(lines[i].to_string());
+                i += 1;
 
-            if group.len() > 1 {
-                let indent_str = &lines[group[0].3][..indent];
-                result.push(format!("{}@group({})", indent_str, group_val));
-                let child_indent = format!("{}{}", indent_str, " ".repeat(config.indent_width));
-
-                let mut binding_parts: Vec<(&str, &str, &str)> = Vec::new();
-                for &(_, _, rest, _) in &group {
-                    if let Some((before, name, after)) = split_binding_at_name(rest) {
-                        binding_parts.push((before, name, after));
-                    } else {
-                        binding_parts.push((rest, "", ""));
+                let mut children: Vec<BindingLineInfo> = Vec::new();
+                while i < lines.len() {
+                    if let Some(info) = parse_child_binding_line(lines[i]) {
+                        if info.indent >= expected_child_indent {
+                            children.push(info);
+                            i += 1;
+                            continue;
+                        }
                     }
+                    break;
                 }
 
-                emit_aligned_bindings(&binding_parts, &child_indent, &mut result);
-                i = j;
+                if children.len() > 1 {
+                    let child_indent_str = format!(
+                        "{}{}",
+                        " ".repeat(header_indent),
+                        " ".repeat(config.indent_width)
+                    );
+                    emit_aligned_bindings(&children, &child_indent_str, config, &mut result);
+                } else {
+                    for child in &children {
+                        result.push(child.raw_line.to_string());
+                    }
+                }
             } else {
                 result.push(lines[i].to_string());
                 i += 1;
             }
         }
-        // Case 2: existing group block header — `@group(N)` on its own line
-        else if let Some((header_indent, _group_val)) = parse_group_header_line(lines[i]) {
-            let expected_child_indent = header_indent + config.indent_width;
-            result.push(lines[i].to_string());
-            i += 1;
 
-            // Collect indented @binding children
-            let mut children: Vec<(usize, &str)> = Vec::new(); // (line_index, binding_rest)
-            while i < lines.len() {
-                if let Some((child_indent, rest)) = parse_child_binding_line(lines[i]) {
-                    if child_indent >= expected_child_indent {
-                        children.push((i, rest));
-                        i += 1;
-                        continue;
-                    }
-                }
-                break;
-            }
+        result
+    });
+}
 
-            if children.len() > 1 {
-                let child_indent_str = format!(
-                    "{}{}",
-                    " ".repeat(header_indent),
-                    " ".repeat(config.indent_width)
-                );
+/// Emit aligned binding lines.
+///
+/// Aligns `@binding(N)`, attributes, keyword, name, and `: Type` across the
+/// group.  When a line would be too long or an attribute exceeds the
+/// threshold, the whole group falls back to Style B (each attribute and the
+/// name on separate indented lines) provided every line still fits inside
+/// `max_width`.  Otherwise it falls back to unaligned inline emission.
+fn emit_aligned_bindings(
+    infos: &[BindingLineInfo],
+    child_indent: &str,
+    config: &FormatConfig,
+    result: &mut Vec<String>,
+) {
+    if infos.is_empty() {
+        return;
+    }
 
-                let mut binding_parts: Vec<(&str, &str, &str)> = Vec::new();
-                for &(_, rest) in &children {
-                    if let Some((before, name, after)) = split_binding_at_name(rest) {
-                        binding_parts.push((before, name, after));
-                    } else {
-                        binding_parts.push((rest, "", ""));
-                    }
-                }
+    let has_attrs = infos.iter().any(|i| !i.attrs.trim().is_empty());
+    let max_binding = infos.iter().map(|i| i.binding.len()).max().unwrap();
+    let max_attrs = infos.iter().map(|i| i.attrs.trim().len()).max().unwrap();
+    let max_keyword = infos.iter().map(|i| i.keyword.len()).max().unwrap();
+    let max_name = infos.iter().map(|i| i.name.len()).max().unwrap();
 
-                emit_aligned_bindings(&binding_parts, &child_indent_str, &mut result);
+    // Check whether the aligned Style A layout would exceed max_width.
+    let style_a_fits = if config.enforce_max_width {
+        infos.iter().all(|info| {
+            let aligned_len = if has_attrs {
+                child_indent.len()
+                    + max_binding
+                    + 1
+                    + max_attrs
+                    + 1
+                    + max_keyword
+                    + 1
+                    + max_name
+                    + 1
+                    + info.suffix.len()
             } else {
-                // Single child — emit as-is
-                for &(idx, _) in &children {
-                    result.push(lines[idx].to_string());
+                let max_prefix_len = max_binding + 1 + max_keyword;
+                child_indent.len() + max_prefix_len + 1 + max_name + 1 + info.suffix.len()
+            };
+            aligned_len <= config.max_width
+        })
+    } else {
+        true
+    };
+
+    // Decide whether to use Style B for the whole group.
+    let use_style_b = match config.binding_attribute_style {
+        AttributeStyle::OwnLine => has_attrs,
+        AttributeStyle::Inline => false,
+        AttributeStyle::Auto => {
+            if !has_attrs {
+                false
+            } else if !style_a_fits {
+                true
+            } else {
+                infos
+                    .iter()
+                    .any(|info| has_long_attribute(info.attrs.trim(), config.attribute_threshold))
+            }
+        }
+    };
+
+    if use_style_b {
+        let style_b_viable = infos.iter().all(|info| {
+            let name_line_len = child_indent.len()
+                + config.indent_width
+                + (if info.keyword.is_empty() {
+                    0
+                } else {
+                    info.keyword.len() + 1
+                })
+                + info.name.len()
+                + 1
+                + info.suffix.len();
+            if name_line_len > config.max_width {
+                return false;
+            }
+            for attr in split_attrs(info.attrs.trim()) {
+                let attr_line_len = child_indent.len() + config.indent_width + attr.len();
+                if attr_line_len > config.max_width {
+                    return false;
                 }
             }
-        } else {
-            result.push(lines[i].to_string());
-            i += 1;
+            true
+        });
+
+        let force_style_b =
+            config.binding_attribute_style == AttributeStyle::OwnLine || !config.enforce_max_width;
+
+        if style_b_viable || force_style_b {
+            let attr_indent = format!("{}{}", child_indent, " ".repeat(config.indent_width));
+            for info in infos {
+                result.push(format!("{}{}", child_indent, info.binding));
+                for attr in split_attrs(info.attrs.trim()) {
+                    result.push(format!("{}{}", attr_indent, attr));
+                }
+                let mut line = String::new();
+                line.push_str(&attr_indent);
+                if !info.keyword.is_empty() {
+                    line.push_str(info.keyword);
+                    line.push(' ');
+                }
+                line.push_str(info.name);
+                line.push(' ');
+                line.push_str(info.suffix);
+                result.push(line);
+            }
+            return;
         }
     }
 
-    *output = result.join("\n");
-}
+    if !style_a_fits {
+        // Fall back to unaligned emission: each binding gets standard indentation
+        // with a single space between each token (no inter-binding column alignment).
+        for info in infos {
+            let attrs_trim = info.attrs.trim();
+            let mut line = String::new();
+            line.push_str(child_indent);
+            line.push_str(info.binding);
+            if !attrs_trim.is_empty() {
+                line.push(' ');
+                line.push_str(attrs_trim);
+            }
+            if !info.keyword.is_empty() {
+                line.push(' ');
+                line.push_str(info.keyword);
+            }
+            line.push(' ');
+            line.push_str(info.name);
+            line.push(' ');
+            line.push_str(info.suffix);
+            result.push(line);
+        }
+        return;
+    }
 
-/// Emit aligned binding lines given parsed `(prefix, name, suffix)` parts.
-/// The prefix is the canonical keyword portion (no trailing space); we add
-/// padding between prefix and name so that names align, then pad after names
-/// so that the `: Type` portion aligns. A single space is inserted before
-/// the suffix (which starts with `:`).
-fn emit_aligned_bindings(
-    binding_parts: &[(&str, &str, &str)],
-    child_indent: &str,
-    result: &mut Vec<String>,
-) {
-    let max_prefix = binding_parts
-        .iter()
-        .map(|(b, _, _)| b.len())
-        .max()
-        .unwrap_or(0);
-    let max_name = binding_parts
-        .iter()
-        .map(|(_, n, _)| n.len())
-        .max()
-        .unwrap_or(0);
+    for info in infos {
+        if has_attrs {
+            // Style A with attribute alignment
+            let attrs_trim = info.attrs.trim();
+            let binding_pad = max_binding - info.binding.len();
+            let attr_pad = max_attrs - attrs_trim.len();
+            let keyword_pad = max_keyword - info.keyword.len();
+            let name_pad = max_name - info.name.len();
 
-    for (before, name, after) in binding_parts {
-        if name.is_empty() {
-            result.push(format!("{}{}", child_indent, before));
+            let mut line = String::with_capacity(
+                child_indent.len()
+                    + info.binding.len()
+                    + attrs_trim.len()
+                    + info.keyword.len()
+                    + info.name.len()
+                    + info.suffix.len()
+                    + 8,
+            );
+            line.push_str(child_indent);
+            line.push_str(info.binding);
+            line.push_str(" ".repeat(binding_pad + 1).as_str());
+            line.push_str(attrs_trim);
+            line.push_str(" ".repeat(attr_pad + 1).as_str());
+            line.push_str(info.keyword);
+            line.push_str(" ".repeat(keyword_pad + 1).as_str());
+            line.push_str(info.name);
+            line.push_str(" ".repeat(name_pad + 1).as_str());
+            line.push_str(info.suffix);
+            result.push(line);
         } else {
-            // +1 ensures at least one space between the prefix and name
-            let prefix_pad = max_prefix - before.len() + 1;
-            // +1 ensures at least one space between name and `: Type`
-            let name_pad = max_name - name.len() + 1;
-            result.push(format!(
-                "{}{}{}{}{}{}",
-                child_indent,
-                before,
-                " ".repeat(prefix_pad),
-                name,
-                " ".repeat(name_pad),
-                after
-            ));
+            // No attributes in the group — use the simpler prefix/name alignment
+            // (preserves the exact output of the original formatter)
+            let prefix = format!("{} {}", info.binding, info.keyword);
+            let max_prefix_len = max_binding + 1 + max_keyword;
+            let prefix_pad = max_prefix_len - prefix.len() + 1;
+            let name_pad = max_name - info.name.len() + 1;
+            let mut line = String::new();
+            line.push_str(child_indent);
+            line.push_str(&prefix);
+            line.push_str(&" ".repeat(prefix_pad));
+            line.push_str(info.name);
+            line.push_str(&" ".repeat(name_pad));
+            line.push_str(info.suffix);
+            result.push(line);
         }
     }
 }
@@ -836,7 +1904,6 @@ fn parse_group_header_line(line: &str) -> Option<(usize, &str)> {
     let after_open = &trimmed[7..];
     let close = after_open.find(')')?;
     let group_val = &after_open[..close];
-    // Must be ONLY `@group(N)` — nothing else on the line
     let remainder = after_open[close + 1..].trim();
     if !remainder.is_empty() {
         return None;
@@ -844,9 +1911,9 @@ fn parse_group_header_line(line: &str) -> Option<(usize, &str)> {
     Some((indent, group_val))
 }
 
-/// Parse an indented child binding line: `<indent>@binding(N) uniform/storage ...`
-/// Returns `(indent_len, rest_from_at_binding)`.
-fn parse_child_binding_line(line: &str) -> Option<(usize, &str)> {
+/// Parse an indented child binding line.
+/// Returns `Some(BindingLineInfo)` when the line matches a binding declaration.
+fn parse_child_binding_line(line: &str) -> Option<BindingLineInfo<'_>> {
     let bytes = line.as_bytes();
     let indent = bytes
         .iter()
@@ -855,24 +1922,12 @@ fn parse_child_binding_line(line: &str) -> Option<(usize, &str)> {
     if indent == 0 {
         return None;
     }
-    let trimmed = &line[indent..];
-    if !trimmed.starts_with("@binding(") {
-        return None;
-    }
-    // Verify it has uniform/storage after @binding(N)
-    let after_open = &trimmed[9..];
-    let close = after_open.find(')')?;
-    let after_binding = after_open[close + 1..].trim_start();
-    if after_binding.starts_with("uniform") || after_binding.starts_with("storage") {
-        Some((indent, trimmed))
-    } else {
-        None
-    }
+    parse_binding_rest(line, indent)
 }
 
 /// Try to parse a line as a flat binding declaration.
 /// Returns `(indent_len, group_value_str, rest_after_group)`.
-/// Matches: `<indent>@group(N) @binding(N) uniform/storage ...`
+/// Matches: `<indent>@group(N) @binding(N) [@attr...] uniform/storage ...`
 fn parse_binding_line(line: &str) -> Option<(usize, &str, &str)> {
     let bytes = line.as_bytes();
     let indent = bytes
@@ -881,77 +1936,24 @@ fn parse_binding_line(line: &str) -> Option<(usize, &str, &str)> {
         .count();
     let trimmed = &line[indent..];
 
-    // Must start with @group(
     if !trimmed.starts_with("@group(") {
         return None;
     }
-    let after_group_open = &trimmed[7..]; // after "@group("
+    let after_group_open = &trimmed[7..];
     let close = after_group_open.find(')')?;
     let group_val = &after_group_open[..close];
-    let after_group = &after_group_open[close + 1..]; // after ")"
+    let after_group = &after_group_open[close + 1..];
 
-    // Must be followed by whitespace then @binding
     let after_ws = after_group.trim_start();
     if !after_ws.starts_with("@binding(") {
         return None;
     }
-    // Verify it's actually a binding decl (has uniform or storage after @binding(...))
-    let after_binding_open = &after_ws[9..]; // after "@binding("
-    let bclose = after_binding_open.find(')')?;
-    let after_binding = &after_binding_open[bclose + 1..].trim_start();
-    if after_binding.starts_with("uniform") || after_binding.starts_with("storage") {
-        Some((indent, group_val, after_ws))
-    } else {
-        None
-    }
-}
 
-/// Split a binding rest string (`@binding(N) uniform name : Type`) at the name boundary.
-/// Returns `(canonical_prefix, name, normalized_suffix)`.
-/// - `canonical_prefix`: everything up to and including the keyword (no trailing spaces)
-/// - `name`: the binding name
-/// - `normalized_suffix`: ` : Type...` with exactly one space before `:` (strips alignment padding)
-fn split_binding_at_name(rest: &str) -> Option<(&str, &str, &str)> {
-    // Find "uniform" or "storage" keyword end, then skip to the name
-    let kw_end; // byte offset right after the keyword (and any parens for storage(...))
-    if let Some(pos) = rest.find("uniform") {
-        kw_end = pos + "uniform".len();
-    } else if let Some(pos) = rest.find("storage(") {
-        // storage(read_write) or similar
-        let paren_close = rest[pos..].find(')').map(|p| pos + p + 1)?;
-        kw_end = paren_close;
-    } else if let Some(pos) = rest.find("storage") {
-        kw_end = pos + "storage".len();
-    } else {
-        return None;
-    }
+    // Validate the rest is a proper binding by attempting to parse it
+    let rest_indent = line.len() - after_ws.len();
+    parse_binding_rest(line, rest_indent)?;
 
-    // The canonical prefix is everything up to and including the keyword (no trailing spaces).
-    let prefix = &rest[..kw_end];
-
-    // Skip any whitespace between keyword and name
-    let after_kw = &rest[kw_end..];
-    let trimmed_after_kw = after_kw.trim_start();
-    if trimmed_after_kw.is_empty() {
-        return None;
-    }
-
-    // Find where the name ends (at whitespace or `:`)
-    let name_end = trimmed_after_kw
-        .find([' ', ':', '\t'])
-        .unwrap_or(trimmed_after_kw.len());
-    let name = &trimmed_after_kw[..name_end];
-
-    // Normalize suffix: strip leading whitespace, find `: Type...` portion
-    let raw_after = &trimmed_after_kw[name_end..];
-    let trimmed_after = raw_after.trim_start();
-    // Return the suffix starting from `:` — emit_aligned_bindings adds padding before it
-    if trimmed_after.starts_with(':') {
-        Some((prefix, name, trimmed_after))
-    } else {
-        // No colon found — return raw
-        Some((prefix, name, raw_after))
-    }
+    Some((indent, group_val, after_ws))
 }
 
 #[cfg(test)]
@@ -1350,6 +2352,272 @@ mod tests {
         let result = format_default(source);
         assert_eq!(result, "f v o m = (v >> o) & m\n");
     }
+
+    #[test]
+    fn format_breaks_long_type_signature() {
+        let mut config = FormatConfig::default();
+        config.max_width = 60;
+        let source =
+            "sceneDist : Shape -> Shape -> Shape -> Shape -> Shape -> Vec2f -> F32 -> F32\n";
+        let result = format(source, &config);
+        assert!(
+            result.lines().all(|l| l.len() <= 60),
+            "line exceeded max_width: {:?}",
+            result
+        );
+        assert!(
+            result.contains("->\n"),
+            "should break at arrow: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_breaks_long_binding() {
+        let mut config = FormatConfig::default();
+        config.max_width = 60;
+        let source = "light1Fall = if light1Ld > 0.6 then 0.0 else ((0.6 - light1Ld) / 0.6) * ((0.6 - light1Ld) / 0.6)\n";
+        let result = format(source, &config);
+        assert!(
+            result.lines().all(|l| l.len() <= 60),
+            "line exceeded max_width: {:?}",
+            result
+        );
+        assert!(
+            result.contains(">\n") || result.contains("*\n"),
+            "should break at operator: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_breaks_long_binary_chain() {
+        let mut config = FormatConfig::default();
+        config.max_width = 50;
+        let source =
+            "litCol = bgCol + light1 + light2 + light3 + ambient + emission + specular + diffuse\n";
+        let result = format(source, &config);
+        assert!(
+            result.lines().all(|l| l.len() <= 50),
+            "line exceeded max_width: {:?}",
+            result
+        );
+        assert!(
+            result.contains("+\n"),
+            "should break at operator: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_record_field_attribute_alignment() {
+        let source = "data VertexOutput = VertexOutput {\n  @builtin(position) clip_pos : Vec<4, F32>,\n  @location(0) uv : Vec<2, F32>,\n}\n";
+        let result = format_default(source);
+        // Attributes and names should be aligned; colons aligned.
+        assert!(result.contains("@builtin(position) clip_pos : Vec<4, F32>,"));
+        assert!(result.contains("@location(0)       uv       : Vec<2, F32>,"));
+    }
+
+    #[test]
+    fn format_record_field_fallback_to_own_line() {
+        let source = "data T = T {\n  @textureSampleType(filterable = false) tex : Texture2d F32,\n  @location(0) uv : Vec<2, F32>,\n}\n";
+        let result = format_default(source);
+        assert!(
+            result.lines().all(|l| l.len() <= 100),
+            "line exceeded max_width: {:?}",
+            result
+        );
+        assert!(
+            result.contains("@textureSampleType(filterable = false)\n"),
+            "should fallback to own line: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_binding_with_attribute_alignment() {
+        let source = "@group(0) @binding(0) uniform frame : FrameData\n@group(0) @binding(1) @textureSampleType(filterable = false) textTexture : Texture2d F32\n";
+        let result = format_default(source);
+        assert!(
+            result.lines().all(|l| l.len() <= 100),
+            "line exceeded max_width: {:?}",
+            result
+        );
+        assert!(
+            result.contains("@group(0)\n"),
+            "should collapse group: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_binding_fallback_to_own_line() {
+        let source = "@group(0) @binding(0) uniform frame : FrameData\n@group(0) @binding(1) @textureSampleType(filterable = false) textTexture : Texture2d F32\n";
+        let result = format_default(source);
+        assert!(
+            result.lines().all(|l| l.len() <= 100),
+            "line exceeded max_width: {:?}",
+            result
+        );
+        assert!(
+            result.contains("@textureSampleType(filterable = false)\n"),
+            "should fallback to own line: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_binding_style_b_when_max_width_exceeded() {
+        let mut config = FormatConfig::default();
+        config.max_width = 80;
+        config.enforce_max_width = true;
+        let source = "@group(1) @binding(0) mainTexture : Texture2d F32\n@group(1) @binding(1) @samplerState(filter = \"linear\", address_mode_u = \"repeat\") mainSampler : Sampler\n";
+        let result = format(source, &config);
+        assert!(
+            result.lines().all(|l| l.len() <= 80),
+            "line exceeded max_width: {:?}",
+            result
+        );
+        assert!(
+            result.contains("@samplerState(filter = \"linear\", address_mode_u = \"repeat\")\n"),
+            "should place attribute on own line: {:?}",
+            result
+        );
+        assert!(
+            result.contains("@group(1)\n"),
+            "should collapse group: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_config_override_width() {
+        let mut config = FormatConfig::default();
+        config.max_width = 40;
+        config.enforce_max_width = true;
+        let source = "veryLongFunctionName : I32 -> I32 -> I32 -> I32\n";
+        let result = format(source, &config);
+        assert!(
+            result.lines().all(|l| l.len() <= 40),
+            "line exceeded custom max_width: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_does_not_break_inside_string_literal() {
+        // Even when a line exceeds max_width, the formatter must never break
+        // inside a string literal.  In this example the only break points are
+        // inside the string (", ->, etc.), so the line is kept intact.
+        let mut config = FormatConfig::default();
+        config.max_width = 50;
+        let source = "f = someFunc \"a very long string, with commas, and arrows -> \" 1.0\n";
+        let result = format(source, &config);
+        assert!(
+            result.contains("\"a very long string, with commas, and arrows -> \""),
+            "should not break inside string literal: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_does_not_break_record_field_line() {
+        let mut config = FormatConfig::default();
+        config.max_width = 40;
+        let source = "data T = T {\n  veryLongFieldName : VeryLongTypeName,\n}\n";
+        let result = format(source, &config);
+        assert!(
+            result.contains("  veryLongFieldName : VeryLongTypeName,"),
+            "should not break record field: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_does_not_break_flat_binding_line() {
+        let mut config = FormatConfig::default();
+        config.max_width = 40;
+        let source = "@group(0) @binding(0) uniform veryLongName : VeryLongType\n";
+        let result = format(source, &config);
+        assert!(
+            result.contains("@group(0) @binding(0) uniform veryLongName : VeryLongType"),
+            "should not break flat binding line: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_does_not_break_group_block_child_line() {
+        let mut config = FormatConfig::default();
+        config.max_width = 40;
+        let source = "@group(0)\n  @binding(0) uniform veryLongName : VeryLongType\n";
+        let result = format(source, &config);
+        assert!(
+            result.contains("  @binding(0) uniform veryLongName : VeryLongType"),
+            "should not break child binding: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_field_with_binding_in_suffix_is_aligned() {
+        // A line with `@binding(` in a comment/suffix should still be treated
+        // as a record field and aligned with its siblings.
+        let source = "data T = T {\n  @location(0) foo : F32 -- @binding(0) comment,\n  @builtin(position) bar : Vec<4, F32>,\n}\n";
+        let result = format_default(source);
+        assert!(
+            result.contains("  @location(0)       foo : F32 -- @binding(0) comment,"),
+            "foo should be aligned: {:?}",
+            result
+        );
+        assert!(
+            result.contains("  @builtin(position) bar : Vec<4, F32>,"),
+            "bar should be aligned: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_binding_continuation_aligns_with_expression() {
+        let mut config = FormatConfig::default();
+        config.max_width = 50;
+        let source = "clampedZ = if abs newPos.z > 0.5 then sign newPos.z * 0.5 else newPos.z\n";
+        let result = format(source, &config);
+        // All continuation lines must be <= max_width.
+        assert!(
+            result.lines().all(|l| l.len() <= 50),
+            "line exceeded max_width: {:?}",
+            result
+        );
+        // The first continuation (after a binary-op break on the original line)
+        // should align with the expression start — column 11, after "clampedZ = ".
+        assert!(
+            result.contains("\n           0.5 then sign newPos.z *"),
+            "should align continuation with expression after '= ': {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_type_sig_continuation_aligns_with_expression() {
+        let mut config = FormatConfig::default();
+        config.max_width = 50;
+        let source =
+            "sceneDist : Shape -> Shape -> Shape -> Shape -> Shape -> Vec2f -> F32 -> F32\n";
+        let result = format(source, &config);
+        assert!(
+            result.lines().all(|l| l.len() <= 50),
+            "line exceeded max_width: {:?}",
+            result
+        );
+        // Continuation should align with the type expression start — column 12,
+        // after "sceneDist : ".
+        assert!(
+            result.contains("\n            Shape -> Vec2f -> F32 -> F32"),
+            "should align continuation with expression after ': ': {:?}",
+            result
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1363,5 +2631,60 @@ mod negative_literal_tests {
         assert_eq!(format_default("f = x- 1\n"), "f = x - 1\n");
         assert_eq!(format_default("f = x -1\n"), "f = x -1\n"); // Application
         assert_eq!(format_default("f = vec2 -0.5\n"), "f = vec2 -0.5\n");
+    }
+}
+
+#[cfg(test)]
+mod if_then_else_tests {
+    use super::*;
+
+    #[test]
+    fn format_restructures_multiline_if_then_else() {
+        let source =
+            "           clampedZ = if abs newPos.z > 0.5 then sign newPos.z *\n             0.5 else newPos.z\n";
+        let result = format_default(source);
+        // The formatter should restructure the multi-line if-then-else
+        // so that `then` and `else` are on their own lines, indented one
+        // level deeper than the binding.
+        assert!(
+            result.contains("\n             then"),
+            "expected restructured then on separate line, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("\n             else"),
+            "expected restructured else on separate line, got:\n{}",
+            result
+        );
+        // The continuation `*` should be collapsed into the then-body.
+        assert!(
+            !result.contains("*\n"),
+            "expected * continuation to be collapsed, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_preserves_single_line_if_then_else() {
+        let source =
+            "           clampedX = if abs newPos.x > 1.0 then sign newPos.x else newPos.x\n";
+        let result = format_default(source);
+        // Short single-line if-then-else should be kept as-is.
+        assert_eq!(
+            result,
+            "           clampedX = if abs newPos.x > 1.0 then sign newPos.x else newPos.x\n"
+        );
+    }
+
+    #[test]
+    fn format_restructures_if_then_else_idempotent() {
+        let source =
+            "           clampedZ = if abs newPos.z > 0.5 then sign newPos.z *\n             0.5 else newPos.z\n";
+        let first = format_default(source);
+        let second = format_default(&first);
+        assert_eq!(
+            first, second,
+            "if-then-else restructuring is not idempotent"
+        );
     }
 }

@@ -14,5 +14,8 @@ pub use lexer::{lex, Token};
 pub use module_merge::merge_modules;
 pub use module_resolver::{resolve_modules, FsReader, ModuleGraph, ParsedModule, SourceReader};
 pub use parser::{CfgPredicate, Parser, Program};
-pub use prelude::{prelude_path, prelude_program, prelude_source};
+pub use prelude::{
+    has_imports, has_imports_in, prelude_path, prelude_program, prelude_source,
+    should_prepend_prelude, with_prelude,
+};
 pub use virtual_fs::{parse_bundle, VirtualFs};

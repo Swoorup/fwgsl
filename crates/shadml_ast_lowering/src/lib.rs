@@ -760,10 +760,7 @@ mod tests {
     }
 
     fn with_prelude(program: &mut Program) {
-        let prelude = shadml_parser::prelude_program();
-        let mut combined = prelude.decls.clone();
-        combined.append(&mut program.decls);
-        program.decls = combined;
+        shadml_parser::with_prelude(program, false);
     }
 
     fn lower_source(source: &str) -> (AstLowering, HirProgram) {

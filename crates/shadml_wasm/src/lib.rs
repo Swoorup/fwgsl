@@ -66,10 +66,7 @@ struct EditorRangeOutput {
 }
 
 fn with_prelude(program: &mut shadml_parser::parser::Program) {
-    let prelude = shadml_parser::prelude_program();
-    let mut combined = prelude.decls.clone();
-    combined.append(&mut program.decls);
-    program.decls = combined;
+    shadml_parser::with_prelude(program, false);
 }
 
 /// Bundle result for multi-file compilation via WASM.

@@ -1940,7 +1940,7 @@ pub fn build_ide_state_with_imports(
     let mut errors = Vec::new();
 
     if let Some(path) = file_path {
-        if has_imports(&user_program) {
+        if shadml_parser::has_imports(&user_program) {
             let reader = shadml_parser::FsReader;
             match shadml_parser::resolve_modules(path, user_program.clone(), search_paths, &reader)
             {
@@ -1997,30 +1997,6 @@ pub fn build_ide_state_with_imports(
 pub fn build_ide_state(source: &str, is_compiler_prelude: bool) -> IdeState {
     let (state, _) = build_ide_state_with_imports(source, None, &[], is_compiler_prelude);
     state
-}
-
-fn has_imports(program: &Program) -> bool {
-    program.decls.iter().any(|d| match d {
-        Decl::ImportDecl { .. } => true,
-        Decl::CfgDecl {
-            then_decls,
-            else_decls,
-            ..
-        } => has_imports_in(then_decls) || has_imports_in(else_decls),
-        _ => false,
-    })
-}
-
-fn has_imports_in(decls: &[Decl]) -> bool {
-    decls.iter().any(|d| match d {
-        Decl::ImportDecl { .. } => true,
-        Decl::CfgDecl {
-            then_decls,
-            else_decls,
-            ..
-        } => has_imports_in(then_decls) || has_imports_in(else_decls),
-        _ => false,
-    })
 }
 
 fn build_document_state(

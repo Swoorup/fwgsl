@@ -68,7 +68,8 @@ metallicColor metallic tint =
 -- Bitfield construction: pack fields into a single u32 value.
 -- Each field is masked and shifted to its bit position.
 packMaterial : I32 -> I32 -> MaterialFlags
-packMaterial rough iorEnc = MaterialFlags { metallic = 0, emissive = 0, transparent = 0, roughness = rough, ior = iorEnc }
+packMaterial rough iorEnc = MaterialFlags { metallic = 0, emissive = 0, transparent = 0,
+  roughness = rough, ior = iorEnc }
 
 -- Bitfield functional update: change specific fields, preserving all others.
 -- Produces: `(base & ~mask) | ((newval & mask) << offset)`
@@ -102,5 +103,6 @@ main input =
       base   = metallicColor metalF p.tint
       color  = if shiny
                then vec4 1.0 (base.g * ior * 0.1) 0.0 1.0
-               else vec4 (base.r * rough) (base.g * ior * 0.1) (base.b * bf) (base.a * layerF * 0.0625)
+               else vec4 (base.r * rough) (base.g * ior * 0.1) (base.b * bf) (base.a * layerF *
+                 0.0625)
   in writeAt output idx color

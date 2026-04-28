@@ -440,7 +440,7 @@ fn bundle_single_entry(
 
     // 3. Resolve module graph
     let (merged, source_files, modules, root_module_path, origin_map, module_path_map) =
-        if has_imports(&root_program) {
+        if shadml_parser::has_imports(&root_program) {
             let source_root = if source_roots.is_empty() {
                 vec![entry_file
                     .parent()
@@ -527,7 +527,7 @@ fn bundle_single_entry(
 
     // 5. Prepend prelude
     let mut program = merged;
-    prepend_prelude(&mut program);
+    shadml_parser::with_prelude(&mut program, false);
 
     // 6. Semantic analysis
     let mut analyzer = shadml_semantic::SemanticAnalyzer::new();
@@ -935,29 +935,6 @@ fn decl_name_and_kind(decl: &Decl) -> Option<(String, &'static str)> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn prepend_prelude(program: &mut Program) {
-    let prelude = shadml_parser::prelude_program();
-    let mut combined = prelude.decls.clone();
-    combined.append(&mut program.decls);
-    program.decls = combined;
-}
-
-fn has_imports(program: &Program) -> bool {
-    has_imports_in(&program.decls)
-}
-
-fn has_imports_in(decls: &[Decl]) -> bool {
-    decls.iter().any(|d| match d {
-        Decl::ImportDecl { .. } => true,
-        Decl::CfgDecl {
-            then_decls,
-            else_decls,
-            ..
-        } => has_imports_in(then_decls) || has_imports_in(else_decls),
-        _ => false,
-    })
-}
-
 fn convert_severity(severity: shadml_diagnostics::Severity) -> BundleSeverity {
     match severity {
         shadml_diagnostics::Severity::Error => BundleSeverity::Error,
@@ -1057,6 +1034,38 @@ fn derive_module_name(path: &Path, source_roots: &[PathBuf]) -> String {
         .unwrap_or("Main")
         .to_string()
 }
+// ---------------------------------------------------------------------------
+
+/// Build a map from declaration name to origin module name by scanning the
+/// module graph. Only tracks names relevant to bindgen: data types,
+/// type aliases, bitfields, bindings, and constants.
+fn build_origin_map(
+    graph: &shadml_parser::module_resolver::ModuleGraph,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for module in &graph.modules {
+        for decl in &module.program.decls {
+            if let Some(name) = decl_name(decl) {
+                map.insert(name, module.name.clone());
+            }
+        }
+    }
+    map
+}
+
+/// Extract the declared name from a declaration, if it has one.
+fn decl_name(decl: &shadml_parser::parser::Decl) -> Option<String> {
+    use shadml_parser::parser::Decl;
+    match decl {
+        Decl::DataDecl { name, .. }
+        | Decl::TypeAlias { name, .. }
+        | Decl::BitfieldDecl { name, .. }
+        | Decl::BindingDecl { name, .. }
+        | Decl::ConstDecl { name, .. }
+        | Decl::TypeSig { name, .. } => Some(name.clone()),
+        _ => None,
+    }
+}
 
 fn output_base_name(path: &Path, source_roots: &[PathBuf]) -> String {
     let relative = source_roots
@@ -1096,41 +1105,6 @@ fn output_base_name(path: &Path, source_roots: &[PathBuf]) -> String {
         "output".to_string()
     } else {
         name
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Origin tracking helpers
-// ---------------------------------------------------------------------------
-
-/// Build a map from declaration name to origin module name by scanning the
-/// module graph. Only tracks names relevant to bindgen: data types,
-/// type aliases, bitfields, bindings, and constants.
-fn build_origin_map(
-    graph: &shadml_parser::module_resolver::ModuleGraph,
-) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for module in &graph.modules {
-        for decl in &module.program.decls {
-            if let Some(name) = decl_name(decl) {
-                map.insert(name, module.name.clone());
-            }
-        }
-    }
-    map
-}
-
-/// Extract the declared name from a declaration, if it has one.
-fn decl_name(decl: &shadml_parser::parser::Decl) -> Option<String> {
-    use shadml_parser::parser::Decl;
-    match decl {
-        Decl::DataDecl { name, .. }
-        | Decl::TypeAlias { name, .. }
-        | Decl::BitfieldDecl { name, .. }
-        | Decl::BindingDecl { name, .. }
-        | Decl::ConstDecl { name, .. }
-        | Decl::TypeSig { name, .. } => Some(name.clone()),
-        _ => None,
     }
 }
 

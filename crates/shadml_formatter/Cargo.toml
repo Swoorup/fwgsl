@@ -6,6 +6,8 @@ version.workspace = true
 [dependencies]
 shadml_syntax = { workspace = true }
 shadml_parser = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [dev-dependencies]
 insta = { workspace = true }

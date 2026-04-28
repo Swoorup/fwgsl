@@ -101,38 +101,6 @@ fn collect_features(args: &[String]) -> Vec<String> {
     features
 }
 
-fn with_prelude(program: &mut shadml_parser::parser::Program) {
-    let prelude = shadml_parser::prelude_program();
-    let mut combined = prelude.decls.clone();
-    combined.append(&mut program.decls);
-    program.decls = combined;
-}
-
-fn should_prepend_prelude(file: &str) -> bool {
-    std::path::Path::new(file)
-        .file_name()
-        .and_then(|name| name.to_str())
-        != Some("prelude.shadml")
-}
-
-/// Check if the program has import declarations (needs multi-file resolution).
-fn has_imports(program: &shadml_parser::parser::Program) -> bool {
-    has_imports_in(&program.decls)
-}
-
-fn has_imports_in(decls: &[shadml_parser::parser::Decl]) -> bool {
-    use shadml_parser::parser::Decl;
-    decls.iter().any(|d| match d {
-        Decl::ImportDecl { .. } => true,
-        Decl::CfgDecl {
-            then_decls,
-            else_decls,
-            ..
-        } => has_imports_in(then_decls) || has_imports_in(else_decls),
-        _ => false,
-    })
-}
-
 fn cmd_compile(
     file: &str,
     emit_ast: bool,
@@ -166,7 +134,7 @@ fn cmd_compile(
     shadml_parser::evaluate_features(&mut root_program, &features);
 
     // If the program has imports, use the module resolver
-    let mut program = if has_imports(&root_program) {
+    let mut program = if shadml_parser::has_imports(&root_program) {
         let root_path = std::path::Path::new(file);
         let source_root = root_path
             .parent()
@@ -188,8 +156,8 @@ fn cmd_compile(
     };
 
     // Prepend prelude declarations unless we're compiling the prelude itself.
-    if should_prepend_prelude(file) {
-        with_prelude(&mut program);
+    if shadml_parser::should_prepend_prelude(file) {
+        shadml_parser::with_prelude(&mut program, false);
     }
 
     // Semantic analysis
@@ -296,7 +264,7 @@ fn cmd_check(file: &str, feature_flags: &[String]) {
     shadml_parser::evaluate_features(&mut root_program, &features);
 
     // If the program has imports, use the module resolver
-    let mut program = if has_imports(&root_program) {
+    let mut program = if shadml_parser::has_imports(&root_program) {
         let root_path = std::path::Path::new(file);
         let source_root = root_path
             .parent()
@@ -317,8 +285,8 @@ fn cmd_check(file: &str, feature_flags: &[String]) {
         root_program
     };
 
-    if should_prepend_prelude(file) {
-        with_prelude(&mut program);
+    if shadml_parser::should_prepend_prelude(file) {
+        shadml_parser::with_prelude(&mut program, false);
     }
 
     let mut analyzer = shadml_semantic::SemanticAnalyzer::new();
@@ -339,8 +307,57 @@ fn cmd_check(file: &str, feature_flags: &[String]) {
 
 fn cmd_fmt(file: &str) {
     let source = read_file(file);
-    let formatted = shadml_formatter::format_default(&source);
+    let config = resolve_formatter_config(file);
+    let formatted = shadml_formatter::format(&source, &config);
     print!("{}", formatted);
+}
+
+/// Search for `shadml.toml` starting from `file`'s directory and walking up.
+/// If found, parse the `[formatter]` section; otherwise return defaults.
+fn resolve_formatter_config(file: &str) -> shadml_formatter::FormatConfig {
+    let file_path = std::path::Path::new(file);
+    let start_dir = file_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+
+    // Search from the file's directory tree first.
+    if let Some(cfg) = search_config_from(start_dir) {
+        return cfg;
+    }
+
+    // Fall back to searching from the current working directory.
+    if start_dir != std::path::Path::new(".") {
+        if let Some(cfg) = search_config_from(std::path::Path::new(".")) {
+            return cfg;
+        }
+    }
+
+    shadml_formatter::FormatConfig::default()
+}
+
+fn search_config_from(start_dir: &std::path::Path) -> Option<shadml_formatter::FormatConfig> {
+    let mut dir = Some(start_dir);
+    while let Some(d) = dir {
+        let candidate = d.join("shadml.toml");
+        if candidate.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&candidate) {
+                match shadml_formatter::load_formatter_config(&text) {
+                    Ok(Some(cfg)) => return Some(cfg),
+                    Ok(None) => return Some(shadml_formatter::FormatConfig::default()),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: {}: invalid [formatter] section: {}",
+                            candidate.display(),
+                            e
+                        );
+                        return Some(shadml_formatter::FormatConfig::default());
+                    }
+                }
+            }
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 fn cmd_bundle(args: &[String], feature_flags: &[String]) {
