@@ -53,11 +53,13 @@ fn codegen_compute_shader_entry_point() {
             fields: vec![MirField {
                 name: arena.alloc_str("gid"),
                 ty: MirType::Vec(3, arena.alloc(MirType::U32)),
+                doc: None,
                 attributes: vec![MirAttribute {
                     name: arena.alloc_str("builtin"),
                     args: vec![arena.alloc_str("global_invocation_id")],
                 }],
             }],
+            comments: vec![],
             origin_module: None,
             adt_variants: None,
             bitfield_fields: None,
@@ -116,16 +118,19 @@ fn codegen_struct_and_function_ordering() {
                 MirField {
                     name: arena.alloc_str("pos"),
                     ty: MirType::Vec(3, arena.alloc(MirType::F32)),
+                    doc: None,
                     attributes: vec![],
                 },
                 MirField {
                     name: arena.alloc_str("life"),
                     ty: MirType::F32,
+                    doc: None,
                     attributes: vec![],
                 },
             ],
             adt_variants: None,
             bitfield_fields: None,
+            comments: vec![],
             origin_module: None,
         }],
         globals: vec![],

@@ -73,6 +73,8 @@ pub struct MirGlobal<'a> {
     pub binding: u32,
     /// The module name where this global was originally defined.
     pub origin_module: Option<&'a str>,
+    /// Leading doc comments attached to this binding declaration.
+    pub comments: Vec<&'a str>,
 }
 
 /// WGSL address space for global bindings.
@@ -115,6 +117,8 @@ pub struct MirStruct<'a> {
     pub adt_variants: Option<Vec<MirAdtVariant<'a>>>,
     /// If this struct was lowered from a bitfield, preserve field bit-ranges.
     pub bitfield_fields: Option<Vec<MirBitfieldFieldDef<'a>>>,
+    /// Leading doc comments attached to this type declaration.
+    pub comments: Vec<&'a str>,
 }
 
 /// Metadata for a single ADT variant, preserved during lowering for bindgen.
@@ -123,6 +127,8 @@ pub struct MirAdtVariant<'a> {
     pub name: &'a str,
     pub tag: u32,
     pub fields: Vec<MirField<'a>>,
+    /// Doc comment attached to this constructor.
+    pub doc: Option<&'a str>,
 }
 
 /// Metadata for a single bitfield field, preserved during lowering for bindgen.
@@ -131,6 +137,8 @@ pub struct MirBitfieldFieldDef<'a> {
     pub name: &'a str,
     pub offset: u32,
     pub width: u32,
+    /// Doc comment attached to this bitfield field.
+    pub doc: Option<&'a str>,
 }
 
 /// A single field in a struct.
@@ -139,6 +147,8 @@ pub struct MirField<'a> {
     pub name: &'a str,
     pub ty: MirType<'a>,
     pub attributes: Vec<MirAttribute<'a>>,
+    /// Doc comment attached to this field.
+    pub doc: Option<&'a str>,
 }
 
 /// An attribute annotation (e.g. `@location(0)`, `@builtin(position)`).

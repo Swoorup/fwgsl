@@ -687,6 +687,7 @@ fn bundle_single_entry(
                     source_files: source_files.clone(),
                     exported_type_names: exported_type_names.clone(),
                     render_block: render_block.map(|rb| rb.name.to_string()),
+                    comments: ep.comments.iter().map(|c| c.to_string()).collect(),
                 }
             })
             .collect::<Vec<_>>();
@@ -845,6 +846,7 @@ fn generate_split_outputs<'a>(
             source_files: source_files.to_vec(),
             exported_type_names: exported_type_names(&exported_types),
             render_block: render_block.map(|rb| rb.name.to_string()),
+            comments: ep.comments.iter().map(|c| c.to_string()).collect(),
         });
     }
 

@@ -480,6 +480,7 @@ fn substitute_type_params(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
 fn lower_data_type_to_struct<'a>(
     name: &str,
     constructors: &[HirConstructor],
+    comments: &[String],
     ctx: &LowerCtx<'a>,
 ) -> Result<Option<MirStruct<'a>>, MirLowerError> {
     if constructors.len() > 1 && constructors.iter().any(|c| !c.fields.is_empty()) {
@@ -488,6 +489,7 @@ fn lower_data_type_to_struct<'a>(
             name: ctx.arena.alloc_str("tag"),
             ty: MirType::U32,
             attributes: vec![],
+            doc: None,
         }];
         let max_con = constructors.iter().max_by_key(|c| c.fields.len()).unwrap();
         for f in &max_con.fields {
@@ -507,6 +509,7 @@ fn lower_data_type_to_struct<'a>(
                             .collect(),
                     })
                     .collect(),
+                doc: f.doc.as_ref().map(|d| ctx.arena.alloc_str(d) as &str),
             });
         }
         let adt_variants = Some(
@@ -533,8 +536,10 @@ fn lower_data_type_to_struct<'a>(
                                         .collect(),
                                 })
                                 .collect(),
+                            doc: f.doc.as_ref().map(|d| ctx.arena.alloc_str(d) as &str),
                         })
                         .collect(),
+                    doc: con.doc.as_ref().map(|d| ctx.arena.alloc_str(d) as &str),
                 })
                 .collect(),
         );
@@ -544,6 +549,10 @@ fn lower_data_type_to_struct<'a>(
             origin_module: None,
             adt_variants,
             bitfield_fields: None,
+            comments: comments
+                .iter()
+                .map(|c| ctx.arena.alloc_str(c) as &str)
+                .collect(),
         }))
     } else if constructors.len() == 1 {
         let con = &constructors[0];
@@ -568,6 +577,7 @@ fn lower_data_type_to_struct<'a>(
                                     .collect(),
                             })
                             .collect(),
+                        doc: f.doc.as_ref().map(|d| ctx.arena.alloc_str(d) as &str),
                     })
                 })
                 .collect::<Result<Vec<_>, MirLowerError>>()?;
@@ -577,6 +587,10 @@ fn lower_data_type_to_struct<'a>(
                 origin_module: None,
                 adt_variants: None,
                 bitfield_fields: None,
+                comments: comments
+                    .iter()
+                    .map(|c| ctx.arena.alloc_str(c) as &str)
+                    .collect(),
             }))
         } else {
             Ok(None)
@@ -605,7 +619,7 @@ pub fn lower_hir_to_mir<'a>(
         if !dt.type_params.is_empty() {
             continue;
         }
-        match lower_data_type_to_struct(&dt.name, &dt.constructors, &ctx) {
+        match lower_data_type_to_struct(&dt.name, &dt.constructors, &dt.comments, &ctx) {
             Ok(Some(s)) => structs.push(s),
             Ok(None) => {}
             Err(e) => errors.push(e),
@@ -621,6 +635,7 @@ pub fn lower_hir_to_mir<'a>(
                 name: ctx.arena.alloc_str(&f.name),
                 offset: f.offset,
                 width: f.width,
+                doc: f.doc.as_ref().map(|d| ctx.arena.alloc_str(d) as &str),
             })
             .collect();
         structs.push(MirStruct {
@@ -629,10 +644,16 @@ pub fn lower_hir_to_mir<'a>(
                 name: ctx.arena.alloc_str("raw"),
                 ty: MirType::U32,
                 attributes: vec![],
+                doc: None,
             }],
             origin_module: None,
             adt_variants: None,
             bitfield_fields: Some(bitfield_fields),
+            comments: bf
+                .comments
+                .iter()
+                .map(|c| ctx.arena.alloc_str(c) as &str)
+                .collect(),
         });
     }
 
@@ -659,18 +680,20 @@ pub fn lower_hir_to_mir<'a>(
                             name: f.name.clone(),
                             ty: substitute_type_params(&f.ty, &subst),
                             attributes: f.attributes.clone(),
+                            doc: f.doc.clone(),
                         })
                         .collect();
                     HirConstructor {
                         name: con.name.clone(),
                         tag: con.tag,
                         fields,
+                        doc: con.doc.clone(),
                     }
                 })
                 .collect();
 
             let mangled = mono_mangled_name(type_name, concrete_args);
-            match lower_data_type_to_struct(&mangled, &specialized_cons, &ctx) {
+            match lower_data_type_to_struct(&mangled, &specialized_cons, &dt.comments, &ctx) {
                 Ok(Some(s)) => structs.push(s),
                 Ok(None) => {}
                 Err(e) => errors.push(e),
@@ -2387,6 +2410,11 @@ fn lower_hir_binding<'a>(res: &HirBinding, ctx: &LowerCtx<'a>) -> Option<MirGlob
         group: res.group,
         binding: res.binding,
         origin_module: None,
+        comments: res
+            .comments
+            .iter()
+            .map(|c| ctx.arena.alloc_str(c) as &str)
+            .collect(),
     })
 }
 

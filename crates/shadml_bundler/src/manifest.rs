@@ -151,6 +151,8 @@ pub struct CompiledEntry {
     /// Name of the render block this entry belongs to, if any.
     /// Entries in the same render block share a pipeline layout.
     pub render_block: Option<String>,
+    /// Leading doc comments attached to this entry point declaration.
+    pub comments: Vec<String>,
 }
 
 /// Bind group metadata for one entry.
@@ -169,6 +171,8 @@ pub struct BindingInfo {
     pub ty: ManifestType,
     /// Rust module path of the module that originally defined this binding.
     pub origin_module: Vec<String>,
+    /// Doc comment attached to this binding declaration.
+    pub doc: Option<String>,
 }
 
 /// Bind group address space exposed to bindgen.
@@ -237,6 +241,8 @@ pub struct ExportedType {
     pub adt_variants: Option<Vec<ExportedAdtVariant>>,
     /// If this type was lowered from a bitfield, preserve field bit-ranges.
     pub bitfield_fields: Option<Vec<ExportedBitfieldField>>,
+    /// Leading doc comments attached to this type declaration.
+    pub comments: Vec<String>,
 }
 
 /// Metadata for a single ADT variant, exported for bindgen.
@@ -245,6 +251,8 @@ pub struct ExportedAdtVariant {
     pub name: String,
     pub tag: u32,
     pub fields: Vec<ExportedField>,
+    /// Doc comment attached to this constructor.
+    pub doc: Option<String>,
 }
 
 /// Metadata for a single bitfield field, exported for bindgen.
@@ -253,6 +261,8 @@ pub struct ExportedBitfieldField {
     pub name: String,
     pub offset: u32,
     pub width: u32,
+    /// Doc comment attached to this bitfield field.
+    pub doc: Option<String>,
 }
 
 /// An attribute annotation on an exported field.
@@ -268,6 +278,8 @@ pub struct ExportedField {
     pub name: String,
     pub ty: ManifestType,
     pub attributes: Vec<ExportedFieldAttribute>,
+    /// Doc comment attached to this field.
+    pub doc: Option<String>,
 }
 
 /// Lifetime-free type information suitable for downstream code generation.
@@ -312,6 +324,11 @@ pub(crate) fn bind_groups_from_globals(
             address_space: convert_address_space(global.address_space),
             ty: manifest_type_from_mir(&global.ty),
             origin_module,
+            doc: if global.comments.is_empty() {
+                None
+            } else {
+                Some(global.comments.join("\n"))
+            },
         });
     }
 
@@ -351,6 +368,7 @@ pub(crate) fn exported_types_from_structs(
                             name: v.name.to_string(),
                             tag: v.tag,
                             fields: v.fields.iter().map(exported_field_from_mir).collect(),
+                            doc: v.doc.map(|d| d.to_string()),
                         })
                         .collect()
                 }),
@@ -361,9 +379,11 @@ pub(crate) fn exported_types_from_structs(
                             name: f.name.to_string(),
                             offset: f.offset,
                             width: f.width,
+                            doc: f.doc.map(|d| d.to_string()),
                         })
                         .collect()
                 }),
+                comments: structure.comments.iter().map(|c| c.to_string()).collect(),
             }
         })
         .collect::<Vec<_>>();
@@ -387,6 +407,7 @@ fn exported_field_from_mir(field: &MirField<'_>) -> ExportedField {
                 args: attr.args.iter().map(|arg| arg.to_string()).collect(),
             })
             .collect(),
+        doc: field.doc.map(|d| d.to_string()),
     }
 }
 
@@ -523,16 +544,19 @@ mod tests {
                     name: "offset",
                     ty: MirType::F32,
                     attributes: vec![],
+                    doc: None,
                 },
                 MirField {
                     name: "dir",
                     ty: MirType::Vec(3, &MirType::F32),
                     attributes: vec![],
+                    doc: None,
                 },
             ],
             origin_module: None,
             adt_variants: None,
             bitfield_fields: None,
+            comments: vec![],
         };
         let arr = [s];
         let structs = make_structs(&arr);
@@ -552,10 +576,12 @@ mod tests {
                 name: "transform",
                 ty: MirType::Mat(3, 3, &MirType::F32),
                 attributes: vec![],
+                doc: None,
             }],
             origin_module: None,
             adt_variants: None,
             bitfield_fields: None,
+            comments: vec![],
         };
         let arr = [s];
         let structs = make_structs(&arr);
@@ -602,16 +628,19 @@ mod tests {
                     name: "offset",
                     ty: MirType::F32,
                     attributes: vec![],
+                    doc: None,
                 },
                 MirField {
                     name: "dir",
                     ty: MirType::Vec(3, &MirType::F32),
                     attributes: vec![],
+                    doc: None,
                 },
             ],
             origin_module: None,
             adt_variants: None,
             bitfield_fields: None,
+            comments: vec![],
         };
         let globals = vec![MirGlobal {
             name: "imm",
@@ -620,6 +649,7 @@ mod tests {
             group: 0,
             binding: 0,
             origin_module: None,
+            comments: vec![],
         }];
         let result = push_constants_from_globals(&globals, &[s]);
         assert!(result.is_some());
@@ -637,6 +667,7 @@ mod tests {
             group: 0,
             binding: 0,
             origin_module: None,
+            comments: vec![],
         }];
         let result = push_constants_from_globals(&globals, &[]);
         assert!(result.is_none());

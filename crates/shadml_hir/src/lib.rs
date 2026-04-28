@@ -34,6 +34,8 @@ pub struct HirBitfield {
     pub name: String,
     pub base_ty: Ty,
     pub fields: Vec<HirBitfieldField>,
+    /// Leading doc comments attached to this bitfield declaration.
+    pub comments: Vec<String>,
 }
 
 /// A single field within a bitfield declaration.
@@ -45,6 +47,8 @@ pub struct HirBitfieldField {
     /// The declared type of this field, if any (e.g. `Bool`, `CapStyle`, `U32`).
     /// Used for downstream codegen to emit appropriate casts/types on field access.
     pub field_type: Option<String>,
+    /// Doc comment (`-- |` before or `-- ^` after) attached to this bitfield field.
+    pub doc: Option<String>,
 }
 
 /// Address space for a GPU binding declaration.
@@ -65,6 +69,8 @@ pub struct HirBinding {
     pub address_space: BindingAddressSpace,
     pub group: u32,
     pub binding: u32,
+    /// Leading doc comments attached to this binding declaration.
+    pub comments: Vec<String>,
 }
 
 /// A render block: `render name { bindings; entry_points }`
@@ -115,6 +121,8 @@ pub struct HirDataType {
     pub name: String,
     pub type_params: Vec<String>,
     pub constructors: Vec<HirConstructor>,
+    /// Leading doc comments attached to this data type declaration.
+    pub comments: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +130,8 @@ pub struct HirConstructor {
     pub name: String,
     pub tag: u32,
     pub fields: Vec<HirFieldDef>,
+    /// Doc comment (`-- |`) attached to this constructor.
+    pub doc: Option<String>,
 }
 
 /// A field definition in a record constructor, with optional attributes.
@@ -130,6 +140,8 @@ pub struct HirFieldDef {
     pub name: String,
     pub ty: Ty,
     pub attributes: Vec<HirAttribute>,
+    /// Doc comment (`-- |` before or `-- ^` after) attached to this field.
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone)]

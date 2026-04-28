@@ -268,9 +268,15 @@ impl AstLowering {
                     name,
                     type_params,
                     constructors,
+                    comments,
                     ..
                 } => {
-                    data_types.push(self.lower_data_decl(name, type_params, constructors));
+                    data_types.push(self.lower_data_decl(
+                        name,
+                        type_params,
+                        constructors,
+                        comments.clone(),
+                    ));
                 }
                 Decl::BindingDecl {
                     name,
@@ -278,6 +284,7 @@ impl AstLowering {
                     address_space,
                     group,
                     binding,
+                    comments,
                     ..
                 } => {
                     let scheme = self.convert_syntax_type_scheme(ty);
@@ -287,6 +294,7 @@ impl AstLowering {
                         address_space: lower_address_space(*address_space),
                         group: *group,
                         binding: *binding,
+                        comments: comments.clone(),
                     });
                 }
                 Decl::BitfieldDecl {
@@ -294,6 +302,7 @@ impl AstLowering {
                     base_ty,
                     fields,
                     span,
+                    comments,
                     ..
                 } => {
                     let base_scheme = self.convert_syntax_type_scheme(base_ty);
@@ -357,6 +366,7 @@ impl AstLowering {
                                 offset,
                                 width,
                                 field_type,
+                                doc: f.doc.clone(),
                             };
                             offset += width;
                             hf
@@ -384,6 +394,7 @@ impl AstLowering {
                         name: name.clone(),
                         base_ty: base_scheme.ty,
                         fields: hir_fields,
+                        comments: comments.clone(),
                     });
                 }
                 Decl::ConstDecl {
@@ -432,6 +443,7 @@ impl AstLowering {
                                 address_space,
                                 group,
                                 binding,
+                                comments: bcomments,
                                 ..
                             } = b
                             {
@@ -442,6 +454,7 @@ impl AstLowering {
                                     address_space: lower_address_space(*address_space),
                                     group: *group,
                                     binding: *binding,
+                                    comments: bcomments.clone(),
                                 }
                             } else {
                                 panic!("Expected BindingDecl in render block bindings")
@@ -497,6 +510,7 @@ impl AstLowering {
                                 address_space,
                                 group,
                                 binding,
+                                comments: bcomments,
                                 ..
                             } => {
                                 let scheme = self.convert_syntax_type_scheme(bty);
@@ -506,6 +520,7 @@ impl AstLowering {
                                     address_space: lower_address_space(*address_space),
                                     group: *group,
                                     binding: *binding,
+                                    comments: bcomments.clone(),
                                 });
                             }
                             Decl::EntryPoint {

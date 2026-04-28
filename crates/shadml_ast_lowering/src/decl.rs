@@ -405,6 +405,7 @@ impl AstLowering {
         name: &str,
         type_params: &[String],
         cons: &[ConDecl],
+        comments: Vec<String>,
     ) -> HirDataType {
         let mut hir_cons = Vec::new();
         for (tag, con) in cons.iter().enumerate() {
@@ -419,6 +420,7 @@ impl AstLowering {
                             name: format!("field{}", i),
                             ty,
                             attributes: vec![],
+                            doc: None,
                         }
                     })
                     .collect(),
@@ -438,6 +440,7 @@ impl AstLowering {
                             name: f.name.clone(),
                             ty,
                             attributes: attrs,
+                            doc: f.doc.clone(),
                         }
                     })
                     .collect(),
@@ -447,12 +450,14 @@ impl AstLowering {
                 name: con.name.clone(),
                 tag: resolved_tag,
                 fields,
+                doc: con.doc.clone(),
             });
         }
         HirDataType {
             name: name.to_string(),
             type_params: type_params.to_vec(),
             constructors: hir_cons,
+            comments,
         }
     }
 }
