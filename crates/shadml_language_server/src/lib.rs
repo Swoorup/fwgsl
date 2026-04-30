@@ -1753,6 +1753,7 @@ pub fn span_to_range(source: &str, span: Span) -> Range {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower_lsp::LspService;
 
     // -- Completion tests ---------------------------------------------------
 
@@ -2506,5 +2507,81 @@ mod tests {
         assert!(legend.token_modifiers.is_empty());
         assert_eq!(legend.token_types[0], SemanticTokenType::KEYWORD);
         assert_eq!(legend.token_types[10], SemanticTokenType::DECORATOR);
+    }
+
+    // -- Cross-file goto-definition integration test -------------------------
+
+    #[tokio::test]
+    async fn test_goto_definition_resolves_imported_symbol() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest_dir
+            .parent()
+            .expect("parent")
+            .parent()
+            .expect("workspace root");
+        let shaders_dir = workspace.join("examples/rust-bindgen-demo/shaders");
+        let sdf_scene_path = shaders_dir.join("SdfScene.shadml");
+        let sdf_scene_src = std::fs::read_to_string(&sdf_scene_path).expect("read SdfScene");
+
+        let uri = Url::from_file_path(&sdf_scene_path).unwrap();
+
+        let (service, _socket) = LspService::new(ShadmlBackend::new);
+        let backend = service.inner();
+
+        // Insert document into the backend
+        backend.documents.insert(uri.clone(), sdf_scene_src.clone());
+
+        // Run diagnostics to resolve imports and populate module_files
+        backend.run_diagnostics(uri.clone(), &sdf_scene_src).await;
+
+        // Position on "getFrameSize" in `let aspect = getFrameSize.x / getFrameSize.y`
+        let pos = {
+            let offset = sdf_scene_src.find("getFrameSize").unwrap();
+            let line = sdf_scene_src[..offset].chars().filter(|&c| c == '\n').count() as u32;
+            let line_start = sdf_scene_src[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let character = (offset - line_start) as u32;
+            Position::new(line, character)
+        };
+
+        let params = GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: pos,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let result = backend.goto_definition(params).await.unwrap();
+        assert!(
+            result.is_some(),
+            "goto-definition for imported getFrameSize should return a location"
+        );
+
+        let locations = match result.unwrap() {
+            GotoDefinitionResponse::Scalar(loc) => vec![loc],
+            GotoDefinitionResponse::Array(locs) => locs,
+            GotoDefinitionResponse::Link(links) => links
+                .into_iter()
+                .map(|l| Location {
+                    uri: l.target_uri,
+                    range: l.target_selection_range,
+                })
+                .collect(),
+        };
+
+        assert!(
+            !locations.is_empty(),
+            "should have at least one definition location"
+        );
+
+        let global_bindings_path = shaders_dir.join("GlobalBindings.shadml");
+        let global_bindings_uri = Url::from_file_path(&global_bindings_path).unwrap();
+
+        assert!(
+            locations.iter().any(|loc| loc.uri == global_bindings_uri),
+            "goto-definition should resolve getFrameSize to GlobalBindings.shadml, got: {:?}",
+            locations
+        );
     }
 }
