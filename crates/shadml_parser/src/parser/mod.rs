@@ -493,6 +493,17 @@ impl AttrArg {
     }
 }
 
+/// A fully-resolved name produced by the Renamer pass.
+#[derive(Debug, Clone)]
+pub struct ResolvedName {
+    /// The module where the name was originally declared.
+    pub module: String,
+    /// The original name in the source module.
+    pub original_name: String,
+    /// Disambiguation stamp (for future use with shadowing).
+    pub stamp: u32,
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Lit(Lit, Span),
@@ -513,6 +524,11 @@ pub enum Expr {
     FieldAccess(Box<Expr>, String, Span),
     Index(Box<Expr>, Box<Expr>, Span),
     OpSection(String, Span),
+    /// Qualified name: `Module.name` — distinct from `FieldAccess` because
+    /// modules are not first-class values.
+    Qualified(String, String, Span),
+    /// Fully resolved name (produced by the Renamer pass).
+    Resolved(ResolvedName, Span),
     Neg(Box<Expr>, Span),
     Not(Box<Expr>, Span),
     BitNot(Box<Expr>, Span),
@@ -568,6 +584,10 @@ pub enum Type {
     Unit(Span),
     /// Type projection: `a.Output` (associated type access)
     Proj(Box<Type>, String, Span),
+    /// Qualified type name: `Module.Type`
+    Qualified(String, String, Span),
+    /// Fully resolved type name (produced by the Renamer pass).
+    Resolved(ResolvedName, Span),
     /// `Self` keyword in type position (only valid as `Self.Output`)
     Self_(Span),
 }
@@ -601,6 +621,8 @@ impl Expr {
             | Expr::FieldAccess(_, _, s)
             | Expr::Index(_, _, s)
             | Expr::OpSection(_, s)
+            | Expr::Qualified(_, _, s)
+            | Expr::Resolved(_, s)
             | Expr::Neg(_, s)
             | Expr::Not(_, s)
             | Expr::BitNot(_, s)
@@ -624,6 +646,8 @@ impl Type {
             | Type::Tuple(_, s)
             | Type::Unit(s)
             | Type::Proj(_, _, s)
+            | Type::Qualified(_, _, s)
+            | Type::Resolved(_, s)
             | Type::Self_(s) => *s,
         }
     }
@@ -1582,6 +1606,97 @@ main x =
                 other => panic!("expected match expression, got {:?}", other),
             },
             other => panic!("expected FunDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_qualified_expr() {
+        let source = "f = F.bar";
+        let prog = parse(source);
+        match &prog.decls[0] {
+            Decl::FunDecl { body, .. } => {
+                assert!(
+                    matches!(body, Expr::Qualified(m, n, _) if m == "F" && n == "bar"),
+                    "expected Qualified, got {:?}",
+                    body
+                );
+            }
+            other => panic!("expected FunDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_qualified_expr_module_type() {
+        let source = "f = Math.Vec";
+        let prog = parse(source);
+        match &prog.decls[0] {
+            Decl::FunDecl { body, .. } => {
+                assert!(
+                    matches!(body, Expr::Qualified(m, n, _) if m == "Math" && n == "Vec"),
+                    "expected Qualified, got {:?}",
+                    body
+                );
+            }
+            other => panic!("expected FunDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_qualified_expr_operator() {
+        let source = "f = Foo.(+)";
+        let prog = parse(source);
+        match &prog.decls[0] {
+            Decl::FunDecl { body, .. } => {
+                assert!(
+                    matches!(body, Expr::Qualified(m, n, _) if m == "Foo" && n == "+"),
+                    "expected Qualified, got {:?}",
+                    body
+                );
+            }
+            other => panic!("expected FunDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_qualified_expr_application() {
+        let source = "f = Foo.bar baz";
+        let prog = parse(source);
+        match &prog.decls[0] {
+            Decl::FunDecl { body, .. } => match body {
+                Expr::App(lhs, rhs, _) => {
+                    assert!(
+                        matches!(lhs.as_ref(), Expr::Qualified(m, n, _) if m == "Foo" && n == "bar"),
+                        "expected Qualified on lhs, got {:?}",
+                        lhs
+                    );
+                    assert!(
+                        matches!(rhs.as_ref(), Expr::Var(n, _) if n == "baz"),
+                        "expected Var on rhs, got {:?}",
+                        rhs
+                    );
+                }
+                other => panic!("expected App, got {:?}", other),
+            },
+            other => panic!("expected FunDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_qualified_type() {
+        let source = "f : Math.Vec<2, F32>";
+        let prog = parse(source);
+        match &prog.decls[0] {
+            Decl::TypeSig { ty, .. } => match ty {
+                Type::App(outer, _, _) => {
+                    assert!(
+                        matches!(outer.as_ref(), Type::App(inner, _, _) if matches!(inner.as_ref(), Type::Qualified(m, n, _) if m == "Math" && n == "Vec")),
+                        "expected Qualified type, got {:?}",
+                        outer
+                    );
+                }
+                other => panic!("expected App, got {:?}", other),
+            },
+            other => panic!("expected TypeSig, got {:?}", other),
         }
     }
 

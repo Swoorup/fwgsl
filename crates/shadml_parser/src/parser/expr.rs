@@ -293,8 +293,56 @@ impl Parser {
             SyntaxKind::UpperIdent => {
                 let tok = self.bump();
                 let name = self.text_of(&tok).to_owned();
-                // Named record/bitfield construction: Name { field = expr, ... }
                 self.skip_trivia();
+
+                // Qualified name: UpperIdent . (Ident | UpperIdent | (op))
+                if self.at(SyntaxKind::Dot) {
+                    let dot_pos = self.pos;
+                    self.bump(); // consume `.`
+                    self.skip_trivia();
+
+                    if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::UpperIdent) {
+                        let name_tok = self.bump();
+                        let field = self.text_of(&name_tok).to_owned();
+                        let span = tok.span.merge(name_tok.span);
+                        return Expr::Qualified(name, field, span);
+                    }
+
+                    if self.at(SyntaxKind::LParen) {
+                        // Operator section inside parens: Foo.(+)
+                        let paren_start = self.current_span().start;
+                        self.bump(); // consume `(`
+                        self.skip_trivia();
+                        let is_shift_right = self.at(SyntaxKind::Greater) && {
+                            let next_idx = self.pos + 1;
+                            next_idx < self.tokens.len()
+                                && self.tokens[next_idx].kind == SyntaxKind::Greater
+                                && self.tokens[self.pos].span.end
+                                    == self.tokens[next_idx].span.start
+                        };
+                        let op_text = if is_shift_right {
+                            self.bump();
+                            self.bump();
+                            ">>".to_owned()
+                        } else if is_operator_token(self.peek()) {
+                            let op_tok = self.bump();
+                            self.text_of(&op_tok).to_owned()
+                        } else {
+                            // Not an operator — backtrack and treat as Con + FieldAccess
+                            self.pos = dot_pos;
+                            return Expr::Con(name, tok.span);
+                        };
+                        self.skip_trivia();
+                        self.expect(SyntaxKind::RParen);
+                        let span = tok.span.merge(self.span_from(paren_start));
+                        return Expr::Qualified(name, op_text, span);
+                    }
+
+                    // Not a qualified name — backtrack to before the dot
+                    self.pos = dot_pos;
+                }
+
+                // Named record/bitfield construction: Name { field = expr, ... }
                 if self.at(SyntaxKind::LBrace) {
                     return self.parse_named_record(name, tok.span.start);
                 }

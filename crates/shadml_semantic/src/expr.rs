@@ -29,7 +29,14 @@ impl SemanticAnalyzer {
         let ty = match expr {
             Expr::Lit(lit, _) => self.lit_type(lit),
 
-            Expr::Var(name, span) => {
+            Expr::Var(name, span)
+            | Expr::Resolved(
+                ResolvedName {
+                    original_name: name,
+                    ..
+                },
+                span,
+            ) => {
                 if self.is_internal_impl_method_name(name) {
                     self.engine.diagnostics.push(
                         Diagnostic::error(format!(
@@ -558,6 +565,10 @@ impl SemanticAnalyzer {
                     self.infer_expr(expr, env, active_constraints);
                 }
                 base_ty
+            }
+
+            Expr::Qualified(_, _, _) => {
+                panic!("Expr::Qualified should have been renamed by the Renamer")
             }
         };
         self.expr_types.insert(expr.span(), ty.clone());

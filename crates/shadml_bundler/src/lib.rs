@@ -67,6 +67,17 @@ impl Default for BundleConfig {
     }
 }
 
+/// Per-module symbol usage tracked by the bundler.
+#[derive(Debug, Clone)]
+pub struct ModuleDependencyInfo {
+    /// Module name.
+    pub module_name: String,
+    /// Source file path for this module.
+    pub file_path: PathBuf,
+    /// Symbols from this module that are used in the output.
+    pub used_symbols: Vec<String>,
+}
+
 /// The result of a successful bundle operation.
 #[derive(Debug)]
 pub struct BundleOutput {
@@ -78,6 +89,8 @@ pub struct BundleOutput {
     /// File dependency graph: maps each output name to the set of source
     /// files that contributed to it.
     pub dependencies: HashMap<String, Vec<PathBuf>>,
+    /// Per-output module-level dependency tracking with symbol usage.
+    pub module_dependencies: HashMap<String, Vec<ModuleDependencyInfo>>,
 }
 
 /// A single output unit from the bundler.
@@ -231,6 +244,7 @@ pub fn bundle(config: &BundleConfig) -> Result<BundleOutput, BundleError> {
     let mut all_entries = Vec::new();
     let mut all_diagnostics = Vec::new();
     let mut all_dependencies: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut all_module_dependencies: HashMap<String, Vec<ModuleDependencyInfo>> = HashMap::new();
 
     for entry_file in &config.entries {
         let source = std::fs::read_to_string(entry_file)
@@ -248,6 +262,7 @@ pub fn bundle(config: &BundleConfig) -> Result<BundleOutput, BundleError> {
 
         for entry in &result.entries {
             all_dependencies.insert(entry.name.clone(), result.source_files.clone());
+            all_module_dependencies.insert(entry.name.clone(), result.module_dependencies.clone());
         }
         all_entries.extend(result.entries);
         all_diagnostics.extend(result.diagnostics);
@@ -259,6 +274,7 @@ pub fn bundle(config: &BundleConfig) -> Result<BundleOutput, BundleError> {
         entries: all_entries,
         diagnostics: all_diagnostics,
         dependencies: all_dependencies,
+        module_dependencies: all_module_dependencies,
     })
 }
 
@@ -382,14 +398,17 @@ pub fn bundle_virtual(
     )?;
 
     let mut dependencies = HashMap::new();
+    let mut module_dependencies = HashMap::new();
     for entry in &result.entries {
         dependencies.insert(entry.name.clone(), result.source_files.clone());
+        module_dependencies.insert(entry.name.clone(), result.module_dependencies.clone());
     }
 
     Ok(BundleOutput {
         entries: result.entries,
         diagnostics: result.diagnostics,
         dependencies,
+        module_dependencies,
     })
 }
 
@@ -404,6 +423,7 @@ struct SingleEntryResult {
     source_files: Vec<PathBuf>,
     modules: Vec<CompiledModule>,
     exported_types: Vec<ExportedType>,
+    module_dependencies: Vec<ModuleDependencyInfo>,
 }
 
 fn bundle_single_entry(
@@ -439,7 +459,7 @@ fn bundle_single_entry(
     shadml_parser::evaluate_features(&mut root_program, features);
 
     // 3. Resolve module graph
-    let (merged, source_files, modules, root_module_path, origin_map, module_path_map) =
+    let (mut program, source_files, modules, root_module_path, origin_map, module_path_map) =
         if shadml_parser::has_imports(&root_program) {
             let source_root = if source_roots.is_empty() {
                 vec![entry_file
@@ -492,9 +512,23 @@ fn bundle_single_entry(
                 .map(|m| (m.name.clone(), split_module_path(&m.name)))
                 .collect();
 
-            let merged = shadml_parser::merge_modules(&graph);
+            // Use the Renamer to resolve cross-module references, then flatten.
+            let mut renamer = shadml_parser::Renamer::new(&graph);
+            let renamed = renamer.run();
+            diagnostics.extend(renamer.diagnostics().iter().map(|d| BundleDiagnostic {
+                file: Some(entry_file.to_path_buf()),
+                severity: convert_severity(d.severity),
+                message: d.message.clone(),
+                help: d.help.clone(),
+            }));
+            if diagnostics
+                .iter()
+                .any(|d| d.severity == BundleSeverity::Error)
+            {
+                return Err(BundleError::Compilation(diagnostics));
+            }
             (
-                merged,
+                renamed,
                 files,
                 modules,
                 root_module_path,
@@ -526,8 +560,36 @@ fn bundle_single_entry(
         };
 
     // 5. Prepend prelude
-    let mut program = merged;
     shadml_parser::with_prelude(&mut program, false);
+
+    // 6. Inter-module tree-shaking: keep only declarations reachable from entry points.
+    let live_indices = shadml_parser::find_live_decl_indices(&program);
+    let mut module_dependencies = Vec::new();
+    if !live_indices.is_empty() {
+        let module_to_path: HashMap<String, PathBuf> = modules
+            .iter()
+            .map(|m| (m.name.clone(), m.path.clone()))
+            .collect();
+        let mut used_symbols: HashMap<String, Vec<String>> = HashMap::new();
+        for &idx in &live_indices {
+            let decl = &program.decls[idx];
+            for name in shadml_parser::exported_names(decl) {
+                if let Some(module) = origin_map.get(&name) {
+                    used_symbols.entry(module.clone()).or_default().push(name);
+                }
+            }
+        }
+        for (module_name, symbols) in used_symbols {
+            if let Some(path) = module_to_path.get(&module_name) {
+                module_dependencies.push(ModuleDependencyInfo {
+                    module_name,
+                    file_path: path.clone(),
+                    used_symbols: symbols,
+                });
+            }
+        }
+    }
+    let program = shadml_parser::filter_live_program(&program);
 
     // 6. Semantic analysis
     let mut analyzer = shadml_semantic::SemanticAnalyzer::new();
@@ -702,6 +764,7 @@ fn bundle_single_entry(
         source_files,
         modules,
         exported_types,
+        module_dependencies,
     })
 }
 
@@ -1439,5 +1502,107 @@ helper x = x + 1
         assert!(names.contains(&"examples__Main"));
 
         std::fs::remove_dir_all(&root).expect("should remove temp tree");
+    }
+
+    #[test]
+    fn bundle_tree_shaking_selective_import() {
+        let files = make_virtual_files(&[
+            (
+                "Main.shadml",
+                "import Utils (helper_only)\n\nmain : () -> ()\n@compute @workgroup_size(64, 1, 1)\nmain _ = helper_only ()\n",
+            ),
+            (
+                "Utils.shadml",
+                "module Utils\n\nhelper_only : () -> ()\nhelper_only _ = ()\n\nother_fn : () -> ()\nother_fn _ = ()\n",
+            ),
+        ]);
+
+        let result = bundle_virtual(&files, &[], false).expect("should bundle");
+        let wgsl = &result.entries[0].wgsl;
+        let mod_deps = result
+            .module_dependencies
+            .get(&result.entries[0].name)
+            .expect("should have mod deps");
+        let utils_dep = mod_deps
+            .iter()
+            .find(|d| d.module_name == "Utils")
+            .expect("should have Utils dep");
+        assert!(utils_dep.used_symbols.contains(&"helper_only".to_string()));
+        assert!(!utils_dep.used_symbols.contains(&"other_fn".to_string()));
+        assert!(
+            !wgsl.contains("other_fn"),
+            "other_fn should be tree-shaken away from WGSL"
+        );
+    }
+
+    #[test]
+    fn bundle_tree_shaking_qualified_import() {
+        let files = make_virtual_files(&[
+            (
+                "Main.shadml",
+                "import Utils as U\n\nmain : () -> ()\n@compute @workgroup_size(64, 1, 1)\nmain _ = U.helper ()\n",
+            ),
+            (
+                "Utils.shadml",
+                "module Utils\n\nhelper : () -> ()\nhelper _ = ()\n\nother_fn : () -> ()\nother_fn _ = ()\n",
+            ),
+        ]);
+
+        let result = bundle_virtual(&files, &[], false).expect("should bundle");
+        let wgsl = &result.entries[0].wgsl;
+        let mod_deps = result
+            .module_dependencies
+            .get(&result.entries[0].name)
+            .expect("should have mod deps");
+        let utils_dep = mod_deps
+            .iter()
+            .find(|d| d.module_name == "Utils")
+            .expect("should have Utils dep");
+        assert!(utils_dep.used_symbols.contains(&"helper".to_string()));
+        assert!(!utils_dep.used_symbols.contains(&"other_fn".to_string()));
+        assert!(
+            !wgsl.contains("other_fn"),
+            "other_fn should be tree-shaken away from WGSL"
+        );
+    }
+
+    #[test]
+    fn bundle_tree_shaking_diamond_import() {
+        let files = make_virtual_files(&[
+            (
+                "Main.shadml",
+                "import A\nimport B\n\nmain : I32 -> I32\n@compute @workgroup_size(64, 1, 1)\nmain input = use_a input + use_b input\n",
+            ),
+            (
+                "A.shadml",
+                "module A\nimport Utils\n\nuse_a : I32 -> I32\nuse_a x = used_by_a x\n",
+            ),
+            (
+                "B.shadml",
+                "module B\nimport Utils\n\nuse_b : I32 -> I32\nuse_b x = used_by_b x\n",
+            ),
+            (
+                "Utils.shadml",
+                "module Utils\n\nused_by_a : I32 -> I32\nused_by_a x = x + 1\n\nused_by_b : I32 -> I32\nused_by_b x = x + 2\n\nunused : I32 -> I32\nunused x = x + 99\n",
+            ),
+        ]);
+
+        let result = bundle_virtual(&files, &[], false).expect("should bundle");
+        let wgsl = &result.entries[0].wgsl;
+        let deps = &result.module_dependencies;
+        assert!(!deps.is_empty(), "module_dependencies should not be empty");
+        let entry_name = &result.entries[0].name;
+        let mod_deps = deps.get(entry_name).expect("should have mod deps");
+        let utils_dep = mod_deps
+            .iter()
+            .find(|d| d.module_name == "Utils")
+            .expect("should have Utils dep");
+        assert!(utils_dep.used_symbols.contains(&"used_by_a".to_string()));
+        assert!(utils_dep.used_symbols.contains(&"used_by_b".to_string()));
+        assert!(!utils_dep.used_symbols.contains(&"unused".to_string()));
+        assert!(
+            !wgsl.contains("unused"),
+            "unused should be tree-shaken away from WGSL"
+        );
     }
 }

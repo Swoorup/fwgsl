@@ -5,7 +5,7 @@
 //! (`shadml_parser`, `shadml_semantic`, `shadml_typechecker`).
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use dashmap::DashMap;
@@ -13,7 +13,7 @@ use shadml_ide::{
     all_completion_specs, completion_item_from_spec, completions, goto_definition, hover,
     lookup_completion_spec, references, spec_matches_context, CompletionContext, CompletionSpec,
 };
-use shadml_parser::parser::{Decl, Expr};
+use shadml_parser::parser::{Decl, Expr, ResolvedName};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -120,6 +120,8 @@ pub struct ShadmlBackend {
     documents: DashMap<Url, String>,
     /// Cached module files: root URI -> list of (file_path, source_text) for imported modules.
     module_files: DashMap<Url, Vec<(std::path::PathBuf, String)>>,
+    /// Cached workspace index per root URI, for cross-module goto-definition.
+    workspace_index: DashMap<Url, shadml_ide::WorkspaceIndex>,
     /// Cached IDE state per document URI, to avoid rebuilding on every request.
     ide_states: DashMap<Url, (shadml_ide::IdeState, Vec<String>)>,
     /// Workspace root directory (set during `initialize`).
@@ -133,6 +135,7 @@ impl ShadmlBackend {
             client,
             documents: DashMap::new(),
             module_files: DashMap::new(),
+            workspace_index: DashMap::new(),
             ide_states: DashMap::new(),
             workspace_root: OnceLock::new(),
         }
@@ -158,19 +161,38 @@ impl ShadmlBackend {
         shadml_formatter::FormatConfig::default()
     }
 
-    /// Build and cache the IDE state for a document.
+    /// Build and cache the IDE state for a document, including module files
+    /// and workspace index for cross-file goto-definition.
     fn build_and_cache_ide_state(&self, uri: &Url, text: &str) {
-        let (state, errors) = if is_compiler_prelude_uri(uri) {
-            shadml_ide::build_ide_state_with_imports(text, None, &[], true)
-        } else if let Ok(file_path) = uri.to_file_path() {
-            let source_root = file_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::path::Path::new(".").to_path_buf());
-            shadml_ide::build_ide_state_with_imports(text, Some(&file_path), &[source_root], false)
+        let (file_path_opt, search_paths, is_prelude) = self.ide_args(uri);
+        let (state, errors, graph_opt) = shadml_ide::build_ide_state_with_imports(
+            text,
+            file_path_opt.as_deref(),
+            &search_paths,
+            is_prelude,
+        );
+
+        // Cache imported module files and workspace index from successful resolution.
+        if let Some(graph) = &graph_opt {
+            let mut imported = Vec::new();
+            if let Some(file_path) = &file_path_opt {
+                for m in &graph.modules {
+                    if m.path != *file_path {
+                        if let Ok(src) = std::fs::read_to_string(&m.path) {
+                            imported.push((m.path.clone(), src));
+                        }
+                    }
+                }
+            }
+            self.module_files.insert(uri.clone(), imported);
+            let workspace_idx = shadml_ide::WorkspaceIndex::build(graph);
+            self.workspace_index.insert(uri.clone(), workspace_idx);
         } else {
-            shadml_ide::build_ide_state_with_imports(text, None, &[], false)
-        };
+            // No graph: remove stale cache entries when imports are removed.
+            self.module_files.remove(uri);
+            self.workspace_index.remove(uri);
+        }
+
         self.ide_states.insert(uri.clone(), (state, errors));
     }
 
@@ -180,102 +202,70 @@ impl ShadmlBackend {
             return Some((entry.value().0.clone(), entry.value().1.clone()));
         }
         let text = self.documents.get(uri)?;
-        let (state, errors) = if is_compiler_prelude_uri(uri) {
-            shadml_ide::build_ide_state_with_imports(&text, None, &[], true)
-        } else if let Ok(file_path) = uri.to_file_path() {
-            let source_root = file_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::path::Path::new(".").to_path_buf());
-            shadml_ide::build_ide_state_with_imports(&text, Some(&file_path), &[source_root], false)
-        } else {
-            shadml_ide::build_ide_state_with_imports(&text, None, &[], false)
-        };
+        let (file_path_opt, search_paths, is_prelude) = self.ide_args(uri);
+        let (state, errors, _graph) = shadml_ide::build_ide_state_with_imports(
+            &text,
+            file_path_opt.as_deref(),
+            &search_paths,
+            is_prelude,
+        );
         self.ide_states
             .insert(uri.clone(), (state.clone(), errors.clone()));
         Some((state, errors))
+    }
+
+    /// Resolve the arguments for `build_ide_state_with_imports` from a URI.
+    fn ide_args(&self, uri: &Url) -> (Option<PathBuf>, Vec<PathBuf>, bool) {
+        if is_compiler_prelude_uri(uri) {
+            return (None, vec![], true);
+        }
+        let file_path = uri.to_file_path().ok();
+        let search_paths = file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| vec![p.to_path_buf()])
+            .unwrap_or_default();
+        (file_path, search_paths, false)
     }
 
     // -- Diagnostics ---------------------------------------------------------
 
     /// Lex, parse, and semantically analyze the document, then publish
     /// diagnostics back to the client.
+    ///
+    /// Reuses the IDE state built by `build_and_cache_ide_state` to avoid
+    /// duplicate module resolution and semantic analysis.
     async fn run_diagnostics(&self, uri: Url, text: &str) {
         let mut all_diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = Vec::new();
-        let is_compiler_prelude = is_compiler_prelude_uri(&uri);
 
-        // Phase 1: Parse
+        // Phase 1: Parser diagnostics (cheap — just lex + parse)
         let mut parser = Parser::new(text);
-        let root_program = parser.parse_program();
-
-        // Collect parser diagnostics
+        parser.parse_program();
         for diag in parser.diagnostics().iter() {
             if let Some(lsp_diag) = shadml_diag_to_lsp(diag, text, Some(&uri)) {
                 all_diagnostics.push(lsp_diag);
             }
         }
 
-        // Phase 2: Module resolution (if the file has imports)
-        let mut program = if shadml_parser::has_imports(&root_program) {
-            if let Ok(file_path) = uri.to_file_path() {
-                let source_root = file_path
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new("."))
-                    .to_path_buf();
-                let reader = shadml_parser::FsReader;
-                match shadml_parser::resolve_modules(
-                    &file_path,
-                    root_program,
-                    &[source_root],
-                    &reader,
-                ) {
-                    Ok(graph) => {
-                        // Cache imported module file paths and sources for
-                        // cross-file goto-definition.
-                        let mut imported = Vec::new();
-                        for m in &graph.modules {
-                            if m.path != file_path {
-                                if let Ok(src) = std::fs::read_to_string(&m.path) {
-                                    imported.push((m.path.clone(), src));
-                                }
-                            }
-                        }
-                        self.module_files.insert(uri.clone(), imported);
-
-                        shadml_parser::merge_modules(&graph)
-                    }
-                    Err(errors) => {
-                        for e in &errors {
-                            all_diagnostics.push(tower_lsp::lsp_types::Diagnostic {
-                                range: tower_lsp::lsp_types::Range::default(),
-                                severity: Some(DiagnosticSeverity::ERROR),
-                                message: e.to_string(),
-                                ..Default::default()
-                            });
-                        }
-                        // Fall back to the root program without resolved imports
-                        parser = Parser::new(text);
-                        parser.parse_program()
-                    }
-                }
-            } else {
-                root_program
+        // Phases 2–3: Module resolution + semantic analysis are handled by
+        // the IDE state (already built and cached by `build_and_cache_ide_state`
+        // in `did_open`/`did_change`).
+        if let Some((state, errors)) = self.get_ide_state(&uri) {
+            // Module resolution / renamer errors
+            for err in &errors {
+                all_diagnostics.push(tower_lsp::lsp_types::Diagnostic {
+                    range: tower_lsp::lsp_types::Range::default(),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: err.clone(),
+                    ..Default::default()
+                });
             }
-        } else {
-            self.module_files.remove(&uri);
-            root_program
-        };
 
-        // Prepend prelude
-        shadml_parser::with_prelude(&mut program, is_compiler_prelude);
-
-        // Phase 3: Semantic analysis
-        let mut analyzer = SemanticAnalyzer::new();
-        analyzer.analyze(&program);
-
-        for diag in analyzer.diagnostics().iter() {
-            if let Some(lsp_diag) = shadml_diag_to_lsp(diag, text, Some(&uri)) {
-                all_diagnostics.push(lsp_diag);
+            // Semantic analyzer diagnostics
+            for diag in state.analyzer.diagnostics().iter() {
+                if let Some(lsp_diag) = shadml_diag_to_lsp(diag, text, Some(&uri)) {
+                    all_diagnostics.push(lsp_diag);
+                }
             }
         }
 
@@ -417,8 +407,67 @@ impl LanguageServer for ShadmlBackend {
             return Ok(Some(result));
         }
 
-        // 2. For imported names, search each imported module's IDE index.
         let text = state.source.to_string();
+
+        // 2. Go-to-definition on import module paths (`import Foo.Bar`).
+        if let Some(module_path) = module_path_at_position(&text, pos) {
+            if let Some(workspace) = self.workspace_index.get(uri) {
+                if let Some(file_path) = workspace.module_paths.get(&module_path) {
+                    let module_uri = match Url::from_file_path(file_path) {
+                        Ok(u) => u,
+                        Err(_) => return Ok(None),
+                    };
+                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: module_uri,
+                        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                    })));
+                }
+            }
+        }
+
+        // 3. For qualified names (e.g. `F.bar`), use the workspace index.
+        if let Some((module_alias, name)) = qualified_name_at_position(&text, pos) {
+            if let Some(workspace) = self.workspace_index.get(uri) {
+                // Determine the current module name from the file path.
+                let current_module = uri
+                    .to_file_path()
+                    .ok()
+                    .and_then(|p| {
+                        p.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_default();
+                if let Some((target_module, doc_index, symbol_id)) =
+                    workspace.resolve_qualified(&module_alias, &name, &current_module)
+                {
+                    let Some(symbol) = doc_index.symbols.get(symbol_id) else {
+                        return Ok(None);
+                    };
+                    if let Some(module_path) = workspace.module_paths.get(target_module) {
+                        if let Ok(module_uri) = Url::from_file_path(module_path) {
+                            let target_source =
+                                std::fs::read_to_string(module_path).unwrap_or_default();
+                            let locations: Vec<Location> = symbol
+                                .definition_spans
+                                .iter()
+                                .copied()
+                                .map(|span| Location {
+                                    uri: module_uri.clone(),
+                                    range: span_to_range(&target_source, span),
+                                })
+                                .collect();
+                            return Ok(Some(match locations.as_slice() {
+                                [single] => GotoDefinitionResponse::Scalar(single.clone()),
+                                _ => GotoDefinitionResponse::Array(locations),
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. For unqualified imported names, search each imported module's IDE index.
         if let Some(name) = ident_at_position(&text, pos) {
             if let Some(imported) = self.module_files.get(uri) {
                 for (path, src) in imported.iter() {
@@ -444,7 +493,7 @@ impl LanguageServer for ShadmlBackend {
             }
         }
 
-        // 3. Builtin operator resolution (type-directed).
+        // 5. Builtin operator resolution (type-directed).
         if let Some(location) = find_builtin_operator_definition(&text, pos) {
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));
         }
@@ -873,6 +922,68 @@ fn ident_at_position(source: &str, pos: Position) -> Option<String> {
     Some(tok.text(source).to_string())
 }
 
+/// If the cursor is on a qualified name `Alias.name`, return `(alias, name)`.
+fn qualified_name_at_position(source: &str, pos: Position) -> Option<(String, String)> {
+    let offset = shadml_ide::position_to_offset(source, pos)? as u32;
+    let tokens = lex(source);
+    // Find the token under the cursor.
+    let cursor_idx = tokens.iter().position(|t| {
+        (t.kind == SyntaxKind::Ident || t.kind == SyntaxKind::UpperIdent)
+            && t.span.start <= offset
+            && offset < t.span.end
+    })?;
+    let name_tok = &tokens[cursor_idx];
+    let name = name_tok.text(source).to_string();
+
+    // Look backwards for a dot and an UpperIdent (module alias).
+    if cursor_idx >= 2 {
+        let dot_tok = &tokens[cursor_idx - 1];
+        let alias_tok = &tokens[cursor_idx - 2];
+        if dot_tok.kind == SyntaxKind::Dot && alias_tok.kind == SyntaxKind::UpperIdent {
+            let alias = alias_tok.text(source).to_string();
+            return Some((alias, name));
+        }
+    }
+    None
+}
+
+/// If the cursor is on an import module path (`import Foo.Bar`), return the
+/// dotted module path string (e.g. `"Foo.Bar"`).
+fn module_path_at_position(source: &str, pos: Position) -> Option<String> {
+    let offset = shadml_ide::position_to_offset(source, pos)? as u32;
+    let tokens = lex(source);
+    // Find the token under the cursor.
+    let cursor_idx = tokens.iter().position(|t| {
+        t.kind == SyntaxKind::UpperIdent && t.span.start <= offset && offset < t.span.end
+    })?;
+
+    // Walk backwards to collect the dotted path and verify it follows `import`.
+    let mut i = cursor_idx;
+    let mut path_parts = vec![tokens[i].text(source)];
+    // Absorb preceding `.UpperIdent` segments.
+    while i >= 2 {
+        if tokens[i - 1].kind == SyntaxKind::Dot && tokens[i - 2].kind == SyntaxKind::UpperIdent {
+            path_parts.push(tokens[i - 2].text(source));
+            i -= 2;
+        } else {
+            break;
+        }
+    }
+    // Check that there is a `KwImport` token somewhere before the path start.
+    let has_import = tokens[..i].iter().any(|t| t.kind == SyntaxKind::KwImport);
+    if !has_import {
+        return None;
+    }
+    // Make sure we're not inside an expression (simple heuristic: the
+    // preceding non-trivia token in the same line should be `import`).
+    let prev_non_trivia = tokens[..i].iter().rev().find(|t| !t.kind.is_trivia());
+    if prev_non_trivia.map(|t| t.kind) != Some(SyntaxKind::KwImport) {
+        return None;
+    }
+    path_parts.reverse();
+    Some(path_parts.join("."))
+}
+
 fn find_builtin_operator_definition(source: &str, pos: Position) -> Option<Location> {
     let offset = shadml_ide::position_to_offset(source, pos)? as u32;
     let token = lex(source).into_iter().find(|token| {
@@ -1037,7 +1148,14 @@ fn find_operator_context_in_expr(
                     .find_map(|(_, value)| find_operator_context_in_expr(value, offset, operator))
             })
         }
-        Expr::Lit(_, _) | Expr::Var(_, _) | Expr::Con(_, _) | Expr::OpSection(_, _) => None,
+        Expr::Lit(_, _)
+        | Expr::Var(_, _)
+        | Expr::Con(_, _)
+        | Expr::OpSection(_, _)
+        | Expr::Resolved(_, _) => None,
+        Expr::Qualified(_, _, _) => {
+            panic!("Expr::Qualified should have been renamed by the Renamer")
+        }
     }
 }
 
@@ -1462,6 +1580,16 @@ fn format_type(ty: &shadml_parser::parser::Type) -> String {
         Type::Unit(_) => "()".to_string(),
         Type::Proj(base, name, _) => format!("{}.{}", format_type(base), name),
         Type::Self_(_) => "Self".to_string(),
+        Type::Qualified(_, _, _) => {
+            panic!("Type::Qualified should have been renamed by the Renamer")
+        }
+        Type::Resolved(
+            ResolvedName {
+                original_name: name,
+                ..
+            },
+            _,
+        ) => name.clone(),
     }
 }
 
@@ -2556,7 +2684,11 @@ mod tests {
         // Insert document into the backend
         backend.documents.insert(uri.clone(), sdf_scene_src.clone());
 
-        // Run diagnostics to resolve imports and populate module_files
+        // Build IDE state to resolve imports, populate module_files, and
+        // build the workspace index for cross-file goto-definition.
+        backend.build_and_cache_ide_state(&uri, &sdf_scene_src);
+
+        // Run diagnostics (reuses the cached IDE state).
         backend.run_diagnostics(uri.clone(), &sdf_scene_src).await;
 
         // Position on "getFrameSize" in `let aspect = getFrameSize.x / getFrameSize.y`
@@ -2613,6 +2745,50 @@ mod tests {
             locations.iter().any(|loc| loc.uri == global_bindings_uri),
             "goto-definition should resolve getFrameSize to GlobalBindings.shadml, got: {:?}",
             locations
+        );
+    }
+
+    // -- module_path_at_position / qualified_name_at_position tests --------
+
+    #[test]
+    fn test_module_path_at_position() {
+        let source = "module Main\nimport Math.Vec\nmain = 1";
+        // Cursor on "Vec" in `import Math.Vec`
+        let offset = source.find("Vec").unwrap();
+        let line = source[..offset].chars().filter(|&c| c == '\n').count() as u32;
+        let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let character = (offset - line_start) as u32;
+        let pos = Position::new(line, character);
+        assert_eq!(
+            module_path_at_position(source, pos),
+            Some("Math.Vec".to_string())
+        );
+    }
+
+    #[test]
+    fn test_module_path_at_position_not_on_import() {
+        let source = "module Main\nmain = Math.Vec 1";
+        // Cursor on "Vec" in expression (not import)
+        let offset = source.find("Vec").unwrap();
+        let line = source[..offset].chars().filter(|&c| c == '\n').count() as u32;
+        let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let character = (offset - line_start) as u32;
+        let pos = Position::new(line, character);
+        assert_eq!(module_path_at_position(source, pos), None);
+    }
+
+    #[test]
+    fn test_qualified_name_at_position() {
+        let source = "module Main\nimport Math as M\nmain = M.Vec 1";
+        // Cursor on "Vec" in `M.Vec`
+        let offset = source.find("Vec").unwrap();
+        let line = source[..offset].chars().filter(|&c| c == '\n').count() as u32;
+        let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let character = (offset - line_start) as u32;
+        let pos = Position::new(line, character);
+        assert_eq!(
+            qualified_name_at_position(source, pos),
+            Some(("M".to_string(), "Vec".to_string()))
         );
     }
 }

@@ -75,13 +75,27 @@ pub fn is_const_expr(
 ) -> bool {
     match expr {
         Expr::Lit(_, _) => true,
-        Expr::Var(name, _) | Expr::Con(name, _) => {
-            local_consts.contains(name) || global_consts.contains(name) || is_const_builtin(name)
-        }
+        Expr::Var(name, _)
+        | Expr::Con(name, _)
+        | Expr::Resolved(
+            ResolvedName {
+                original_name: name,
+                ..
+            },
+            _,
+        ) => local_consts.contains(name) || global_consts.contains(name) || is_const_builtin(name),
         Expr::App(_, _, _) => {
             let (callee, args) = flatten_app(expr);
             let callee_is_const = match callee {
-                Expr::Var(name, _) | Expr::Con(name, _) => {
+                Expr::Var(name, _)
+                | Expr::Con(name, _)
+                | Expr::Resolved(
+                    ResolvedName {
+                        original_name: name,
+                        ..
+                    },
+                    _,
+                ) => {
                     local_consts.contains(name)
                         || global_consts.contains(name)
                         || is_const_builtin(name)
@@ -150,6 +164,9 @@ pub fn is_const_expr(
         Expr::Index(_, _, _) => false,
         Expr::OpSection(_, _) => false,
         Expr::RecordUpdate(_, _, _) => false,
+        Expr::Qualified(_, _, _) => {
+            panic!("Expr::Qualified should have been renamed by the Renamer")
+        }
     }
 }
 

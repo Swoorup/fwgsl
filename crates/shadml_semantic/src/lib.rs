@@ -719,6 +719,11 @@ impl SemanticAnalyzer {
                     .iter()
                     .map(|ty| normalize_type_aliases(&self.convert_syntax_type(ty).ty))
                     .collect();
+                let type_suffix = impl_tys
+                    .iter()
+                    .map(format_type_suffix)
+                    .collect::<Vec<_>>()
+                    .join("__");
                 // Collect associated type bindings from AST
                 let mut seen_assoc: HashSet<String> = HashSet::new();
                 let mut assoc_type_bindings: HashMap<String, Ty> = HashMap::new();
@@ -856,6 +861,22 @@ impl SemanticAnalyzer {
                 let mut method_map = HashMap::new();
                 for method in methods {
                     let logical_name = canonical_trait_method_name(trait_name, &method.name);
+                    let mangled = mangle_instance_method(&logical_name, &type_suffix);
+
+                    if let Some(trait_info) = self.traits.get(trait_name).cloned() {
+                        if let Some((_, method_ty)) = trait_info
+                            .methods
+                            .iter()
+                            .find(|(name, _)| name == &logical_name)
+                        {
+                            let concrete_ty =
+                                replace_trait_vars(method_ty, &trait_info.var_ids, &impl_tys);
+                            let concrete_ty =
+                                resolve_assoc_projections(&concrete_ty, &assoc_type_bindings);
+                            self.env.insert(mangled.clone(), Scheme::mono(concrete_ty));
+                        }
+                    }
+
                     method_map.insert(logical_name, method.lowering.clone());
                 }
                 self.builtin_impls.push(BuiltinImplInfo {

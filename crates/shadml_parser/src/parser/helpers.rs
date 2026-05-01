@@ -101,6 +101,8 @@ pub fn insert_pipeline_arg(rhs: Expr, lhs: Expr, span: Span) -> Expr {
                 | Expr::Tuple(_, s)
                 | Expr::Record(_, _, s)
                 | Expr::OpSection(_, s)
+                | Expr::Qualified(_, _, s)
+                | Expr::Resolved(_, s)
                 | Expr::Loop(_, _, _, s)
                 | Expr::RecordUpdate(_, _, s) => *s = span,
             }

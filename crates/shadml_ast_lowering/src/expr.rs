@@ -32,7 +32,14 @@ impl AstLowering {
                 (HirExpr::Lit(hir_lit, ty.clone(), *span), ty)
             }
 
-            Expr::Var(name, span) => {
+            Expr::Var(name, span)
+            | Expr::Resolved(
+                ResolvedName {
+                    original_name: name,
+                    ..
+                },
+                span,
+            ) => {
                 let ty = if let Some(scheme) = env.lookup(name) {
                     self.instantiate_scheme(scheme)
                 } else {
@@ -860,6 +867,10 @@ impl AstLowering {
                     ),
                     result_ty,
                 )
+            }
+
+            Expr::Qualified(_, _, _) => {
+                panic!("Expr::Qualified should have been renamed by the Renamer")
             }
         }
     }

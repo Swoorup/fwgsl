@@ -87,7 +87,14 @@ impl AstLowering {
         constraint_traits: &[(String, Vec<Ty>)],
     ) -> Ty {
         let ty = match ty {
-            Type::Con(name, _) => {
+            Type::Con(name, _)
+            | Type::Resolved(
+                ResolvedName {
+                    original_name: name,
+                    ..
+                },
+                _,
+            ) => {
                 if let Some(expanded) = self.type_aliases.get(name).cloned() {
                     return expanded;
                 }
@@ -187,6 +194,9 @@ impl AstLowering {
                 }
             }
             Type::Unit(_) => Ty::unit(),
+            Type::Qualified(_, _, _) => {
+                panic!("Type::Qualified should have been renamed by the Renamer")
+            }
         };
         normalize_type_aliases(&ty)
     }
@@ -201,7 +211,14 @@ impl AstLowering {
     /// Pure version that doesn't need &mut self (no fresh vars for type vars).
     pub(crate) fn convert_syntax_type_pure(&self, ty: &Type) -> Ty {
         let ty = match ty {
-            Type::Con(name, _) => {
+            Type::Con(name, _)
+            | Type::Resolved(
+                ResolvedName {
+                    original_name: name,
+                    ..
+                },
+                _,
+            ) => {
                 if let Some(expanded) = self.type_aliases.get(name) {
                     return expanded.clone();
                 }
@@ -235,6 +252,9 @@ impl AstLowering {
                 }
             }
             Type::Unit(_) => Ty::unit(),
+            Type::Qualified(_, _, _) => {
+                panic!("Type::Qualified should have been renamed by the Renamer")
+            }
         };
         normalize_type_aliases(&ty)
     }

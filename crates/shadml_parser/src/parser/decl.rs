@@ -552,36 +552,48 @@ impl Parser {
         self.expect(SyntaxKind::KwImport);
         self.skip_trivia();
 
-        let module_path = self.parse_dotted_upper_name();
+        // Parse the module path manually so we can stop before `.*`.
+        let first = self.expect(SyntaxKind::UpperIdent);
+        let mut module_path = self.text_of(&first).to_owned();
+        loop {
+            self.skip_trivia();
+            if !self.at(SyntaxKind::Dot) {
+                break;
+            }
+            let saved_pos = self.pos;
+            self.bump(); // consume `.`
+            self.skip_trivia();
+            if self.at(SyntaxKind::Star) {
+                // Wildcard — backtrack to before the dot and stop
+                self.pos = saved_pos;
+                break;
+            }
+            if self.at(SyntaxKind::UpperIdent) {
+                let part = self.bump();
+                module_path.push('.');
+                module_path.push_str(self.text_of(&part));
+            } else {
+                // Not part of the dotted name — backtrack and stop
+                self.pos = saved_pos;
+                break;
+            }
+        }
         self.skip_trivia();
 
         // Check for wildcard: `import Foo.*`
-        let (module_path, kind) = if self.at(SyntaxKind::Dot) {
-            // Peek ahead for `*`
-            let saved_pos = self.pos;
+        let kind = if self.at(SyntaxKind::Dot) {
             self.bump(); // consume `.`
+            self.skip_trivia();
             if self.at(SyntaxKind::Star) {
                 self.bump(); // consume `*`
                 self.skip_trivia();
-                (module_path, ImportKind::Wildcard)
+                ImportKind::Wildcard
             } else {
-                // Not a wildcard — it's a dotted name continuation, restore
-                self.pos = saved_pos;
-                // Continue parsing the dotted name
-                let mut full_name = module_path;
-                while self.at(SyntaxKind::Dot) {
-                    self.bump();
-                    let part = self.expect(SyntaxKind::UpperIdent);
-                    full_name.push('.');
-                    full_name.push_str(self.text_of(&part));
-                }
-                self.skip_trivia();
-                let kind = self.parse_import_suffix();
-                (full_name, kind)
+                // Unexpected token after dot — treat as All
+                ImportKind::All
             }
         } else {
-            let kind = self.parse_import_suffix();
-            (module_path, kind)
+            self.parse_import_suffix()
         };
 
         // Check for optional postfix `when cfg.x`

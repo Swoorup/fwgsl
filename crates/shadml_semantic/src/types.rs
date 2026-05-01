@@ -66,7 +66,14 @@ impl SemanticAnalyzer {
         constraint_contexts: &[(String, Vec<Ty>)],
     ) -> Ty {
         let ty = match ty {
-            Type::Con(name, span) => {
+            Type::Con(name, span)
+            | Type::Resolved(
+                ResolvedName {
+                    original_name: name,
+                    ..
+                },
+                span,
+            ) => {
                 if let Some(expanded) = self.type_aliases.get(name).cloned() {
                     return expanded;
                 }
@@ -199,6 +206,9 @@ impl SemanticAnalyzer {
                     );
                     Ty::Error
                 }
+            }
+            Type::Qualified(_, _, _) => {
+                panic!("Type::Qualified should have been renamed by the Renamer")
             }
         };
         normalize_type_aliases(&ty)

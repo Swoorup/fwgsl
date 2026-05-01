@@ -20,6 +20,7 @@ module.exports = grammar({
 
   conflicts: ($) => [
     [$.import_declaration],
+    [$.module_path],
     [$.constructor_expression, $.record_expression],
     [$.cfg_declaration],
     [$.function_declaration],
@@ -64,7 +65,11 @@ module.exports = grammar({
       seq(
         "import",
         $.module_path,
-        optional(seq("as", $.upper_identifier)),
+        optional(choice(
+          seq("as", $.upper_identifier),
+          seq("(", commaSep1($.identifier), ")"),
+          seq(".", "*"),
+        )),
         optional(seq("when", $.cfg_predicate)),
       ),
 

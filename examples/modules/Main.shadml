@@ -1,15 +1,23 @@
--- Multi-module example demonstrating the simplified module system.
+-- Multi-module example demonstrating all four import forms.
 --
 -- Module resolution:
 --   - No `module` header needed (derived from file path)
 --   - `import Foo` brings all public names into scope
 --   - `import Foo (bar)` selective import
 --   - `import Foo as F` qualified access
---   - `import Foo.*` wildcard (all sub-modules under Foo/)
+--   - `import Foo.*` wildcard sub-modules
 
--- import Particle
-import Particle (applyForce)
-import Math.Vec
+-- (1) Unqualified import: all public names from Particle
+import Particle
+
+-- (2) Selective import: only scale2 from Math.Vec
+import Math.Vec (scale2)
+
+-- (3) Qualified import: access Utils names via U.double / U.triple
+import Utils as U
+
+-- (4) Wildcard import: Math.Vec and Math.Vec2 available as module aliases
+import Math.*
 
 gravity : Vec<2, F32>
 gravity = [0.0, -9.81]
@@ -19,6 +27,9 @@ simulate dt p =
   let p2 = applyForce gravity dt p
   in step dt p2
 
--- Use dot2 from Math.Vec and kineticEnergy from Particle
 totalEnergy : Particle -> F32
 totalEnergy p = kineticEnergy p
+
+-- Using qualified access via Utils alias
+doubleMass : F32 -> F32
+doubleMass m = U.double m

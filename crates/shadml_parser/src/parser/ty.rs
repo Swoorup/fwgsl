@@ -116,6 +116,23 @@ impl Parser {
             SyntaxKind::UpperIdent => {
                 let tok = self.bump();
                 let name = self.text_of(&tok).to_owned();
+                self.skip_trivia();
+
+                // Qualified type name: UpperIdent . UpperIdent
+                if self.at(SyntaxKind::Dot) {
+                    let dot_pos = self.pos;
+                    self.bump(); // consume `.`
+                    self.skip_trivia();
+                    if self.at(SyntaxKind::UpperIdent) {
+                        let name_tok = self.bump();
+                        let field = self.text_of(&name_tok).to_owned();
+                        let span = tok.span.merge(name_tok.span);
+                        return self.parse_angle_type_args(Type::Qualified(name, field, span));
+                    }
+                    // Not a qualified type — backtrack
+                    self.pos = dot_pos;
+                }
+
                 self.parse_angle_type_args(Type::Con(name, tok.span))
             }
             SyntaxKind::KwSelf => {
@@ -229,6 +246,8 @@ impl Parser {
             | Type::Tuple(_, span)
             | Type::Unit(span)
             | Type::Proj(_, _, span)
+            | Type::Qualified(_, _, span)
+            | Type::Resolved(_, span)
             | Type::Self_(span) => {
                 *span = span.merge(end.span);
             }

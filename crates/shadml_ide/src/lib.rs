@@ -13,10 +13,11 @@ use lsp_types::{
     HoverContents, Location, MarkupContent, MarkupKind, Position, Range, Url,
 };
 use shadml_parser::lexer::Token;
+use shadml_parser::module_resolver::{ModuleGraph, ModuleImport};
 use shadml_parser::parser::{
-    Attribute, ConFields, Decl, DoStmt, Expr, ImportKind, Pat, Program, Type,
+    Attribute, ConFields, Decl, DoStmt, Expr, ImportKind, Pat, Program, ResolvedName, Type,
 };
-use shadml_parser::{lex, Parser};
+use shadml_parser::{lex, Parser, Renamer};
 use shadml_semantic::SemanticAnalyzer;
 use shadml_span::Span;
 use shadml_syntax::SyntaxKind;
@@ -119,6 +120,85 @@ pub struct IdeState {
     pub prelude: Option<DocumentState>,
 }
 
+/// Workspace-level index that holds a per-module `DocumentIndex` for every
+/// module in the project, plus the module graph for cross-module resolution.
+#[derive(Clone, Default)]
+pub struct WorkspaceIndex {
+    /// module_name → DocumentIndex built from that module's original source.
+    pub modules: HashMap<String, DocumentIndex>,
+    /// module_name → file path.
+    pub module_paths: HashMap<String, PathBuf>,
+    /// module_name → import table (for resolving aliases).
+    pub imports: HashMap<String, Vec<ModuleImport>>,
+}
+
+impl WorkspaceIndex {
+    /// Build a `WorkspaceIndex` from a `ModuleGraph`.
+    /// Each module is indexed from its *original* unmerged AST so that
+    /// declaration names match the source text exactly.
+    pub fn build(graph: &ModuleGraph) -> Self {
+        let mut modules = HashMap::new();
+        let mut module_paths = HashMap::new();
+        let mut imports = HashMap::new();
+
+        for module in &graph.modules {
+            let source = match std::fs::read_to_string(&module.path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let idx = IndexBuilder::new(&source).build(&module.program);
+            modules.insert(module.name.clone(), idx);
+            module_paths.insert(module.name.clone(), module.path.clone());
+            imports.insert(module.name.clone(), module.imports.clone());
+        }
+
+        Self {
+            modules,
+            module_paths,
+            imports,
+        }
+    }
+
+    /// Resolve a qualified name like `F.bar` (where `F` is a module alias in
+    /// `from_module`) to the target module's `DocumentIndex` and the symbol
+    /// id of `bar` within that index.
+    ///
+    /// Returns `(module_name, doc_index, symbol_id)` on success.
+    pub fn resolve_qualified(
+        &self,
+        module_alias: &str,
+        name: &str,
+        from_module: &str,
+    ) -> Option<(&str, &DocumentIndex, usize)> {
+        // 1. Look up from_module's imports to find the real module path.
+        let import_table = self.imports.get(from_module)?;
+        let real_module = import_table.iter().find_map(|imp| match &imp.kind {
+            ImportKind::Qualified(alias) if alias == module_alias => Some(imp.module_path.as_str()),
+            ImportKind::Wildcard => {
+                // For wildcard imports, the alias might be the full path.
+                if imp.module_path == module_alias {
+                    Some(imp.module_path.as_str())
+                } else {
+                    None
+                }
+            }
+            ImportKind::All | ImportKind::Selective(_) | ImportKind::Qualified(_) => {
+                // `import Foo` or `import Foo (bar)` — no alias, can't use qualified syntax.
+                // Other qualified imports with different aliases are skipped.
+                None
+            }
+        })?;
+
+        // 2. Get that module's DocumentIndex.
+        let doc_index = self.modules.get(real_module)?;
+
+        // 3. Find the symbol named `name` in the DocumentIndex.
+        let symbol_id = doc_index.symbols.iter().find(|s| s.name == name)?.id;
+
+        Some((real_module, doc_index, symbol_id))
+    }
+}
+
 #[derive(Clone)]
 struct ScopeFrame {
     span: Span,
@@ -158,7 +238,9 @@ impl DocumentIndex {
     }
 
     fn add_definition_span(&mut self, symbol_id: usize, span: Span) {
-        let symbol = &mut self.symbols[symbol_id];
+        let Some(symbol) = self.symbols.get_mut(symbol_id) else {
+            return;
+        };
         let is_new = !symbol.definition_spans.contains(&span);
         if is_new {
             symbol.definition_spans.push(span);
@@ -308,7 +390,9 @@ impl<'a> IndexBuilder<'a> {
                     self.top_level_values.insert(name.clone(), id);
                     id
                 });
-                self.index.symbols[symbol_id].kind = SymbolKind::EntryPoint;
+                if let Some(s) = self.index.symbols.get_mut(symbol_id) {
+                    s.kind = SymbolKind::EntryPoint;
+                }
                 self.index.add_definition_span(symbol_id, name_span);
             }
             Decl::BuiltinTypeDecl {
@@ -331,7 +415,9 @@ impl<'a> IndexBuilder<'a> {
                     self.top_level_types.insert(name.clone(), id);
                     id
                 });
-                self.index.symbols[symbol_id].kind = SymbolKind::BuiltinType;
+                if let Some(s) = self.index.symbols.get_mut(symbol_id) {
+                    s.kind = SymbolKind::BuiltinType;
+                }
                 self.index.add_definition_span(symbol_id, name_span);
             }
             Decl::DataDecl {
@@ -355,7 +441,9 @@ impl<'a> IndexBuilder<'a> {
                     self.top_level_types.insert(name.clone(), id);
                     id
                 });
-                self.index.symbols[type_id].kind = SymbolKind::DataType;
+                if let Some(s) = self.index.symbols.get_mut(type_id) {
+                    s.kind = SymbolKind::DataType;
+                }
                 self.index.add_definition_span(type_id, type_name_span);
 
                 for constructor in constructors {
@@ -392,7 +480,9 @@ impl<'a> IndexBuilder<'a> {
                     self.top_level_types.insert(name.clone(), id);
                     id
                 });
-                self.index.symbols[symbol_id].kind = SymbolKind::TypeAlias;
+                if let Some(s) = self.index.symbols.get_mut(symbol_id) {
+                    s.kind = SymbolKind::TypeAlias;
+                }
                 self.index.add_definition_span(symbol_id, name_span);
             }
             Decl::BindingDecl { name, span, .. } => {
@@ -997,7 +1087,15 @@ impl<'a> IndexBuilder<'a> {
                         .push_occurrence(symbol_id, *span, OccurrenceRole::Reference);
                 }
             }
-            Expr::Var(name, span) | Expr::Con(name, span) => {
+            Expr::Var(name, span)
+            | Expr::Con(name, span)
+            | Expr::Resolved(
+                ResolvedName {
+                    original_name: name,
+                    ..
+                },
+                span,
+            ) => {
                 if let Some(symbol_id) = self.resolve_value(name, frames) {
                     self.index
                         .push_occurrence(symbol_id, *span, OccurrenceRole::Reference);
@@ -1220,12 +1318,41 @@ impl<'a> IndexBuilder<'a> {
                     self.walk_expr(value, frames);
                 }
             }
+            Expr::Qualified(_, name, span) => {
+                // Qualified names are cross-module references.  Register as
+                // unresolved so hover still shows the identifier.
+                let symbol_id = *self
+                    .unresolved_symbols
+                    .entry(name.clone())
+                    .or_insert_with(|| {
+                        self.index.push_symbol(NewSymbol {
+                            name: name.clone(),
+                            namespace: Namespace::Value,
+                            kind: SymbolKind::Unresolved,
+                            span: *span,
+                            scope_span: *span,
+                            scope_depth: 0,
+                            visible_from: span.start,
+                            container: None,
+                        })
+                    });
+                self.index
+                    .push_occurrence(symbol_id, *span, OccurrenceRole::Reference);
+            }
         }
     }
 
     fn walk_type(&mut self, ty: &Type, frames: &mut Vec<ScopeFrame>) {
         match ty {
-            Type::Con(name, span) | Type::Var(name, span) => {
+            Type::Con(name, span)
+            | Type::Var(name, span)
+            | Type::Resolved(
+                ResolvedName {
+                    original_name: name,
+                    ..
+                },
+                span,
+            ) => {
                 if let Some(symbol_id) = self.resolve_type(name, frames) {
                     self.index
                         .push_occurrence(symbol_id, *span, OccurrenceRole::Reference);
@@ -1245,20 +1372,21 @@ impl<'a> IndexBuilder<'a> {
                 self.walk_type(base, frames);
                 // Try to resolve the projected name as an associated type
                 if let Some(symbol_id) = self.top_level_types.get(name).copied() {
-                    let symbol = &self.index.symbols[symbol_id];
-                    if symbol.kind == SymbolKind::AssociatedType {
-                        // Compute the span of just the name token (after the dot)
-                        if let Some(name_span) = self.first_name_span(name, *span) {
-                            self.index.push_occurrence(
-                                symbol_id,
-                                name_span,
-                                OccurrenceRole::Reference,
-                            );
+                    if let Some(symbol) = self.index.symbols.get(symbol_id) {
+                        if symbol.kind == SymbolKind::AssociatedType {
+                            // Compute the span of just the name token (after the dot)
+                            if let Some(name_span) = self.first_name_span(name, *span) {
+                                self.index.push_occurrence(
+                                    symbol_id,
+                                    name_span,
+                                    OccurrenceRole::Reference,
+                                );
+                            }
                         }
                     }
                 }
             }
-            Type::Nat(_, _) | Type::Unit(_) | Type::Self_(_) => {}
+            Type::Nat(_, _) | Type::Unit(_) | Type::Self_(_) | Type::Qualified(_, _, _) => {}
         }
     }
 
@@ -1280,7 +1408,12 @@ impl<'a> IndexBuilder<'a> {
                 }
             }
             Type::Proj(base, _, _) => self.collect_type_vars(base, out),
-            Type::Con(_, _) | Type::Nat(_, _) | Type::Unit(_) | Type::Self_(_) => {}
+            Type::Con(_, _)
+            | Type::Nat(_, _)
+            | Type::Unit(_)
+            | Type::Self_(_)
+            | Type::Resolved(_, _)
+            | Type::Qualified(_, _, _) => {}
         }
     }
 
@@ -1624,8 +1757,10 @@ pub fn hover(state: &IdeState, pos: Position) -> Option<Hover> {
             }
 
             if let Some(occurrence) = state.index.symbol_at_offset(offset) {
-                let symbol = &state.index.symbols[occurrence.symbol_id];
-                if symbol.kind != SymbolKind::Unresolved {
+                let Some(symbol) = state.index.symbols.get(occurrence.symbol_id) else {
+                    return None;
+                };
+                if symbol.kind != SymbolKind::Unresolved && symbol.kind != SymbolKind::Import {
                     return Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
                             kind: MarkupKind::Markdown,
@@ -1749,17 +1884,26 @@ pub fn goto_definition(
     let offset = position_to_offset(&state.source, pos)? as u32;
     let tokens = lex(&state.source);
     if let Some(occurrence) = state.index.symbol_at_offset(offset) {
-        let symbol = &state.index.symbols[occurrence.symbol_id];
-        if symbol.kind != SymbolKind::Unresolved {
+        let Some(symbol) = state.index.symbols.get(occurrence.symbol_id) else {
+            return None;
+        };
+        if symbol.kind != SymbolKind::Unresolved && symbol.kind != SymbolKind::Import {
             if occurrence.role == OccurrenceRole::Definition
                 && symbol.kind == SymbolKind::PatternBinding
             {
                 if let Some(field_occurrence) = state.index.occurrences.iter().find(|candidate| {
                     candidate.span == occurrence.span
                         && candidate.role == OccurrenceRole::Reference
-                        && state.index.symbols[candidate.symbol_id].kind == SymbolKind::RecordField
+                        && state
+                            .index
+                            .symbols
+                            .get(candidate.symbol_id)
+                            .is_some_and(|s| s.kind == SymbolKind::RecordField)
                 }) {
-                    let field_symbol = &state.index.symbols[field_occurrence.symbol_id];
+                    let Some(field_symbol) = state.index.symbols.get(field_occurrence.symbol_id)
+                    else {
+                        return None;
+                    };
                     let locations = field_symbol
                         .definition_spans
                         .iter()
@@ -1933,11 +2077,12 @@ pub fn build_ide_state_with_imports(
     file_path: Option<&Path>,
     search_paths: &[PathBuf],
     is_compiler_prelude: bool,
-) -> (IdeState, Vec<String>) {
+) -> (IdeState, Vec<String>, Option<ModuleGraph>) {
     let mut parser = Parser::new(source);
     let original_program = parser.parse_program();
     let mut user_program = original_program.clone();
     let mut errors = Vec::new();
+    let mut module_graph: Option<ModuleGraph> = None;
 
     if let Some(path) = file_path {
         if shadml_parser::has_imports(&user_program) {
@@ -1945,7 +2090,14 @@ pub fn build_ide_state_with_imports(
             match shadml_parser::resolve_modules(path, user_program.clone(), search_paths, &reader)
             {
                 Ok(graph) => {
-                    user_program = shadml_parser::merge_modules(&graph);
+                    // Run the Renamer to resolve all cross-module qualified and
+                    // unqualified imports before semantic analysis. This replaces
+                    // merge_modules while also converting Expr::Qualified /
+                    // Type::Qualified into their Resolved counterparts.
+                    let mut renamer = Renamer::new(&graph);
+                    user_program = renamer.run();
+                    errors.extend(renamer.diagnostics().iter().map(|d| d.message.clone()));
+                    module_graph = Some(graph);
                 }
                 Err(errs) => {
                     errors.extend(errs.iter().map(|e| e.to_string()));
@@ -1990,12 +2142,13 @@ pub fn build_ide_state_with_imports(
             prelude,
         },
         errors,
+        module_graph,
     )
 }
 
 /// Convenience wrapper: build an `IdeState` without import resolution.
 pub fn build_ide_state(source: &str, is_compiler_prelude: bool) -> IdeState {
-    let (state, _) = build_ide_state_with_imports(source, None, &[], is_compiler_prelude);
+    let (state, _, _) = build_ide_state_with_imports(source, None, &[], is_compiler_prelude);
     state
 }
 
@@ -2833,7 +2986,15 @@ fn format_scheme(engine: &InferEngine, scheme: &Scheme) -> String {
 
 fn format_type(ty: &Type) -> String {
     match ty {
-        Type::Con(name, _) | Type::Var(name, _) => name.clone(),
+        Type::Con(name, _)
+        | Type::Var(name, _)
+        | Type::Resolved(
+            ResolvedName {
+                original_name: name,
+                ..
+            },
+            _,
+        ) => name.clone(),
         Type::Nat(n, _) => n.to_string(),
         Type::App(f, a, _) => format!("{} {}", format_type(f), format_type(a)),
         Type::Arrow(a, b, _) => format!("{} -> {}", format_type(a), format_type(b)),
@@ -2845,6 +3006,7 @@ fn format_type(ty: &Type) -> String {
         Type::Unit(_) => "()".to_owned(),
         Type::Proj(base, name, _) => format!("{}.{}", format_type(base), name),
         Type::Self_(_) => "Self".to_owned(),
+        Type::Qualified(module, name, _) => format!("{}.{}", module, name),
     }
 }
 
@@ -3571,7 +3733,7 @@ step dt dx p =
         let search_root = sdf_scene_path.parent().expect("shaders dir").to_path_buf();
         let sdf_scene_source = std::fs::read_to_string(&sdf_scene_path).expect("read SdfScene");
 
-        let (state, _errors) = build_ide_state_with_imports(
+        let (state, _errors, _graph) = build_ide_state_with_imports(
             &sdf_scene_source,
             Some(&sdf_scene_path),
             &[search_root],
@@ -3611,7 +3773,7 @@ step dt dx p =
         let search_root = sdf_scene_path.parent().expect("shaders dir").to_path_buf();
         let sdf_scene_source = std::fs::read_to_string(&sdf_scene_path).expect("read SdfScene");
 
-        let (state, _errors) = build_ide_state_with_imports(
+        let (state, _errors, _graph) = build_ide_state_with_imports(
             &sdf_scene_source,
             Some(&sdf_scene_path),
             &[search_root],
@@ -3647,5 +3809,101 @@ step dt dx p =
             !ranges.is_empty(),
             "getFrameSize should be found in GlobalBindings, got no ranges"
         );
+    }
+
+    // ── WorkspaceIndex tests ───────────────────────────────────────────────
+
+    #[test]
+    fn workspace_index_builds_from_graph() {
+        let tmp = std::env::temp_dir();
+        let utils_path = tmp.join("shadml_test_utils.shadml");
+        let main_path = tmp.join("shadml_test_main.shadml");
+        let utils_src = "module Utils\nhelper x = x";
+        let main_src = "module Main\nimport Utils\nmain = helper 1";
+        std::fs::write(&utils_path, utils_src).unwrap();
+        std::fs::write(&main_path, main_src).unwrap();
+
+        let utils_module = shadml_parser::module_resolver::ParsedModule {
+            name: "Utils".to_string(),
+            path: utils_path.clone(),
+            program: {
+                let mut p = shadml_parser::Parser::new(utils_src);
+                p.parse_program()
+            },
+            imports: vec![],
+        };
+        let main_module = shadml_parser::module_resolver::ParsedModule {
+            name: "Main".to_string(),
+            path: main_path.clone(),
+            program: {
+                let mut p = shadml_parser::Parser::new(main_src);
+                p.parse_program()
+            },
+            imports: vec![shadml_parser::module_resolver::ModuleImport {
+                module_path: "Utils".to_string(),
+                kind: shadml_parser::parser::ImportKind::All,
+            }],
+        };
+
+        let graph = shadml_parser::module_resolver::ModuleGraph {
+            modules: vec![utils_module, main_module],
+        };
+
+        let idx = WorkspaceIndex::build(&graph);
+        assert_eq!(idx.modules.len(), 2);
+        assert!(idx.modules.contains_key("Utils"));
+        assert!(idx.modules.contains_key("Main"));
+
+        // cleanup
+        let _ = std::fs::remove_file(&utils_path);
+        let _ = std::fs::remove_file(&main_path);
+    }
+
+    #[test]
+    fn workspace_index_resolve_qualified() {
+        let tmp = std::env::temp_dir();
+        let utils_path = tmp.join("shadml_test_utils2.shadml");
+        let main_path = tmp.join("shadml_test_main2.shadml");
+        let utils_src = "module Utils\nhelper x = x";
+        let main_src = "module Main\nimport Utils as U\nmain = U.helper 1";
+        std::fs::write(&utils_path, utils_src).unwrap();
+        std::fs::write(&main_path, main_src).unwrap();
+
+        let utils_module = shadml_parser::module_resolver::ParsedModule {
+            name: "Utils".to_string(),
+            path: utils_path.clone(),
+            program: {
+                let mut p = shadml_parser::Parser::new(utils_src);
+                p.parse_program()
+            },
+            imports: vec![],
+        };
+        let main_module = shadml_parser::module_resolver::ParsedModule {
+            name: "Main".to_string(),
+            path: main_path.clone(),
+            program: {
+                let mut p = shadml_parser::Parser::new(main_src);
+                p.parse_program()
+            },
+            imports: vec![shadml_parser::module_resolver::ModuleImport {
+                module_path: "Utils".to_string(),
+                kind: shadml_parser::parser::ImportKind::Qualified("U".to_string()),
+            }],
+        };
+
+        let graph = shadml_parser::module_resolver::ModuleGraph {
+            modules: vec![utils_module, main_module],
+        };
+
+        let idx = WorkspaceIndex::build(&graph);
+        let result = idx.resolve_qualified("U", "helper", "Main");
+        assert!(result.is_some(), "U.helper should resolve");
+        let (module, _doc_index, symbol_id) = result.unwrap();
+        assert_eq!(module, "Utils");
+        assert_eq!(_doc_index.symbols[symbol_id].name, "helper");
+
+        // cleanup
+        let _ = std::fs::remove_file(&utils_path);
+        let _ = std::fs::remove_file(&main_path);
     }
 }

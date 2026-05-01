@@ -2019,6 +2019,10 @@
           "named": true
         },
         {
+          "type": "identifier",
+          "named": true
+        },
+        {
           "type": "module_path",
           "named": true
         },
