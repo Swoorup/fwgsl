@@ -1,3 +1,6 @@
+> [!WARNING]
+> Development moved to private 
+
 # shadml
 
 `shadml` is a pure functional language for WebGPU that compiles to [WGSL](https://www.w3.org/TR/WGSL/).
